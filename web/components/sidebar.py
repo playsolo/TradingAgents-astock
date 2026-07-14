@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import date
 
 import streamlit as st
@@ -9,12 +10,24 @@ import streamlit as st
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.checkpointer import clear_checkpoint
 from tradingagents.llm_clients.model_catalog import MODEL_OPTIONS
+from web.analysis_queue import (
+    advance_queue,
+    append_jobs,
+    clear_queue,
+    format_queue_job_caption,
+    mark_serial_queue_session,
+    parse_ticker_inputs,
+    queue_snapshot,
+    resolve_ticker_batch,
+)
 from web.history import (
     clear_incomplete_task,
     get_history,
     get_incomplete_history,
     record_incomplete_task,
 )
+from web.navigation import navigate
+from web.stock_display import format_list_ticker_label
 
 # Provider display names in recommended order
 _PROVIDERS: list[tuple[str, str]] = [
@@ -34,6 +47,23 @@ _PROVIDER_DISPLAY = [name for name, _ in _PROVIDERS]
 _PROVIDER_KEYS = [key for _, key in _PROVIDERS]
 
 
+def _default_provider_index() -> int:
+    """默认选中的供应商下标。
+
+    刷新页面（新会话）后 session_state 会清空，下拉框退回第一项。设置环境变量
+    DEFAULT_LLM_PROVIDER（如 deepseek）即可把默认项固定，免去每次手动重选。
+    非法/未设置时回退到列表第一项（保持上游默认 MiniMax）。
+    """
+    pref = os.getenv("DEFAULT_LLM_PROVIDER", "").strip().lower()
+    if pref in _PROVIDER_KEYS:
+        return _PROVIDER_KEYS.index(pref)
+    return 0
+
+
+def _normalize_us_ticker(raw: str) -> str:
+    return (raw or "").strip().upper()
+
+
 def _resolve_user_input(raw: str) -> tuple[str, str | None]:
     """Resolve raw user input to (ticker_code, error_msg).
 
@@ -49,12 +79,120 @@ def _resolve_user_input(raw: str) -> tuple[str, str | None]:
         return "", str(e)
 
 
+def _resolve_user_input_for_market(raw: str, market: str) -> tuple[str, str | None]:
+    """Resolve ticker for CN (A-share) or US (Yahoo-style symbol) markets."""
+    if market == "US":
+        code = _normalize_us_ticker(raw)
+        if not code:
+            return "", "请输入美股代码，例如 AAPL / NVDA / BRK.B"
+        if any(ch.isspace() for ch in code):
+            return "", "美股代码不能包含空格"
+        return code, None
+    return _resolve_user_input(raw)
+
+
 def _clear_analysis_artifacts(ticker: str, trade_date: str) -> None:
     clear_incomplete_task(ticker, trade_date)
     clear_checkpoint(DEFAULT_CONFIG["data_cache_dir"], ticker, trade_date)
 
 
-def _render_analysis_controls(raw_ticker: str, trade_date_value: date) -> None:
+def _first_raw_ticker(raw_tickers: str) -> str:
+    tokens = parse_ticker_inputs(raw_tickers)
+    return tokens[0] if tokens else ""
+
+
+def _submit_analysis_jobs(raw_tickers: str, market: str, trade_date: str) -> None:
+    """Start the first job immediately when idle; otherwise enqueue the whole batch."""
+    tokens = parse_ticker_inputs(raw_tickers)
+    if not tokens:
+        st.error("❌ 请输入至少一个股票代码")
+        return
+
+    jobs, errors = resolve_ticker_batch(
+        tokens,
+        market=market,
+        trade_date=trade_date,
+        resolve_cn=_resolve_cn_or_raise,
+    )
+    for msg in errors:
+        st.warning(f"⚠️ 已跳过 {msg}")
+    if not jobs:
+        st.error("❌ 没有可分析的有效代码")
+        return
+
+    tracker = st.session_state.get("tracker")
+    is_busy = tracker is not None and tracker.is_running
+    if is_busy:
+        exclude = None
+        if tracker.ticker and tracker.trade_date:
+            market_now = getattr(tracker, "market", None) or market
+            exclude = {(market_now, tracker.ticker, tracker.trade_date)}
+        added = append_jobs(st.session_state, jobs, exclude=exclude)
+        st.success(
+            f"✅ 已加入分析队列 {added} 只（当前队列 {len(queue_snapshot(st.session_state))}）"
+        )
+        return
+
+    head, *rest = jobs
+    if market == "CN":
+        for token in tokens:
+            code, err = _resolve_user_input(token)
+            if not err and code != token.strip():
+                st.success(f"✅ {token.strip()} → {code}")
+                break
+    # Idle “开始分析” starts a new batch; drop any leftover queued jobs.
+    clear_queue(st.session_state)
+    append_jobs(st.session_state, rest)
+    if rest:
+        mark_serial_queue_session(st.session_state, True)
+    st.session_state["start_analysis"] = head.to_start_request()
+    st.session_state["viewing_history"] = None
+    st.session_state["viewing_watchlist"] = False
+    st.query_params.clear()
+    st.query_params["view"] = "home"
+
+
+def _resolve_cn_or_raise(raw: str) -> str:
+    code, err = _resolve_user_input(raw)
+    if err:
+        raise ValueError(err)
+    return code
+
+
+def _render_analysis_queue() -> None:
+    jobs = queue_snapshot(st.session_state)
+    if not jobs:
+        return
+    st.markdown("#### 分析队列")
+    st.caption("串行执行，与观察池无关；完成后自动开始下一只。刷新后会从本地恢复。")
+    for idx, job in enumerate(jobs, start=1):
+        st.caption(format_queue_job_caption(job, idx))
+
+    tracker = st.session_state.get("tracker")
+    is_busy = tracker is not None and tracker.is_running
+    cont_col, clear_col = st.columns(2)
+    if cont_col.button(
+        "继续队列",
+        key="resume_analysis_queue",
+        use_container_width=True,
+        disabled=is_busy,
+        type="primary",
+    ):
+        head = advance_queue(st.session_state)
+        if head is not None:
+            mark_serial_queue_session(st.session_state, True)
+            st.session_state["start_analysis"] = head.to_start_request()
+            st.session_state["viewing_history"] = None
+            st.session_state["viewing_watchlist"] = False
+            st.query_params.clear()
+            st.query_params["view"] = "home"
+            st.rerun()
+    if clear_col.button("清空队列", key="clear_analysis_queue", use_container_width=True):
+        clear_queue(st.session_state)
+        st.rerun()
+
+
+def _render_analysis_controls(raw_tickers: str, trade_date_value: date) -> None:
     tracker = st.session_state.get("tracker")
     is_running = tracker is not None and tracker.is_running
     trade_date = trade_date_value.strftime("%Y-%m-%d")
@@ -93,13 +231,18 @@ def _render_analysis_controls(raw_ticker: str, trade_date_value: date) -> None:
             )
         st.rerun()
 
-    can_stop = tracker is not None or bool(raw_ticker.strip())
+    can_stop = (
+        tracker is not None
+        or bool(raw_tickers.strip())
+        or bool(queue_snapshot(st.session_state))
+    )
     if stop_col.button(
         "停止",
         key="sidebar_stop_analysis",
         use_container_width=True,
         disabled=not can_stop,
     ):
+        clear_queue(st.session_state)
         target_ticker = tracker.ticker if tracker is not None and tracker.ticker else ""
         target_date = (
             tracker.trade_date
@@ -108,7 +251,10 @@ def _render_analysis_controls(raw_ticker: str, trade_date_value: date) -> None:
         )
 
         if not target_ticker:
-            target_ticker, err = _resolve_user_input(raw_ticker)
+            market = st.session_state.get("analysis_market", "CN")
+            target_ticker, err = _resolve_user_input_for_market(
+                _first_raw_ticker(raw_tickers), market
+            )
             if err:
                 st.error(f"❌ {err}")
                 return
@@ -123,7 +269,7 @@ def _render_analysis_controls(raw_ticker: str, trade_date_value: date) -> None:
             _clear_analysis_artifacts(target_ticker, target_date)
 
         st.session_state["viewing_history"] = None
-        st.success("已清空当前进度；下一次开始分析会从头生成。")
+        st.success("已停止当前分析并清除队列；下一次开始会从头生成。")
         st.rerun()
 
     if tracker is not None and tracker.stop_requested:
@@ -136,9 +282,10 @@ def _render_llm_config() -> None:
     provider_idx = st.selectbox(
         "LLM 供应商",
         range(len(_PROVIDERS)),
+        index=_default_provider_index(),
         format_func=lambda i: _PROVIDER_DISPLAY[i],
         key="llm_provider_idx",
-        help="选择你配置了 API Key 的供应商",
+        help="选择你配置了 API Key 的供应商（默认项可用环境变量 DEFAULT_LLM_PROVIDER 固定）",
     )
     provider_key = _PROVIDER_KEYS[provider_idx]
     st.session_state["llm_provider"] = provider_key
@@ -212,11 +359,30 @@ def render_sidebar() -> None:
     st.markdown("---")
     st.markdown("#### 新建分析")
 
-    ticker = st.text_input(
-        "股票代码",
-        placeholder="例: 300750 或 宁德时代",
-        key="input_ticker",
-        help="输入6位A股代码或中文股票全称",
+    market_label = st.radio(
+        "市场",
+        options=["A股", "美股"],
+        horizontal=True,
+        key="input_market_label",
+        help="美股将通过本机 TradingAgents 项目子进程分析，进度实时回传",
+    )
+    market = "US" if market_label == "美股" else "CN"
+    st.session_state["analysis_market"] = market
+
+    ticker_input = st.text_area(
+        "股票代码（可多个）",
+        placeholder=(
+            "每行一个，或逗号分隔\n例: AAPL, NVDA, BRK.B"
+            if market == "US"
+            else "每行一个，或逗号分隔\n例: 300750, 600519\n或: 宁德时代"
+        ),
+        key="input_tickers",
+        height=88,
+        help=(
+            "支持一次输入多只美股代码（Yahoo 风格）。分析为串行队列，不会加入观察池。"
+            if market == "US"
+            else "支持一次输入多只 A 股代码或中文全称。分析为串行队列，不会加入观察池。"
+        ),
     )
 
     trade_date = st.date_input(
@@ -227,31 +393,52 @@ def render_sidebar() -> None:
 
     with st.expander("⚙️ 模型配置", expanded=False):
         _render_llm_config()
+        if market == "US":
+            st.caption(
+                "美股模式会把此处模型配置转发到本机 TradingAgents；"
+                "API Key 仍读对应项目的 `.env`。"
+                "路径可用环境变量 US_TRADINGAGENTS_ROOT / US_TRADINGAGENTS_PYTHON 覆盖。"
+            )
 
     tracker = st.session_state.get("tracker")
     is_busy = tracker is not None and tracker.is_running
     is_stopping = is_busy and tracker.stop_requested
+    has_input = bool(parse_ticker_inputs(ticker_input or ""))
+    if is_stopping:
+        start_label = "停止中..."
+    elif is_busy:
+        start_label = "加入分析队列"
+    else:
+        start_label = "开始分析"
 
     if st.button(
-        "开始分析" if not is_busy else "停止中..." if is_stopping else "分析进行中...",
+        start_label,
         use_container_width=True,
-        disabled=is_busy or not ticker,
+        disabled=(is_stopping or not has_input),
         type="primary",
     ):
-        resolved_code, err = _resolve_user_input(ticker)
-        if err:
-            st.error(f"❌ {err}")
-        else:
-            if resolved_code != ticker.strip():
-                st.success(f"✅ {ticker.strip()} → {resolved_code}")
-            st.session_state["start_analysis"] = {
-                "ticker": resolved_code,
-                "trade_date": trade_date.strftime("%Y-%m-%d"),
-                "fresh": True,
-            }
-            st.session_state["viewing_history"] = None
+        _submit_analysis_jobs(
+            ticker_input or "",
+            market,
+            trade_date.strftime("%Y-%m-%d"),
+        )
 
-    _render_analysis_controls(ticker, trade_date)
+    _render_analysis_controls(ticker_input or "", trade_date)
+    _render_analysis_queue()
+
+    if market == "CN":
+        st.markdown("---")
+        st.markdown("#### 观察")
+        from tradingagents.watchlist.store import default_store
+
+        watch_items = default_store().list_items()
+        watch_n = len(watch_items)
+        alert_n = sum(len(i.alerts) for i in watch_items)
+        watch_label = f"📡 观察池（{watch_n}）"
+        if alert_n:
+            watch_label += f" · {alert_n}告警"
+        if st.button(watch_label, key="nav_watchlist", use_container_width=True):
+            navigate("watch")
 
     st.markdown("---")
     st.markdown("#### 未完成任务")
@@ -268,8 +455,8 @@ def render_sidebar() -> None:
                 "running": "进行中",
             }.get(entry.get("status"), "可继续")
             step = entry.get("checkpoint_step")
-            step_label = f" · step {step}" if step is not None else ""
-            label = f"{t}  ·  {d}  ·  {status_label}{step_label}"
+            step_label = f"step {step}" if step is not None else ""
+            label = format_list_ticker_label(t, d, status_label, step_label)
             if st.button(
                 label,
                 key=f"resume_{t}_{d}",
@@ -279,8 +466,14 @@ def render_sidebar() -> None:
                 st.session_state["start_analysis"] = {
                     "ticker": t,
                     "trade_date": d,
+                    "market": (
+                        "CN" if t.isdigit() and len(t) == 6 else "US"
+                    ),
                 }
                 st.session_state["viewing_history"] = None
+                st.session_state["viewing_watchlist"] = False
+                st.query_params.clear()
+                st.query_params["view"] = "home"
 
     st.markdown("---")
     st.markdown("#### 历史记录")
@@ -292,10 +485,9 @@ def render_sidebar() -> None:
 
     for entry in history[:20]:
         t, d = entry["ticker"], entry["date"]
-        label = f"{t}  ·  {d}"
+        label = format_list_ticker_label(t, d)
         if st.button(label, key=f"hist_{t}_{d}", use_container_width=True):
-            st.session_state["viewing_history"] = entry["path"]
-            st.session_state["start_analysis"] = None
+            navigate("history", ticker=t, date=d, path=entry["path"])
 
     st.markdown("---")
     st.caption("⚠️ 仅供学习研究，不构成投资建议")

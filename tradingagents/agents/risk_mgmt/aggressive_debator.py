@@ -1,4 +1,6 @@
 
+from tradingagents.agents.utils.agent_utils import analysis_date_instruction
+
 
 def create_aggressive_debator(llm):
     def aggressive_node(state) -> dict:
@@ -18,8 +20,10 @@ def create_aggressive_debator(llm):
         lockup_report = state.get("lockup_report", "")
 
         trader_decision = state["trader_investment_plan"]
+        date_rule = analysis_date_instruction(state.get("trade_date", ""))
 
         prompt = f"""As the Aggressive Risk Analyst evaluating an A-share (China mainland) stock, your role is to champion high-reward opportunities and bold strategies. Focus on the potential upside, growth potential, and momentum—even when these come with elevated risk. Counter the conservative and neutral analysts with data-driven rebuttals.
+{date_rule}
 
 A-Share Aggressive Framework — leverage these China-specific upside arguments:
 - Limit-Up Momentum (涨停板效应): In A-shares, consecutive limit-ups create powerful momentum; T+1 actually helps by preventing same-day profit-taking, allowing multi-day runs

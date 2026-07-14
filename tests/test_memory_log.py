@@ -62,6 +62,7 @@ def _make_pm_state(past_context=""):
     """Minimal AgentState dict for portfolio_manager_node."""
     return {
         "company_of_interest": "NVDA",
+        "trade_date": "2026-07-14",
         "past_context": past_context,
         "risk_debate_state": {
             "history": "Risk debate history.",
@@ -597,6 +598,14 @@ class TestPortfolioManagerInjection:
         pm_node(state)
         assert "Lessons from prior decisions and outcomes" in captured["prompt"]
         assert "Great call." in captured["prompt"]
+
+    def test_pm_prompt_requires_analysis_date(self):
+        captured = {}
+        llm = _structured_pm_llm(captured)
+        pm_node = create_portfolio_manager(llm)
+        pm_node(_make_pm_state())
+        assert "2026-07-14" in captured["prompt"]
+        assert "Analysis date" in captured["prompt"]
 
     def test_pm_no_past_context_no_section(self):
         """PM prompt omits the lessons section entirely when past_context is empty."""

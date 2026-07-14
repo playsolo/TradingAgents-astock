@@ -7,7 +7,11 @@ import functools
 from langchain_core.messages import AIMessage
 
 from tradingagents.agents.schemas import TraderProposal, render_trader_proposal
-from tradingagents.agents.utils.agent_utils import build_instrument_context, get_language_instruction
+from tradingagents.agents.utils.agent_utils import (
+    analysis_date_instruction,
+    build_instrument_context,
+    get_language_instruction,
+)
 from tradingagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
@@ -21,6 +25,7 @@ def create_trader(llm):
         company_name = state["company_of_interest"]
         instrument_context = build_instrument_context(company_name)
         investment_plan = state["investment_plan"]
+        date_rule = analysis_date_instruction(state.get("trade_date", ""))
 
         # Collect A-stock specific analyst reports
         policy_report = state.get("policy_report", "")
@@ -59,7 +64,8 @@ def create_trader(llm):
                     f"Based on a comprehensive analysis by a team of analysts (including market, "
                     f"sentiment, news, fundamentals, policy, capital flow, and lockup/reduction "
                     f"specialists), here is an investment plan for {company_name}.\n\n"
-                    f"{instrument_context}\n\n"
+                    f"{instrument_context}\n"
+                    f"{date_rule}\n\n"
                     f"Proposed Investment Plan:\n{investment_plan}\n\n"
                     + (f"Additional A-Stock Analyst Context:\n{astock_context}\n\n" if astock_context else "")
                     + "Leverage these insights to craft a precise transaction proposal."

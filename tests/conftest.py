@@ -31,6 +31,13 @@ def _dummy_api_keys(monkeypatch):
         monkeypatch.setenv(env_var, os.environ.get(env_var, "placeholder"))
 
 
+@pytest.fixture(autouse=True)
+def _isolate_analysis_queue(tmp_path_factory, monkeypatch):
+    """Keep analysis-queue persistence out of the developer's home directory."""
+    path = tmp_path_factory.mktemp("analysis_queue") / "analysis_queue.json"
+    monkeypatch.setenv("TRADINGAGENTS_ANALYSIS_QUEUE_PATH", str(path))
+
+
 @pytest.fixture()
 def mock_llm_client():
     client = MagicMock()

@@ -1,5 +1,6 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from tradingagents.agents.utils.agent_utils import (
+    analysis_date_instruction,
     build_instrument_context,
     get_concept_blocks,
     get_dragon_tiger_board,
@@ -67,6 +68,7 @@ def create_hot_money_tracker(llm):
             "\n4. 所属概念板块及当日板块涨幅"
             "\n5. 当日是否上榜热门股及题材归因"
             "\n6. 资金面总体判断"
+            + analysis_date_instruction(current_date)
             + get_language_instruction()
         )
 

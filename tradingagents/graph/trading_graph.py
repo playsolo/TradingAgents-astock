@@ -298,20 +298,25 @@ class TradingAgentsGraph:
         if updates:
             self.memory_log.batch_update_with_outcomes(updates)
 
-    def propagate(self, company_name, trade_date):
+    def propagate(self, company_name, trade_date, extra_past_context: str = ""):
         """Run the trading agents graph for a company on a specific date.
 
         When ``checkpoint_enabled`` is set in config, the graph is recompiled
         with a per-ticker SqliteSaver so a crashed run can resume from the last
         successful node on a subsequent invocation with the same ticker+date.
+
+        ``extra_past_context`` is prepended to memory-log past_context (e.g. watchlist baseline).
         """
-        return self._run_graph(company_name, trade_date)
+        return self._run_graph(
+            company_name, trade_date, extra_past_context=extra_past_context
+        )
 
     def prepare_graph_run(
         self,
         company_name,
         trade_date,
         callbacks: Optional[List] = None,
+        extra_past_context: str = "",
     ) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any], Optional[int]]:
         """Prepare graph input/args for a fresh or resumed run.
 
@@ -361,6 +366,9 @@ class TradingAgentsGraph:
         # Initialize state only for fresh runs. Passing a new initial state to
         # LangGraph would start a new run and replay completed nodes.
         past_context = self.memory_log.get_past_context(company_name)
+        extra = (extra_past_context or "").strip()
+        if extra:
+            past_context = f"{extra}\n\n{past_context}".strip() if past_context else extra
         init_agent_state = self.propagator.create_initial_state(
             company_name, trade_date, past_context=past_context
         )
@@ -395,9 +403,11 @@ class TradingAgentsGraph:
             self._checkpointer_ctx = None
             self.graph = self.workflow.compile()
 
-    def _run_graph(self, company_name, trade_date):
+    def _run_graph(self, company_name, trade_date, extra_past_context: str = ""):
         """Execute the graph and write the resulting state to disk and memory log."""
-        init_agent_state, args, _ = self.prepare_graph_run(company_name, trade_date)
+        init_agent_state, args, _ = self.prepare_graph_run(
+            company_name, trade_date, extra_past_context=extra_past_context
+        )
 
         try:
             if self.debug:

@@ -45,6 +45,29 @@ def _display_report_text(text: Any, ticker: str, final_state: dict[str, Any]) ->
     return normalize_stock_mentions(cleaned, ticker, final_state)
 
 
+def resolve_report_market(
+    ticker: str,
+    *,
+    sidebar_market: str | None = None,
+    tracker_market: str | None = None,
+) -> str:
+    """Decide if a report is A-share or US for UI gating (watchlist etc.).
+
+    Prefer ticker shape, then tracker.market. Sidebar market is ignored because
+    the radio can change after a run completes.
+    """
+    code = (ticker or "").strip().upper()
+    if code.isdigit() and len(code) == 6:
+        return "CN"
+    if tracker_market in {"CN", "US"}:
+        return tracker_market
+    if any(ch.isalpha() for ch in code):
+        return "US"
+    if sidebar_market in {"CN", "US"}:
+        return sidebar_market
+    return "CN"
+
+
 def render_report(
     final_state: dict[str, Any],
     ticker: str,
@@ -89,7 +112,7 @@ def render_report(
 
     # Markdown export always works (no font dependency); PDF is generated
     # lazily and guarded so a PDF/font failure never crashes the results page.
-    col_md, col_pdf, col_spacer = st.columns([1, 1, 2])
+    col_md, col_pdf, col_watch = st.columns([1, 1, 1])
     with col_md:
         md_text = generate_markdown(final_state, ticker, trade_date, signal)
         st.download_button(
@@ -116,6 +139,33 @@ def render_report(
                 use_container_width=True,
                 help=f"PDF 生成失败，请改用 Markdown 导出。原因：{exc}",
             )
+    with col_watch:
+        tracker = st.session_state.get("tracker")
+        market = resolve_report_market(
+            ticker,
+            tracker_market=getattr(tracker, "market", None),
+        )
+        if market == "US":
+            st.button(
+                "📡 观察池（仅A股）",
+                use_container_width=True,
+                disabled=True,
+                key=f"add_watch_{ticker}_{trade_date}",
+                help="美股分析结果暂不支持加入观察池",
+            )
+        elif st.button("📡 加入观察池", use_container_width=True, key=f"add_watch_{ticker}_{trade_date}"):
+            from tradingagents.watchlist.service import add_from_analysis, resolve_log_path
+
+            try:
+                add_from_analysis(
+                    final_state,
+                    ticker=ticker,
+                    trade_date=trade_date,
+                    log_path=resolve_log_path(ticker, trade_date),
+                )
+                st.success(f"已加入观察池：{ticker}（仅 A 股 · 本机运行时定时复核）")
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"加入观察池失败：{exc}")
 
     st.markdown("---")
 

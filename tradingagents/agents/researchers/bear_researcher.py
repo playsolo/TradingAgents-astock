@@ -1,3 +1,4 @@
+from tradingagents.agents.utils.agent_utils import analysis_date_instruction
 
 
 def create_bear_researcher(llm):
@@ -15,8 +16,10 @@ def create_bear_researcher(llm):
         hot_money_report = state.get("hot_money_report", "")
         lockup_report = state.get("lockup_report", "")
         data_quality_summary = state.get("data_quality_summary", "")
+        date_rule = analysis_date_instruction(state.get("trade_date", ""))
 
         prompt = f"""You are a Bear Analyst making the case against investing in this A-share (China mainland) stock. Your goal is to present a well-reasoned argument emphasizing risks, challenges, and negative indicators unique to the Chinese market. Leverage the provided research and data to highlight potential downsides and counter bullish arguments effectively.
+{date_rule}
 
 A-Share Bear Framework — prioritize these China-specific risk factors:
 - Policy Headwinds: Sudden regulatory crackdowns (e.g. industry rectification, antitrust), CSRC window guidance (窗口指导), sector-wide trading restrictions, or political risk signals

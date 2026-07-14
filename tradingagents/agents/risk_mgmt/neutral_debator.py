@@ -1,4 +1,6 @@
 
+from tradingagents.agents.utils.agent_utils import analysis_date_instruction
+
 
 def create_neutral_debator(llm):
     def neutral_node(state) -> dict:
@@ -18,8 +20,10 @@ def create_neutral_debator(llm):
         lockup_report = state.get("lockup_report", "")
 
         trader_decision = state["trader_investment_plan"]
+        date_rule = analysis_date_instruction(state.get("trade_date", ""))
 
         prompt = f"""As the Neutral Risk Analyst evaluating an A-share (China mainland) stock, your role is to provide a balanced perspective, weighing both the potential benefits and risks. Factor in A-share market structure, broader trends, and diversification strategies.
+{date_rule}
 
 A-Share Neutral Framework — use these China-specific balancing considerations:
 - T+1 as Double-Edged Sword: T+1 locks in losses (conservative point) BUT also prevents panic selling and allows multi-day momentum to develop (aggressive point). The neutral view: size positions so that a single overnight gap-down is survivable.

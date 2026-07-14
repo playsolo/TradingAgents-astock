@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import signal
 import threading
 import time
 from dataclasses import dataclass, field
@@ -32,6 +34,7 @@ class ProgressTracker:
 
     ticker: str = ""
     trade_date: str = ""
+    market: str = "CN"  # "CN" | "US"
     start_time: float = field(default_factory=time.time)
 
     is_running: bool = False
@@ -39,6 +42,10 @@ class ProgressTracker:
     is_paused: bool = False
     stop_requested: bool = False
     error: Optional[str] = None
+
+    # Mutable pipeline definition (US mode uses a shorter stage list).
+    stages: list[dict[str, str]] = field(default_factory=lambda: list(PIPELINE_STAGES))
+    bridge_pid: Optional[int] = None
 
     current_stage: str = ""
     completed_stages: list[str] = field(default_factory=list)
@@ -62,6 +69,22 @@ class ProgressTracker:
     def __post_init__(self) -> None:
         self._pause_gate.set()
 
+    def _signal_bridge(self, sig: int) -> None:
+        """Best-effort signal to US bridge process group (or process)."""
+        pid = self.bridge_pid
+        if not pid:
+            return
+        try:
+            if os.name != "nt":
+                os.killpg(pid, sig)
+            else:
+                os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                os.kill(pid, sig)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+
     def pause(self) -> bool:
         """Pause pipeline advancement after the current streamed step finishes."""
         with self._lock:
@@ -75,7 +98,12 @@ class ProgressTracker:
                 return False
             self.is_paused = True
             self._pause_gate.clear()
-            return True
+            bridge_pid = self.bridge_pid
+            market = self.market
+        # Freeze US subprocess so stdout pipe cannot fill while paused.
+        if market == "US" and bridge_pid and os.name != "nt":
+            self._signal_bridge(signal.SIGSTOP)
+        return True
 
     def resume(self) -> bool:
         """Allow the runner thread to continue to the next streamed step."""
@@ -84,7 +112,11 @@ class ProgressTracker:
                 return False
             self.is_paused = False
             self._pause_gate.set()
-            return True
+            bridge_pid = self.bridge_pid
+            market = self.market
+        if market == "US" and bridge_pid and os.name != "nt":
+            self._signal_bridge(signal.SIGCONT)
+        return True
 
     def request_stop(self) -> bool:
         """Request cancellation and clear user-visible progress immediately."""
@@ -103,7 +135,15 @@ class ProgressTracker:
             self.tokens_in = 0
             self.tokens_out = 0
             self._pause_gate.set()
-            return True
+            bridge_pid = self.bridge_pid
+            market = self.market
+        # Unblock SIGSTOP'd children, then terminate the US bridge promptly so
+        # the runner thread cannot remain stuck in a blocking readline.
+        if market == "US" and bridge_pid:
+            if os.name != "nt":
+                self._signal_bridge(signal.SIGCONT)
+            self._signal_bridge(signal.SIGTERM)
+        return True
 
     def wait_if_paused(self) -> None:
         self._pause_gate.wait()
@@ -124,6 +164,7 @@ class ProgressTracker:
             self.tool_calls = 0
             self.tokens_in = 0
             self.tokens_out = 0
+            self.bridge_pid = None
             self._pause_gate.set()
 
     def mark_stage_active(self, stage_id: str) -> None:

@@ -2,13 +2,77 @@
 
 from __future__ import annotations
 
+import json
 import re
+import threading
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 
 def _clean_stock_name(name: str) -> str:
     return "".join(ch for ch in str(name) if ch.isprintable()).strip()
+
+
+class StockNameCache:
+    """代码→中文名本地 JSON 缓存（默认 ~/.tradingagents/stock_names.json）。"""
+
+    def __init__(self, path: Path | None = None):
+        self.path = Path(path) if path else (
+            Path.home() / ".tradingagents" / "stock_names.json"
+        )
+        self._lock = threading.RLock()
+        self._mem: dict[str, str] | None = None
+
+    def _load(self) -> dict[str, str]:
+        if self._mem is not None:
+            return self._mem
+        if not self.path.exists():
+            self._mem = {}
+            return self._mem
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                data = json.load(f)
+            names = data.get("names") if isinstance(data, dict) else {}
+            self._mem = {
+                str(k).upper(): _clean_stock_name(str(v))
+                for k, v in (names or {}).items()
+                if str(k).strip() and str(v).strip()
+            }
+        except (OSError, json.JSONDecodeError, TypeError):
+            self._mem = {}
+        return self._mem
+
+    def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"version": 1, "names": self._load()}
+        tmp = self.path.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True)
+        tmp.replace(self.path)
+
+    def get(self, code: str) -> str | None:
+        code = str(code or "").strip().upper()
+        if not code:
+            return None
+        with self._lock:
+            name = self._load().get(code)
+            return name or None
+
+    def set(self, code: str, name: str) -> None:
+        code = str(code or "").strip().upper()
+        clean = _clean_stock_name(name)
+        if not code or not clean:
+            return
+        with self._lock:
+            mem = self._load()
+            if mem.get(code) == clean:
+                return
+            mem[code] = clean
+            self._save()
+
+
+_NAME_CACHE = StockNameCache()
 
 
 def _looks_like_stock_name(value: str) -> bool:
@@ -70,21 +134,53 @@ def _resolve_display_code(ticker: str) -> str:
     return code
 
 
+@lru_cache(maxsize=2048)
+def _tencent_name(code: str) -> str | None:
+    """单码腾讯行情取名（HTTP，秒级）；列表 UI 必须走这条，禁止同步拉 mootdx 全市场。"""
+    if not re.match(r"^[036]\d{5}$", code):
+        return None
+    try:
+        from tradingagents.dataflows.a_stock import _tencent_quote
+
+        q = (_tencent_quote([code]) or {}).get(code) or {}
+        name = _clean_stock_name(str(q.get("name") or ""))
+        return name or None
+    except Exception:
+        return None
+
+
+def _mootdx_name_if_cached(code: str) -> str | None:
+    """仅当名称映射已在内存建好时读取；绝不触发 _build_name_code_map。"""
+    try:
+        from tradingagents.dataflows import a_stock
+
+        c2n = getattr(a_stock, "_code_to_name", None)
+        if not c2n:
+            return None
+        name = _clean_stock_name(str(c2n.get(code, "")))
+        return name or None
+    except Exception:
+        return None
+
+
 @lru_cache(maxsize=1024)
 def resolve_stock_name(ticker: str) -> str | None:
-    """Return the A-share name for a ticker code when local market data can resolve it."""
+    """Return the A-share name for a ticker code when local market data can resolve it.
+
+    顺序：本地 JSON 缓存 → 腾讯行情（命中后回写）→ 已在内存的 mootdx 映射。
+    列表 UI 多数时候只需读本地文件，不再每次联网。
+    """
     code = _resolve_display_code(ticker)
     if not re.match(r"^[036]\d{5}$", code):
         return None
 
-    try:
-        from tradingagents.dataflows.a_stock import _build_name_code_map
+    cached = _NAME_CACHE.get(code)
+    if cached:
+        return cached
 
-        _, code_to_name = _build_name_code_map()
-    except Exception:
-        return None
-
-    name = _clean_stock_name(code_to_name.get(code, ""))
+    name = _tencent_name(code) or _mootdx_name_if_cached(code)
+    if name:
+        _NAME_CACHE.set(code, name)
     return name or None
 
 
@@ -172,6 +268,15 @@ def stock_display_label(ticker: str, final_state: dict | None = None) -> str:
     if name and name != code:
         return f"{code} {name}"
     return code
+
+
+def format_list_ticker_label(ticker: str, *parts: str) -> str:
+    """Sidebar / 观察池列表用：`代码 名称 · 附加信息`。"""
+    head = stock_display_label(ticker)
+    suffix = [p for p in parts if p]
+    if not suffix:
+        return head
+    return "  ·  ".join([head, *suffix])
 
 
 def stock_display_parts(ticker: str, final_state: dict | None = None) -> tuple[str, str | None]:

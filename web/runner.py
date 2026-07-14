@@ -87,7 +87,13 @@ def _infer_active_stage(tracker: ProgressTracker) -> None:
             return
 
 
-def _run(ticker: str, trade_date: str, config: dict, tracker: ProgressTracker) -> None:
+def _run(
+    ticker: str,
+    trade_date: str,
+    config: dict,
+    tracker: ProgressTracker,
+    extra_past_context: str = "",
+) -> None:
     """Execute the full pipeline in the current thread."""
     from cli.stats_handler import StatsCallbackHandler
     from tradingagents.graph.trading_graph import TradingAgentsGraph
@@ -104,6 +110,7 @@ def _run(ticker: str, trade_date: str, config: dict, tracker: ProgressTracker) -
         ticker,
         trade_date,
         callbacks=[stats],
+        extra_past_context=extra_past_context,
     )
 
     last_chunk: dict[str, Any] = {}
@@ -166,17 +173,49 @@ def _run(ticker: str, trade_date: str, config: dict, tracker: ProgressTracker) -
         graph.close_graph_run()
 
 
+def _run_us(ticker: str, trade_date: str, config: dict, tracker: ProgressTracker) -> None:
+    from web.us_bridge.client import run_us_analysis
+
+    llm_config = {
+        "llm_provider": config.get("llm_provider"),
+        "deep_think_llm": config.get("deep_think_llm"),
+        "quick_think_llm": config.get("quick_think_llm"),
+        "backend_url": config.get("backend_url"),
+        "output_language": config.get("output_language") or "Chinese",
+        "max_debate_rounds": config.get("max_debate_rounds"),
+        "max_risk_discuss_rounds": config.get("max_risk_discuss_rounds"),
+    }
+    run_us_analysis(
+        ticker=ticker,
+        trade_date=trade_date,
+        llm_config=llm_config,
+        tracker=tracker,
+    )
+
+
 def run_analysis_in_thread(
     ticker: str,
     trade_date: str,
     config: dict,
     tracker: ProgressTracker,
+    market: str = "CN",
+    extra_past_context: str = "",
 ) -> threading.Thread:
     """Launch the pipeline in a daemon thread. Returns the thread handle."""
     tracker.ticker = ticker
     tracker.trade_date = trade_date
+    tracker.market = market if market in {"CN", "US"} else "CN"
     tracker.is_running = True
-    tracker.mark_stage_active("market")
+
+    if tracker.market == "US":
+        from web.us_bridge.protocol import US_PIPELINE_STAGES
+
+        tracker.stages = list(US_PIPELINE_STAGES)
+        tracker.mark_stage_active("market")
+    else:
+        tracker.stages = list(PIPELINE_STAGES)
+        tracker.mark_stage_active("market")
+
     record_incomplete_task(
         ticker,
         trade_date,
@@ -185,12 +224,29 @@ def run_analysis_in_thread(
     )
 
     def _target() -> None:
+        # Worker threads hit pandas→pyarrow; ensure safe allocator before DF work.
+        from tradingagents.runtime.arrow_safety import ensure_arrow_safe_for_current_thread
+
+        ensure_arrow_safe_for_current_thread()
         try:
-            _run(ticker, trade_date, config, tracker)
+            if tracker.market == "US":
+                _run_us(ticker, trade_date, config, tracker)
+            else:
+                _run(
+                    ticker,
+                    trade_date,
+                    config,
+                    tracker,
+                    extra_past_context=extra_past_context,
+                )
         except Exception as exc:
             if tracker.stop_requested:
                 try:
-                    _discard_stopped_run(ticker, trade_date, config, tracker)
+                    if tracker.market == "US":
+                        clear_incomplete_task(ticker, trade_date)
+                        tracker.mark_stopped()
+                    else:
+                        _discard_stopped_run(ticker, trade_date, config, tracker)
                 except Exception:
                     traceback.print_exc()
                 return

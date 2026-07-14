@@ -24,23 +24,30 @@ def _results_dir() -> Path:
 def get_history() -> list[dict[str, str]]:
     """Scan saved analysis logs and return a sorted list (newest first).
 
+    Sorted by analysis completion time (log file mtime), not trade date.
     Each entry: {"ticker": "300750", "date": "2026-05-12", "path": "/abs/path/...json"}
     """
     root = _results_dir()
     if not root.exists():
         return []
 
-    entries: list[dict[str, str]] = []
+    entries: list[tuple[float, dict[str, str]]] = []
     for log_file in root.rglob("full_states_log_*.json"):
         match = re.search(r"full_states_log_(\d{4}-\d{2}-\d{2})\.json$", log_file.name)
         if not match:
             continue
+        try:
+            mtime = log_file.stat().st_mtime
+        except OSError:
+            continue
         date = match.group(1)
         ticker = log_file.parent.parent.name
-        entries.append({"ticker": ticker, "date": date, "path": str(log_file)})
+        entries.append(
+            (mtime, {"ticker": ticker, "date": date, "path": str(log_file)})
+        )
 
-    entries.sort(key=lambda e: e["date"], reverse=True)
-    return entries
+    entries.sort(key=lambda item: item[0], reverse=True)
+    return [entry for _, entry in entries]
 
 
 def _completed_key(ticker: str, trade_date: str) -> tuple[str, str]:

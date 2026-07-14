@@ -95,6 +95,7 @@ class TestRenderResearchPlan:
 def _make_trader_state():
     return {
         "company_of_interest": "NVDA",
+        "trade_date": "2026-07-14",
         "investment_plan": "**Recommendation**: Buy\n**Rationale**: ...\n**Strategic Actions**: ...",
     }
 
@@ -147,6 +148,16 @@ class TestTraderAgent:
         prompt = captured["prompt"]
         assert any("Proposed Investment Plan" in m["content"] for m in prompt)
 
+    def test_prompt_requires_analysis_date(self):
+        captured = {}
+        llm = _structured_trader_llm(captured)
+        trader = create_trader(llm)
+        trader(_make_trader_state())
+        prompt = captured["prompt"]
+        joined = " ".join(m["content"] for m in prompt)
+        assert "2026-07-14" in joined
+        assert "analysis date" in joined.lower() or "Analysis date" in joined
+
     def test_falls_back_to_freetext_when_structured_unavailable(self):
         plain_response = (
             "**Action**: Sell\n\nGuidance cut hits margins.\n\n"
@@ -168,6 +179,7 @@ class TestTraderAgent:
 def _make_rm_state():
     return {
         "company_of_interest": "NVDA",
+        "trade_date": "2026-07-14",
         "investment_debate_state": {
             "history": "Bull and bear arguments here.",
             "bull_history": "Bull says...",
@@ -221,6 +233,15 @@ class TestResearchManagerAgent:
         prompt = captured["prompt"]
         for tier in ("Buy", "Overweight", "Hold", "Underweight", "Sell"):
             assert f"**{tier}**" in prompt, f"missing {tier} in prompt"
+
+    def test_prompt_requires_analysis_date(self):
+        captured = {}
+        llm = _structured_rm_llm(captured)
+        rm = create_research_manager(llm)
+        rm(_make_rm_state())
+        prompt = captured["prompt"]
+        assert "2026-07-14" in prompt
+        assert "Analysis date" in prompt
 
     def test_falls_back_to_freetext_when_structured_unavailable(self):
         plain_response = "**Recommendation**: Sell\n\n**Rationale**: ...\n\n**Strategic Actions**: ..."

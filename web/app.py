@@ -4,28 +4,48 @@ from __future__ import annotations
 
 import os
 import sys
-import time
 from pathlib import Path
-
-import streamlit as st
-from dotenv import load_dotenv
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+# Must run before streamlit/pandas/pyarrow import: mimalloc TLS SIGSEGV on
+# analysis worker threads (macOS "Python quit", exit 139).
+from tradingagents.runtime.arrow_safety import (  # noqa: E402
+    configure_arrow_memory_pool,
+    warm_arrow_for_worker_threads,
+)
+
+configure_arrow_memory_pool()
+
+from dotenv import load_dotenv  # noqa: E402
+
 # override=True：让 .env 的值优先于进程里可能残留的空/旧环境变量（#66）。
 # 注意：load_dotenv 仅在进程启动时执行一次，启动后修改 .env 仍需重启 Web 服务才生效。
 load_dotenv(_PROJECT_ROOT / ".env", override=True)
+# Re-assert after dotenv in case .env overwrote the pool.
+configure_arrow_memory_pool()
+warm_arrow_for_worker_threads()
+
+import streamlit as st  # noqa: E402
 
 from tradingagents.default_config import DEFAULT_CONFIG  # noqa: E402
 
-from web.components.progress_panel import render_progress  # noqa: E402
+from web.analysis_queue import (  # noqa: E402
+    hydrate_queue,
+    prepend_job,
+    take_next_job,
+)
+from web.components.progress_panel import render_running_progress  # noqa: E402
 from web.components.report_viewer import render_report  # noqa: E402
 from web.components.sidebar import render_sidebar  # noqa: E402
+from web.components.watch_page import render_watch_page  # noqa: E402
 from web.history import clear_incomplete_task, extract_signal, load_analysis  # noqa: E402
+from web.navigation import apply_query_to_session  # noqa: E402
 from web.progress import ProgressTracker  # noqa: E402
 from web.runner import run_analysis_in_thread  # noqa: E402
+from tradingagents.watchlist.scheduler import start_watchlist_scheduler  # noqa: E402
 
 # ── Page config ──────────────────────────────────────────────────────────────
 
@@ -35,6 +55,31 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# URL → session（观察池 / 历史可刷新、可收藏）——须在 set_page_config 之后
+apply_query_to_session()
+
+# Restore waiting queue after browser refresh (session_state is empty on new session).
+# Do NOT auto-start the next job here: Streamlit refresh drops the tracker but the
+# previous analysis daemon thread may still be running; launching another ticker
+# would overlap runs.
+_restored = hydrate_queue(st.session_state)
+if _restored > 0:
+    st.session_state["queue_advance_notice"] = (
+        f"已从本地恢复分析队列 {_restored} 只"
+        "（不会自动开跑，避免与刷新前仍在后台的分析重叠；空闲时点侧栏「继续队列」）"
+    )
+
+
+# 默认可由独立守护 tradingagents-watch 负责到点观察（不开 Web 也跑）。
+# 若要改回「仅 Web 存活时调度」，启动前设 WATCHLIST_SCHEDULER=1。
+if os.getenv("WATCHLIST_SCHEDULER", "0").strip() not in {"0", "false", "off"}:
+    start_watchlist_scheduler(config_provider=lambda: {
+        "llm_provider": st.session_state.get("llm_provider", "deepseek"),
+        "quick_think_llm": st.session_state.get("quick_think_llm", "deepseek-chat"),
+        "deep_think_llm": st.session_state.get("deep_think_llm", "deepseek-chat"),
+        "backend_url": (st.session_state.get("llm_base_url") or os.getenv("BACKEND_URL") or None),
+    })
 
 # ── Custom CSS ───────────────────────────────────────────────────────────────
 
@@ -171,11 +216,66 @@ def _build_config() -> dict:
         "news_data": "a_stock",
         "signal_data": "a_stock",
     }
-    config["max_debate_rounds"] = 1
-    config["max_risk_discuss_rounds"] = 1
+    # 与 CLI Research Depth=Deep 对齐：多空辩论 + 风险三方辩论各 5 轮
+    config["max_debate_rounds"] = 5
+    config["max_risk_discuss_rounds"] = 5
     config["checkpoint_enabled"] = True
     config["output_language"] = "Chinese"
     return config
+
+
+# ── Start Analysis helpers ───────────────────────────────────────────────────
+
+def _infer_market(ticker: str, explicit: str | None = None) -> str:
+    if explicit in {"CN", "US"}:
+        return explicit
+    code = (ticker or "").strip()
+    if code.isdigit() and len(code) == 6:
+        return "CN"
+    return "US"
+
+
+def _begin_analysis(start_req: dict) -> ProgressTracker:
+    """Create tracker + background thread for one analysis request."""
+    market = _infer_market(start_req["ticker"], start_req.get("market"))
+    st.session_state["analysis_market"] = market
+
+    if start_req.get("fresh"):
+        clear_incomplete_task(start_req["ticker"], start_req["trade_date"])
+        if market == "CN":
+            from tradingagents.graph.checkpointer import clear_checkpoint
+
+            clear_checkpoint(
+                DEFAULT_CONFIG["data_cache_dir"],
+                start_req["ticker"],
+                start_req["trade_date"],
+            )
+
+    tracker = ProgressTracker(
+        ticker=start_req["ticker"],
+        trade_date=start_req["trade_date"],
+        market=market,
+    )
+    st.session_state["tracker"] = tracker
+    st.session_state["viewing_history"] = None
+    st.session_state["viewing_watchlist"] = False
+    if start_req.get("watchlist_refresh"):
+        st.session_state["watchlist_refresh_pending"] = {
+            "ticker": start_req["ticker"],
+            "trade_date": start_req["trade_date"],
+        }
+    else:
+        # 非观察池升级启动时清掉残留 pending，避免误回写基准
+        st.session_state["watchlist_refresh_pending"] = None
+    run_analysis_in_thread(
+        ticker=start_req["ticker"],
+        trade_date=start_req["trade_date"],
+        config=_build_config(),
+        tracker=tracker,
+        market=market,
+        extra_past_context=str(start_req.get("past_context") or ""),
+    )
+    return tracker
 
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
@@ -184,41 +284,104 @@ with st.sidebar:
     render_sidebar()
 
 
-# ── Handle "Start Analysis" trigger ──────────────────────────────────────────
+# ── Handle "Start Analysis" trigger from sidebar / resume ───────────────────
 
 start_req = st.session_state.pop("start_analysis", None)
 if start_req:
-    if start_req.get("fresh"):
-        from tradingagents.graph.checkpointer import clear_checkpoint
-
-        clear_incomplete_task(start_req["ticker"], start_req["trade_date"])
-        clear_checkpoint(
-            DEFAULT_CONFIG["data_cache_dir"],
-            start_req["ticker"],
-            start_req["trade_date"],
-        )
-
-    tracker = ProgressTracker(
-        ticker=start_req["ticker"],
-        trade_date=start_req["trade_date"],
-    )
-    st.session_state["tracker"] = tracker
-    st.session_state["viewing_history"] = None
-    run_analysis_in_thread(
-        ticker=start_req["ticker"],
-        trade_date=start_req["trade_date"],
-        config=_build_config(),
-        tracker=tracker,
-    )
+    _begin_analysis(start_req)
 
 
 # ── Main area state machine ─────────────────────────────────────────────────
 
 tracker: ProgressTracker | None = st.session_state.get("tracker")
 viewing_history: str | None = st.session_state.get("viewing_history")
+viewing_watchlist: bool = bool(st.session_state.get("viewing_watchlist"))
+
+
+def _consume_watchlist_refresh_pending(active: ProgressTracker) -> None:
+    """Apply or clear watchlist baseline refresh before queue auto-advance."""
+    pending = st.session_state.get("watchlist_refresh_pending")
+    if not (
+        isinstance(pending, dict)
+        and pending.get("ticker") == active.ticker
+        and pending.get("trade_date") == active.trade_date
+    ):
+        return
+
+    if active.is_complete and active.final_state:
+        from tradingagents.watchlist.service import refresh_from_analysis, resolve_log_path
+
+        try:
+            from datetime import datetime
+
+            from tradingagents.watchlist.store import default_store
+
+            refreshed = refresh_from_analysis(
+                active.final_state,
+                ticker=active.ticker,
+                trade_date=active.trade_date,
+                log_path=resolve_log_path(active.ticker, active.trade_date),
+            )
+            stance = refreshed.baseline.stance
+            summary = (
+                f"完整再分析已完成（基准日 {active.trade_date}）| 立场 {stance}"
+                + (
+                    f" | {refreshed.baseline.thesis_summary}"
+                    if refreshed.baseline.thesis_summary
+                    else ""
+                )
+            )
+            default_store().mark_observed(
+                active.ticker,
+                datetime.now().isoformat(timespec="seconds"),
+                summary=summary,
+                briefing=None,
+            )
+            st.success(f"观察池基准已更新：{active.ticker}（完整再分析）")
+        except Exception as exc:  # noqa: BLE001
+            st.warning(f"分析完成，但更新观察池基准失败：{exc}")
+        st.session_state["watchlist_refresh_pending"] = None
+        return
+
+    if active.error:
+        st.session_state["watchlist_refresh_pending"] = None
+        st.warning("完整再分析失败，观察池基准未更新。可修复后从观察池重试。")
+
+
+# Queue auto-advance must run even if the user navigated to 观察池 / 历史
+# while a serial job was finishing; otherwise the queue stalls.
+# Start the next job in-process (no start_analysis round-trip) so sidebar
+# cannot clobber the handoff on the following rerun.
+if tracker and not tracker.is_running and (tracker.is_complete or tracker.error):
+    _consume_watchlist_refresh_pending(tracker)
+    if tracker.is_complete:
+        next_job = take_next_job(st.session_state, finished_ticker=tracker.ticker)
+    else:
+        next_job = take_next_job(
+            st.session_state,
+            finished_ticker=tracker.ticker,
+            error=str(tracker.error),
+        )
+    if next_job is not None:
+        try:
+            tracker = _begin_analysis(next_job.to_start_request())
+        except Exception as exc:  # noqa: BLE001
+            prepend_job(st.session_state, next_job)
+            st.session_state.pop("queue_advance_notice", None)
+            st.error(f"启动队列下一只失败，已放回队列队首：{exc}")
+    viewing_history = st.session_state.get("viewing_history")
+    viewing_watchlist = bool(st.session_state.get("viewing_watchlist"))
+
+queue_notice = st.session_state.pop("queue_advance_notice", None)
+if queue_notice:
+    st.info(queue_notice)
+
+# State 0.5: Watchlist observation page
+if viewing_watchlist and not (tracker and tracker.is_running):
+    render_watch_page()
 
 # State 1: Viewing a historical analysis
-if viewing_history:
+elif viewing_history:
     try:
         state = load_analysis(viewing_history)
         signal = extract_signal(state)
@@ -228,11 +391,9 @@ if viewing_history:
     except Exception as exc:
         st.error(f"加载失败: {exc}")
 
-# State 2: Analysis running
+# State 2: Analysis running — fragment polls progress; no sleep (keeps sidebar responsive)
 elif tracker and tracker.is_running:
-    render_progress(tracker)
-    time.sleep(2)
-    st.rerun()
+    render_running_progress()
 
 # State 3: Analysis complete
 elif tracker and tracker.is_complete:
@@ -277,8 +438,8 @@ else:
                 <span style="color: #ff5a1f;">Trading</span><span style="color: #f5f1eb;">Agents</span><span style="color: #f5f1eb;">-</span><span style="color: #ff5a1f;">Astock</span>
             </div>
             <div style="color: #888; font-size: 1.1rem; max-width: 500px; line-height: 1.6;">
-                A股多Agent投研分析系统<br>
-                7位AI分析师 → 质量门控 → 多空辩论 → 风控评估 → 最终决策
+                A股 / 美股多Agent投研分析<br>
+                侧栏选择市场 → 分析师辩论 → 风控评估 → 最终决策
             </div>
             <div style="
                 margin-top: 2rem;
@@ -288,7 +449,7 @@ else:
                 color: #666;
                 font-size: 0.9rem;
             ">
-                ← 在左侧输入股票代码，开始分析
+                ← 在左侧选择 A股或美股，输入一只或多只代码后开始分析
             </div>
             <div style="
                 margin-top: 2.5rem;

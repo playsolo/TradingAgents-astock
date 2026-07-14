@@ -23,6 +23,19 @@ def test_stock_display_label_resolves_code_to_name(monkeypatch):
     assert stock_display.stock_display_label("600370.SH") == "600370 退市博元"
 
 
+def test_format_list_ticker_label_includes_name_and_suffix(monkeypatch):
+    monkeypatch.setattr(stock_display, "resolve_stock_name", lambda ticker: "卫星化学")
+
+    assert (
+        stock_display.format_list_ticker_label("002648", "2026-07-14")
+        == "002648 卫星化学  ·  2026-07-14"
+    )
+    assert (
+        stock_display.format_list_ticker_label("002648", "基准 Hold", "仓位 10%")
+        == "002648 卫星化学  ·  基准 Hold  ·  仓位 10%"
+    )
+
+
 def test_stock_display_label_removes_invisible_name_chars(monkeypatch):
     monkeypatch.setattr(stock_display, "resolve_stock_name", lambda ticker: "*ST三房\x00")
 

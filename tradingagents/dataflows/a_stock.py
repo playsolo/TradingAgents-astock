@@ -15,6 +15,7 @@ Data sources:
 from __future__ import annotations
 
 from typing import Annotated
+from contextlib import contextmanager
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 import json as _json
@@ -24,9 +25,15 @@ import math
 import random
 import re as _re
 import socket
+import threading
 import time
 import uuid
 import urllib.request
+
+from tradingagents.runtime.arrow_safety import configure_arrow_memory_pool
+
+# Before pandas/pyarrow: avoid mimalloc TLS SIGSEGV on Streamlit worker threads.
+configure_arrow_memory_pool()
 
 import pandas as pd
 import requests as _requests
@@ -75,41 +82,110 @@ def _normalize_ticker(symbol: str) -> str:
 _name_to_code: dict[str, str] | None = None
 _code_to_name: dict[str, str] | None = None
 
+# 构建名称映射的重试次数。mootdx 的 count/list 在 get_security_count() 瞬时返回
+# None 时会抛 TypeError（socket 抖动/脏连接），一次异常不代表通达信真的挂了，
+# 重连后大概率成功。
+_NAME_MAP_MAX_ATTEMPTS = 3
+# 串行化名称映射构建：mootdx TCP socket 非线程安全，Web UI 多 Agent 并发时
+# 双重检查 + 加锁可避免重复构建与 socket 交叉污染。
+_name_map_lock = threading.RLock()
+# 通达信 get_security_list 分页大小（与 mootdx.stocks 一致）
+_SECURITY_LIST_PAGE = 1000
+
+
+def _iter_mootdx_security_rows(client, market: int):
+    """Yield (code, name) from mootdx without pandas/DataFrame.
+
+    故意不调用 ``client.stocks()``：该路径内部 ``pandas.concat`` / ``to_data``
+    会走 pyarrow，在 macOS Streamlit 工作线程上可触发 libarrow mimalloc
+    ``mi_thread_init`` SIGSEGV（进程直接 quit，exit 139）。
+    """
+    raw = getattr(client, "client", None)
+    if raw is None or not hasattr(raw, "get_security_list"):
+        raise RuntimeError("mootdx Quotes 缺少底层 get_security_list")
+
+    count = client.stock_count(market=market)
+    # 与 mootdx.stocks() 内部 `counts > 0` 相同的瞬时故障形态，交给外层重试
+    if count is None:
+        raise TypeError(
+            "'>' not supported between instances of 'NoneType' and 'int'"
+        )
+    if not isinstance(count, int) or count <= 0:
+        return
+
+    for start in range(0, count, _SECURITY_LIST_PAGE):
+        rows = raw.get_security_list(market=market, start=start) or []
+        for row in rows:
+            if isinstance(row, dict):
+                code = str(row.get("code", "")).strip()
+                name = str(row.get("name", "")).strip()
+            else:
+                code = str(getattr(row, "code", "")).strip()
+                name = str(getattr(row, "name", "")).strip()
+            if code and name:
+                yield code, name
+
 
 def _build_name_code_map() -> tuple[dict[str, str], dict[str, str]]:
-    """Build name→code and code→name maps via mootdx (both SH & SZ markets)."""
+    """Build name→code and code→name maps via mootdx (both SH & SZ markets).
+
+    失败时重连并重试（#46/#66）：count/list 在 socket 抖动时会因
+    `get_security_count()` 返回 None 抛 TypeError，或返回空列表；两种瞬时故障
+    过去都会一次即放弃、逼用户手输代码。这里重试 `_NAME_MAP_MAX_ATTEMPTS` 次，
+    每次失败后 `_reset_mootdx_client()` 强制重连（可能切到别的服务器）。
+
+    实现刻意绕过 ``Quotes.stocks()``，避免分析线程上 pyarrow 段错误导致 Python quit。
+    """
     global _name_to_code, _code_to_name
     if _name_to_code is not None:
         return _name_to_code, _code_to_name
 
-    client = _get_mootdx_client()
-    n2c: dict[str, str] = {}
-    c2n: dict[str, str] = {}
+    with _name_map_lock:
+        if _name_to_code is not None:  # 双重检查：等锁期间别的线程可能已构建好
+            return _name_to_code, _code_to_name
 
-    try:
-        for market in (0, 1):  # 0=SZ, 1=SH
-            stocks = client.stocks(market=market)
-            if stocks is None or stocks.empty:
-                continue
-            for _, row in stocks.iterrows():
-                code = str(row["code"]).strip()
-                name = str(row["name"]).strip()
-                if not _re.match(r"^[036]\d{5}$", code):
-                    continue
-                clean_name = name.replace(" ", "").replace("　", "")
-                n2c[clean_name] = code
-                c2n[code] = clean_name
-    except Exception as e:
+        last_err: Exception | None = None
+        for attempt in range(1, _NAME_MAP_MAX_ATTEMPTS + 1):
+            try:
+                # Hold mootdx lock for the full list pull so a concurrent
+                # reset cannot close the TCP socket mid-iteration.
+                with _mootdx_client_session() as client:
+                    n2c: dict[str, str] = {}
+                    c2n: dict[str, str] = {}
+                    for market in (0, 1):  # 0=SZ, 1=SH
+                        for code, name in _iter_mootdx_security_rows(
+                            client, market
+                        ):
+                            if not _re.match(r"^[036]\d{5}$", code):
+                                continue
+                            clean_name = name.replace(" ", "").replace("　", "")
+                            n2c[clean_name] = code
+                            c2n[code] = clean_name
+
+                    if not n2c:
+                        # 两个市场都空通常也是瞬时故障，交给重试而非缓存空映射
+                        raise ValueError("mootdx 返回股票列表为空")
+
+                    _name_to_code = n2c
+                    _code_to_name = c2n
+                    logger.info("Built stock name-code map: %d entries", len(n2c))
+                    return _name_to_code, _code_to_name
+            except Exception as e:
+                last_err = e
+                logger.warning(
+                    "构建股票名称映射失败（第 %d/%d 次）：%s",
+                    attempt, _NAME_MAP_MAX_ATTEMPTS, e,
+                )
+                # 强制下次重连，规避 None count / 脏 socket（与 RPC 串行化）
+                _reset_mootdx_client()
+                if attempt < _NAME_MAP_MAX_ATTEMPTS:
+                    time.sleep(0.5 * attempt)
+
         # 网络抖动/通达信不可达时给出明确提示，而非冒泡成风马牛不相及的报错（#46/#66）
         raise ValueError(
             "无法通过 mootdx 解析股票名称（通达信服务暂时不可达）：%s。"
-            "请稍后重试，或直接输入 6 位股票代码。" % e
-        ) from e
-
-    _name_to_code = n2c
-    _code_to_name = c2n
-    logger.info("Built stock name-code map: %d entries", len(n2c))
-    return _name_to_code, _code_to_name
+            "请稍后重试，或直接输入 6 位股票代码。" % last_err
+        ) from last_err
 
 
 def resolve_ticker(user_input: str) -> str:
@@ -155,6 +231,9 @@ def resolve_ticker(user_input: str) -> str:
 # ---------------------------------------------------------------------------
 
 _mootdx_client = None
+# mootdx/pytdx TCP socket 非线程安全；所有 RPC（含 reset）必须持此锁，
+# 避免名称映射重试关闭连接时打断分析线程的 bars()/finance()/F10()。
+_mootdx_lock = threading.RLock()
 
 # 实测可用的通达信备选服务器（按延迟排序，2026-06 验证）。用于规避 mootdx
 # 0.11.x 全新安装时 BESTIP.HQ 为空串导致的 `ValueError: not enough values to unpack`。
@@ -181,30 +260,56 @@ def _get_mootdx_client():
     规避 mootdx 0.11.x 全新安装的 BESTIP 空串 bug：先 TCP 探测内置服务器列表、
     用第一个可达的显式 server 绕过 BESTIP；三级 fallback（bestip 测速 → 裸 factory →
     明确 RuntimeError）保证 IP 老化/换网/老用户场景都能工作。
+
+    Prefer ``_mootdx_client_session()`` for RPCs so the lock covers the full call.
     """
     global _mootdx_client
-    if _mootdx_client is not None:
-        return _mootdx_client
-
-    from mootdx.quotes import Quotes
-
-    for ip, port in _TDX_SERVERS:
-        if _probe_tdx(ip, port):
-            _mootdx_client = Quotes.factory(market="std", server=(ip, port))
+    with _mootdx_lock:
+        if _mootdx_client is not None:
             return _mootdx_client
-    try:
-        _mootdx_client = Quotes.factory(market="std", bestip=True)  # fallback 1
-        return _mootdx_client
-    except Exception:
-        pass
-    try:
-        _mootdx_client = Quotes.factory(market="std")  # fallback 2（老用户 config 已有 IP）
-        return _mootdx_client
-    except Exception as e:
-        raise RuntimeError(
-            "mootdx 通达信服务器均不可达（TCP 7709）。海外网络通常全部超时，"
-            "请走国内代理或直接使用 6 位股票代码。原始错误：%s" % e
-        ) from e
+
+        from mootdx.quotes import Quotes
+
+        for ip, port in _TDX_SERVERS:
+            if _probe_tdx(ip, port):
+                _mootdx_client = Quotes.factory(market="std", server=(ip, port))
+                return _mootdx_client
+        try:
+            _mootdx_client = Quotes.factory(market="std", bestip=True)  # fallback 1
+            return _mootdx_client
+        except Exception:
+            pass
+        try:
+            _mootdx_client = Quotes.factory(market="std")  # fallback 2（老用户 config 已有 IP）
+            return _mootdx_client
+        except Exception as e:
+            raise RuntimeError(
+                "mootdx 通达信服务器均不可达（TCP 7709）。海外网络通常全部超时，"
+                "请走国内代理或直接使用 6 位股票代码。原始错误：%s" % e
+            ) from e
+
+
+@contextmanager
+def _mootdx_client_session():
+    """Yield the singleton client while holding ``_mootdx_lock`` for the RPC."""
+    with _mootdx_lock:
+        yield _get_mootdx_client()
+
+
+def _reset_mootdx_client() -> None:
+    """丢弃当前 mootdx 单例并关闭连接，下次 _get_mootdx_client() 会重连。
+
+    用于 socket 抖动/脏连接后强制重建（可能换到别的通达信服务器）。
+    Serialized with in-flight RPCs via ``_mootdx_lock``.
+    """
+    global _mootdx_client
+    with _mootdx_lock:
+        client, _mootdx_client = _mootdx_client, None
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -496,8 +601,8 @@ def _load_ohlcv_astock(symbol: str, curr_date: str) -> pd.DataFrame:
 
     # Fetch from mootdx — 800 daily bars (~3 years of trading days)
     try:
-        client = _get_mootdx_client()
-        df = client.bars(symbol=code, category=4, offset=800)
+        with _mootdx_client_session() as client:
+            df = client.bars(symbol=code, category=4, offset=800)
 
         if df is None or df.empty:
             raise ValueError(f"No OHLCV data from mootdx for {code}")
@@ -555,8 +660,8 @@ def get_stock_data(
 
     data_source = "mootdx (TCP)"
     try:
-        client = _get_mootdx_client()
-        df = client.bars(symbol=code, category=4, offset=800)
+        with _mootdx_client_session() as client:
+            df = client.bars(symbol=code, category=4, offset=800)
 
         if df is None or df.empty:
             raise ValueError(f"No data from mootdx for {code}")
@@ -742,8 +847,8 @@ def get_fundamentals(
 
         # --- mootdx: financial snapshot (quarterly) ---
         try:
-            client = _get_mootdx_client()
-            fin = client.finance(symbol=code)
+            with _mootdx_client_session() as client:
+                fin = client.finance(symbol=code)
             if fin is not None and not (
                 isinstance(fin, pd.DataFrame) and fin.empty
             ):
@@ -1298,8 +1403,8 @@ def get_insider_transactions(
     code = _normalize_ticker(ticker)
 
     try:
-        client = _get_mootdx_client()
-        text = client.F10(symbol=code, name="股东研究")
+        with _mootdx_client_session() as client:
+            text = client.F10(symbol=code, name="股东研究")
 
         if not text or not text.strip():
             return f"No insider/shareholder data found for A-stock '{code}'"
@@ -1752,6 +1857,32 @@ def get_concept_blocks(
 
 
 # ---- 14. get_fund_flow ----
+
+
+def get_realtime_main_net_inflow(
+    ticker: Annotated[str, "A-stock code"],
+) -> float | None:
+    """Return the latest realtime 主力净流入 in yuan, or None if unavailable."""
+    code = _normalize_ticker(ticker)
+    secid = f"1.{code}" if code.startswith("6") else f"0.{code}"
+    try:
+        url_rt = "https://push2.eastmoney.com/api/qt/stock/fflow/kline/get"
+        params_rt = {
+            "secid": secid,
+            "klt": 1,
+            "fields1": "f1,f2,f3,f7",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57",
+        }
+        r = _em_get(url_rt, params=params_rt, timeout=10)
+        klines = r.json().get("data", {}).get("klines", []) or []
+        if not klines:
+            return None
+        parts = str(klines[-1]).split(",")
+        if len(parts) < 2:
+            return None
+        return float(parts[1])
+    except Exception:
+        return None
 
 
 def get_fund_flow(

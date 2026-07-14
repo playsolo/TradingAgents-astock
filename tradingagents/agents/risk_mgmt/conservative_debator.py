@@ -1,4 +1,6 @@
 
+from tradingagents.agents.utils.agent_utils import analysis_date_instruction
+
 
 def create_conservative_debator(llm):
     def conservative_node(state) -> dict:
@@ -18,8 +20,10 @@ def create_conservative_debator(llm):
         lockup_report = state.get("lockup_report", "")
 
         trader_decision = state["trader_investment_plan"]
+        date_rule = analysis_date_instruction(state.get("trade_date", ""))
 
         prompt = f"""As the Conservative Risk Analyst evaluating an A-share (China mainland) stock, your primary objective is to protect assets, minimize volatility, and ensure steady, reliable growth. Critically examine high-risk elements in the trader's plan, pointing out where it may expose the firm to undue risk.
+{date_rule}
 
 A-Share Conservative Framework — emphasize these China-specific downside risks:
 - T+1 Settlement Lock: Any position taken today CANNOT be exited until tomorrow. If the stock gaps down at open (e.g. after overnight policy news or global sell-off), losses are locked in with no recourse. This is the single most important structural risk in A-shares.
