@@ -146,6 +146,16 @@ if [ -f deploy/tradingagents-accuracy.service ] && [ -f deploy/tradingagents-acc
   sudo systemctl enable --now tradingagents-accuracy.timer
   systemctl list-timers tradingagents-accuracy.timer --no-pager || true
 fi
+
+# 价值波段扫描每日 20:30 timer（幂等安装 / 刷新单元文件）
+if [ -f deploy/tradingagents-scan.service ] && [ -f deploy/tradingagents-scan.timer ]; then
+  echo "[远程] 安装/刷新 tradingagents-scan.timer ..."
+  sudo cp deploy/tradingagents-scan.service /etc/systemd/system/
+  sudo cp deploy/tradingagents-scan.timer /etc/systemd/system/
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now tradingagents-scan.timer
+  systemctl list-timers tradingagents-scan.timer --no-pager || true
+fi
 CMDEOF
 )
 ssh "${REMOTE_USER}@${REMOTE_HOST}" -p "${SSH_PORT}" "${REMOTE_COMMANDS}" || {

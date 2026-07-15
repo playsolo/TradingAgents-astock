@@ -1,0 +1,35 @@
+# TradingAgents-Astock 价值波段扫描（oneshot）
+#
+# 由 tradingagents-scan.timer 每日 20:30（Asia/Shanghai）触发。
+# 扫描在独立进程完成，结果落盘；--enqueue 写入分析队列，由
+# tradingagents-analyze.service 消费（关闭 Web 不影响）。
+#
+# 安装：
+#   sudo cp deploy/tradingagents-scan.service /etc/systemd/system/
+#   sudo cp deploy/tradingagents-scan.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now tradingagents-scan.timer
+#   systemctl list-timers tradingagents-scan.timer
+#
+# 手动立刻跑一次：
+#   sudo systemctl start tradingagents-scan.service
+#
+# 前提：tradingagents-analyze.service 已在跑，否则入队后无人消费。
+
+[Unit]
+Description=TradingAgents Astock Value Swing Scan
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=solo
+WorkingDirectory=/home/solo/TradingAgents-astock
+Environment="PATH=/home/solo/TradingAgents-astock/.venv/bin:/usr/bin"
+Environment="TZ=Asia/Shanghai"
+Environment="ARROW_DEFAULT_MEMORY_POOL=system"
+# 全市场漏斗 + 东财限流，给足时间；失败等次日 timer
+TimeoutStartSec=7200
+Nice=10
+ExecStart=/home/solo/TradingAgents-astock/.venv/bin/tradingagents-scan --enqueue --skip-non-trading-day
+SuccessExitStatus=0

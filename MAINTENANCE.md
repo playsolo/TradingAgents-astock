@@ -149,6 +149,45 @@ ssh solo@m.wcc.io "sudo journalctl -u tradingagents-accuracy.service -n 40 --no-
 > 关机错过 21:00 时，`Persistent=true` 会在开机后补跑一次。
 > Web「立即结算」与分析开跑时的 settle 仍可用，与 timer 互补。
 
+## 价值波段扫描定时（每日 20:30）
+
+生产用 systemd timer，北京时间每天 **20:30** 跑一次 `tradingagents-scan --enqueue`（非交易日跳过）。扫描独立于 Web；候选写入分析队列，由 `tradingagents-analyze` 消费。
+
+| 项 | 内容 |
+|---|---|
+| Service | `tradingagents-scan.service`（oneshot） |
+| Timer | `tradingagents-scan.timer` |
+| 日志 | `journalctl -u tradingagents-scan.service`；扫描进程另写 `~/.tradingagents/value_swing_scan.log` |
+| 状态 | `~/.tradingagents/value_swing_scan.json` |
+
+**首次安装：**
+
+```bash
+ssh solo@m.wcc.io
+cd /home/solo/TradingAgents-astock && git pull origin dev
+.venv/bin/pip install -e . --no-deps   # 确保有 tradingagents-scan 入口
+sudo cp deploy/tradingagents-scan.service /etc/systemd/system/
+sudo cp deploy/tradingagents-scan.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now tradingagents-scan.timer
+systemctl list-timers tradingagents-scan.timer
+```
+
+**管理：**
+
+```bash
+# 下次触发时间
+ssh solo@m.wcc.io "systemctl list-timers tradingagents-scan.timer --no-pager"
+# 立刻跑一次（不等到 20:30；仍会尊重 --skip-non-trading-day）
+ssh solo@m.wcc.io "sudo systemctl start tradingagents-scan.service"
+# 最近一次扫描日志
+ssh solo@m.wcc.io "sudo journalctl -u tradingagents-scan.service -n 40 --no-hostname"
+```
+
+> 关机错过 20:30 时，`Persistent=true` 会在开机后补跑一次。
+> Web「价值波段扫描」按钮仍可手动触发同一套后台进程。
+> 入队后需 `tradingagents-analyze.service` 在跑，否则队列不会被消费。
+
 ## 后台分析 worker（关闭页面也跑完队列）
 
 生产采用「Web 只入队 + 独立 worker 执行」模式：

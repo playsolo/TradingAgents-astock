@@ -3,6 +3,7 @@
 用法：
   tradingagents-scan
   tradingagents-scan --max-candidates 15 --enqueue
+  tradingagents-scan --enqueue --skip-non-trading-day
   python -m tradingagents.strategies.scan_cli --enqueue
 """
 
@@ -11,12 +12,16 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from datetime import datetime
 
 from tradingagents.strategies.scan_runner import run_scan_job
 from tradingagents.strategies.scan_store import (
     SCAN_STATUS_COMPLETED,
     default_store,
 )
+from tradingagents.watchlist.calendar import CN_TZ, is_cn_trading_day
+
+logger = logging.getLogger(__name__)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,6 +37,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="扫描成功后自动写入分析队列（夜间无人值守用）",
     )
+    p.add_argument(
+        "--skip-non-trading-day",
+        action="store_true",
+        help="非交易日（周末）直接 exit 0，不扫描（定时任务用）",
+    )
     return p
 
 
@@ -41,6 +51,12 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     args = build_parser().parse_args(argv)
+    if args.skip_non_trading_day:
+        now = datetime.now(CN_TZ)
+        if not is_cn_trading_day(now):
+            logger.info("非交易日 %s，跳过价值波段扫描", now.date())
+            print(f"非交易日 {now.date()}，跳过扫描")
+            return 0
     store = default_store()
     record = run_scan_job(
         max_candidates=args.max_candidates,
