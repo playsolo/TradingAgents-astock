@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from tradingagents.agents.utils.rating import parse_rating
+from tradingagents.watchlist.horizon import parse_horizon_trading_days
 from tradingagents.watchlist.models import Baseline
 
 _POS_RE = re.compile(
@@ -78,6 +79,8 @@ def extract_baseline(
     stance = parse_rating(pm or plan or trader, default="Hold")
     position = parse_position_pct(trader) or parse_position_pct(plan) or parse_position_pct(pm)
 
+    horizon_raw, valid_days = _horizon_from_state(state)
+
     return Baseline(
         ticker=str(ticker).upper(),
         trade_date=trade_date,
@@ -90,4 +93,17 @@ def extract_baseline(
         thesis_summary=_thesis_summary(state),
         major_risks=list(major_risks or []),
         log_path=log_path,
+        horizon_raw=horizon_raw,
+        valid_trading_days=valid_days,
     )
+
+
+def _horizon_from_state(state: dict[str, Any]) -> tuple[str | None, int]:
+    """从 ``action_plan.horizon`` 解析有效交易日数；缺省走默认回退。"""
+    plan = state.get("action_plan")
+    raw: str | None = None
+    if isinstance(plan, dict):
+        h = plan.get("horizon")
+        if h is not None and str(h).strip():
+            raw = str(h).strip()
+    return raw, parse_horizon_trading_days(raw)

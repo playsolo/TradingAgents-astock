@@ -1,10 +1,10 @@
-"""完整分析过期升级：交易日差判定、先验上下文、观察路由与基准回写。"""
+"""观察池：操作建议时限过期停跟；新报告刷新续命（不再自动完整再分析）。"""
 
-from datetime import date, datetime
+from datetime import datetime
 
 from tradingagents.watchlist.calendar import (
     FULL_ANALYSIS_STALE_TRADING_DAYS,
-    cn_trading_days_since,
+    is_action_validity_expired,
     is_full_analysis_stale,
 )
 from tradingagents.watchlist.models import Alert, Baseline, WatchItem
@@ -25,6 +25,8 @@ def _baseline(**overrides) -> Baseline:
         thesis_summary="卫星化学持有，关注量能",
         major_risks=["油价波动"],
         log_path="/tmp/log.json",
+        horizon_raw="3个交易日",
+        valid_trading_days=3,
     )
     data.update(overrides)
     return Baseline(**data)
@@ -34,24 +36,10 @@ def test_full_analysis_stale_threshold_constant():
     assert FULL_ANALYSIS_STALE_TRADING_DAYS == 3
 
 
-def test_cn_trading_days_since_skips_weekend():
-    # Mon 7/13 → Thu 7/16 = Tue,Wed,Thu = 3
-    assert cn_trading_days_since("2026-07-13", date(2026, 7, 16)) == 3
-    # Mon 7/13 → Fri 7/17 = 4
-    assert cn_trading_days_since("2026-07-13", date(2026, 7, 17)) == 4
-    # Same day = 0
-    assert cn_trading_days_since("2026-07-13", date(2026, 7, 13)) == 0
-    # Weekend as_of counts through Friday only relative to Mon→Sun:
-    # Mon→Sun: Tue-Fri = 4 trading days (Sat/Sun not counted as additional)
-    assert cn_trading_days_since("2026-07-13", date(2026, 7, 19)) == 4
-
-
-def test_is_full_analysis_stale_strictly_after_threshold():
-    # 3 trading days later → not stale
+def test_is_full_analysis_stale_still_available_for_legacy():
     assert (
         is_full_analysis_stale("2026-07-13", datetime(2026, 7, 16, 15, 0)) is False
     )
-    # 4 trading days later → stale
     assert is_full_analysis_stale("2026-07-13", datetime(2026, 7, 17, 9, 35)) is True
 
 
@@ -86,6 +74,14 @@ def test_refresh_from_analysis_updates_baseline_keeps_alerts(tmp_path):
         "final_trade_decision": "Rating: Buy\n建议仓位: 15%\n逻辑更新",
         "trader_investment_plan": "Entry Price: 105\nStop Loss: 95\n建议仓位: 15%",
         "investment_plan": "继续跟踪化工景气",
+        "action_plan": {
+            "rating": "Buy",
+            "holders_action": "持有",
+            "non_holders_action": "可买",
+            "horizon": "3-5个交易日",
+            "summary": "更新时效",
+            "levels": {},
+        },
     }
     item = refresh_from_analysis(
         state,
@@ -98,6 +94,8 @@ def test_refresh_from_analysis_updates_baseline_keeps_alerts(tmp_path):
     assert item.baseline.trade_date == "2026-07-17"
     assert item.baseline.stance == "Buy"
     assert item.baseline.log_path == "/tmp/new.json"
+    assert item.baseline.horizon_raw == "3-5个交易日"
+    assert item.baseline.valid_trading_days == 5
     assert item.enabled is True
     assert len(item.alerts) == 1
     assert item.alerts[0].kind == "price"
@@ -109,29 +107,18 @@ def test_refresh_from_analysis_updates_baseline_keeps_alerts(tmp_path):
     assert len(stored.alerts) == 1
 
 
-def test_observe_item_runs_full_refresh_when_stale(monkeypatch, tmp_path):
+def test_observe_item_skips_when_action_validity_expired(monkeypatch, tmp_path):
     from tradingagents.watchlist import observe as observe_mod
     from tradingagents.watchlist.observe import observe_item
 
     store = WatchlistStore(tmp_path / "w.json")
-    item = WatchItem(baseline=_baseline(trade_date="2026-07-13"))
+    item = WatchItem(baseline=_baseline(trade_date="2026-07-13", valid_trading_days=3))
     store.add(item)
 
-    calls: list[str] = []
-
-    def fake_refresh(watch_item, **_kwargs):
-        calls.append(watch_item.baseline.ticker)
-        return {
-            "final_trade_decision": "Rating: Buy\n续写结论",
-            "trader_investment_plan": "建议仓位: 12%",
-            "investment_plan": "基于旧基准的更新",
-        }
-
-    monkeypatch.setattr(observe_mod, "run_full_refresh_analysis", fake_refresh)
     monkeypatch.setattr(
         observe_mod,
         "fetch_snapshot",
-        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("light path")),
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must skip")),
     )
 
     alerts = observe_item(
@@ -143,27 +130,22 @@ def test_observe_item_runs_full_refresh_when_stale(monkeypatch, tmp_path):
         force=True,
         analysis_config={"llm_provider": "deepseek"},
     )
-    assert calls == ["002648"]
-    refreshed = store.get("002648")
-    assert refreshed is not None
-    assert refreshed.baseline.trade_date == "2026-07-17"
-    assert refreshed.last_observed_at is not None
-    assert alerts == [] or isinstance(alerts, list)
+    assert alerts == []
+    assert store.get("002648").baseline.trade_date == "2026-07-13"
 
 
-def test_observe_item_light_path_when_not_stale(monkeypatch, tmp_path):
+def test_observe_item_light_path_when_within_horizon(monkeypatch, tmp_path):
     from tradingagents.watchlist import observe as observe_mod
     from tradingagents.watchlist.models import MarketSnapshot
     from tradingagents.watchlist.observe import observe_item
 
     store = WatchlistStore(tmp_path / "w.json")
-    store.add(WatchItem(baseline=_baseline(trade_date="2026-07-13")))
-
-    monkeypatch.setattr(
-        observe_mod,
-        "run_full_refresh_analysis",
-        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("full path")),
+    store.add(
+        WatchItem(
+            baseline=_baseline(trade_date="2026-07-13", valid_trading_days=5),
+        )
     )
+
     monkeypatch.setattr(
         observe_mod,
         "fetch_snapshot",
@@ -194,3 +176,10 @@ def test_observe_item_light_path_when_not_stale(monkeypatch, tmp_path):
         analysis_config={"llm_provider": "deepseek"},
     )
     assert store.get("002648").baseline.trade_date == "2026-07-13"
+    assert store.get("002648").last_observed_at is not None
+
+
+def test_is_action_validity_expired_matches_observe_gate():
+    base = _baseline(trade_date="2026-07-13", valid_trading_days=3)
+    assert is_action_validity_expired(base, datetime(2026, 7, 16, 15, 0)) is False
+    assert is_action_validity_expired(base, datetime(2026, 7, 17, 9, 35)) is True

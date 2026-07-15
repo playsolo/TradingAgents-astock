@@ -15,7 +15,7 @@ OBSERVE_SLOTS: list[tuple[int, int]] = [(9, 35), (13, 5), (15, 5)]
 # 每个时段的命中窗口（分钟），避免整点秒级漏检
 _SLOT_WINDOW_MINUTES = 5
 
-# 完整分析过期：距 Baseline.trade_date 的交易日数严格大于该阈值则升级再分析
+# 操作建议时限缺省 / 解析失败回退：交易日数
 FULL_ANALYSIS_STALE_TRADING_DAYS = 3
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
@@ -132,9 +132,54 @@ def is_full_analysis_stale(
     *,
     threshold: int = FULL_ANALYSIS_STALE_TRADING_DAYS,
 ) -> bool:
-    """完整分析是否过期：交易日差严格大于 threshold（默认 >3）。"""
+    """完整分析是否过期：交易日差严格大于 threshold（默认 >3）。
+
+    遗留 API：观察池已改为操作建议时限（见 ``is_action_validity_expired``）。
+    """
     when = as_of if as_of is not None else datetime.now()
     return cn_trading_days_since(trade_date, when) > threshold
+
+
+def add_cn_trading_days(start: datetime | date | str, n: int) -> date:
+    """日历日：``start`` 之后第 ``n`` 个交易日（``n<=0`` 时返回 start 的日期）。"""
+    day = _as_date(start)
+    if n <= 0:
+        return day
+    count = 0
+    while count < n:
+        day += timedelta(days=1)
+        if is_cn_trading_day(day):
+            count += 1
+    return day
+
+
+def effective_valid_trading_days(valid_trading_days: int | None) -> int:
+    """Baseline 未写入时限时回退到默认 3 个交易日。"""
+    if valid_trading_days is None:
+        return FULL_ANALYSIS_STALE_TRADING_DAYS
+    return max(1, int(valid_trading_days))
+
+
+def is_action_validity_expired(
+    baseline: object,
+    as_of: datetime | date | str | None = None,
+) -> bool:
+    """操作建议时限是否已过：交易日差严格大于 ``valid_trading_days``。
+
+    ``baseline`` 需有 ``trade_date`` 与可选 ``valid_trading_days``（duck-typed，
+    避免 calendar ↔ models 循环 import）。
+    """
+    trade_date = getattr(baseline, "trade_date")
+    days = effective_valid_trading_days(getattr(baseline, "valid_trading_days", None))
+    when = as_of if as_of is not None else datetime.now()
+    return cn_trading_days_since(trade_date, when) > days
+
+
+def action_validity_expires_on(baseline: object) -> date:
+    """时限末日（含）：分析日之后第 N 个交易日。"""
+    trade_date = getattr(baseline, "trade_date")
+    days = effective_valid_trading_days(getattr(baseline, "valid_trading_days", None))
+    return add_cn_trading_days(trade_date, days)
 
 
 def slot_key_for(dt: datetime) -> str | None:

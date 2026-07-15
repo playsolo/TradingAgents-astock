@@ -7,9 +7,10 @@ from datetime import date, datetime
 import streamlit as st
 
 from tradingagents.watchlist.calendar import (
-    FULL_ANALYSIS_STALE_TRADING_DAYS,
     OBSERVE_SLOTS,
-    is_full_analysis_stale,
+    action_validity_expires_on,
+    effective_valid_trading_days,
+    is_action_validity_expired,
 )
 from tradingagents.watchlist.models import LEAN_LABELS, WatchItem
 from tradingagents.watchlist.service import prior_context_from_baseline
@@ -46,10 +47,10 @@ def render_watch_page() -> None:
         "仅 A 股 · 交易日 "
         + " / ".join(f"{h:02d}:{m:02d}" for h, m in OBSERVE_SLOTS)
         + " 轻量复核（推荐 launchd 守护 `com.tradingagents.watchlist`：登录自启、崩溃自动重启；睡眠/关机将跳过）。"
-        f" 距上次完整分析超过 {FULL_ANALYSIS_STALE_TRADING_DAYS} 个交易日时，"
-        "再次观察将在原基准上触发完整再分析并回写基准。"
+        " 跟踪时效对齐报告「操作建议」时限（区间取上限）；过期后自动停跟，"
+        "需新完整分析或再次加入观察池以续命。"
         " 告警条件：立场变化、仓位变动>5个百分点、价格偏离基准>5%、跌破止损、新增重大风险。"
-        " 未过期时每次观察（手动或定时）都会更新盘面小结与乐观/中性/悲观三情景。"
+        " 时限内每次观察（手动或定时）都会更新盘面小结与乐观/中性/悲观三情景。"
     )
     st.warning("港股 / 美股尚未支持。本功能仅供研究，不构成投资建议。")
 
@@ -61,19 +62,27 @@ def render_watch_page() -> None:
 
     for item in items:
         b = item.baseline
+        expired = is_action_validity_expired(b)
         unread = len(item.alerts)
         extras = [f"基准 {b.stance}"]
         if b.position_pct is not None:
             extras.append(f"仓位 {b.position_pct:g}%")
+        if expired:
+            extras.append("已过期")
         if unread:
             extras.append(f"{unread} 条告警")
         title = format_list_ticker_label(b.ticker, *extras)
 
-        with st.expander(title, expanded=bool(unread) or bool(item.last_briefing)):
+        with st.expander(title, expanded=bool(unread) or bool(item.last_briefing) or expired):
             c1, c2, c3 = st.columns(3)
             c1.metric("基准价", f"{b.baseline_price:g}" if b.baseline_price else "—")
             c2.metric("分析日", b.trade_date)
             c3.metric("上次观察", _fmt_observed_at(item.last_observed_at))
+
+            expires = action_validity_expires_on(b)
+            days = effective_valid_trading_days(b.valid_trading_days)
+            horizon_label = b.horizon_raw or f"{days}个交易日（默认）"
+            st.caption(f"操作时效：{horizon_label} · 有效至 {expires.isoformat()}（含）")
 
             _render_observation_block(item)
 
@@ -94,19 +103,18 @@ def render_watch_page() -> None:
             else:
                 st.caption("相对基准无实质变化（告警条件未触发）。")
 
-            stale = is_full_analysis_stale(b.trade_date)
-            if stale:
+            if expired:
                 st.warning(
-                    f"完整分析已过期（基准日 {b.trade_date}，"
-                    f"超过 {FULL_ANALYSIS_STALE_TRADING_DAYS} 个交易日）。"
-                    "再次观察将启动完整再分析。"
+                    f"操作建议时限已过（基准日 {b.trade_date}，"
+                    f"有效 {days} 个交易日至 {expires.isoformat()}）。"
+                    "自动观察已停；请完整再分析或从新报告重新加入观察池以续命。"
                 )
 
             b1, b2, b3 = st.columns(3)
-            observe_label = "完整再分析" if stale else "立即观察一次"
+            observe_label = "完整再分析" if expired else "立即观察一次"
             if b1.button(observe_label, key=f"watch_now_{b.ticker}", use_container_width=True):
                 fresh = store.get(b.ticker)
-                if fresh and is_full_analysis_stale(fresh.baseline.trade_date):
+                if fresh and is_action_validity_expired(fresh.baseline):
                     today = date.today().isoformat()
                     st.session_state["start_analysis"] = {
                         "ticker": fresh.baseline.ticker,

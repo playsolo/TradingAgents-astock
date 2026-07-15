@@ -1,4 +1,7 @@
-"""对单只观察标的执行一次复核（轻量或完整分析过期升级）。"""
+"""对单只观察标的执行一次复核（轻量快照 + 相对基准告警）。
+
+操作建议时限过期后自动跳过；续命靠新报告加入/刷新基准，不再自动完整再分析。
+"""
 
 from __future__ import annotations
 
@@ -6,18 +9,14 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from tradingagents.watchlist.calendar import is_full_analysis_stale
+from tradingagents.watchlist.calendar import is_action_validity_expired
 from tradingagents.watchlist.judge import briefing_from_judgment, judge_vs_baseline
 from tradingagents.watchlist.models import LEAN_LABELS, Alert, WatchItem
-from tradingagents.watchlist.refresh import run_full_refresh_analysis
 from tradingagents.watchlist.rules import detect_changes
-from tradingagents.watchlist.service import refresh_from_analysis, resolve_log_path
 from tradingagents.watchlist.snapshot import fetch_snapshot
 from tradingagents.watchlist.store import WatchlistStore
 
 logger = logging.getLogger(__name__)
-
-_STALE_REFRESH_FAIL_KIND = "stale_refresh"
 
 
 def _mirror_alerts_to_inbox(ticker: str, alerts: list[Alert]) -> None:
@@ -44,11 +43,12 @@ def observe_item(
 ) -> list[Alert]:
     """抓快照 → LLM 轻判 → 规则 diff → 持久化告警与 briefing。返回本次新增 alerts。
 
-    若 Baseline.trade_date 距今超过完整分析过期阈值且提供 analysis_config，
-    则在旧基准先验上跑一轮完整分析并回写基准（方案 A）。
+    操作建议时限已过则跳过（即使 ``force=True``）；续命请走新完整分析回写基准。
+    ``analysis_config`` 保留签名兼容，已不再触发自动完整再分析。
 
     force=True 时忽略 enabled（用于「立即观察一次」手动触发）。
     """
+    del analysis_config  # legacy kw; auto full-refresh removed
     if not item.enabled and not force:
         return []
     if item.baseline.market != "CN":
@@ -59,21 +59,17 @@ def observe_item(
     observed_at = dt.isoformat(timespec="seconds")
     ticker = item.baseline.ticker
 
+    if is_action_validity_expired(item.baseline, dt):
+        logger.info(
+            "skip expired watch item %s (trade_date=%s valid_days=%s)",
+            ticker,
+            item.baseline.trade_date,
+            item.baseline.valid_trading_days,
+        )
+        return []
+
     if slot_key and item.last_slot_key == slot_key:
         return []  # 本时段已跑过
-
-    if analysis_config is not None and is_full_analysis_stale(
-        item.baseline.trade_date, dt
-    ):
-        return _full_refresh_observe(
-            item,
-            store=store,
-            llm=llm,
-            slot_key=slot_key,
-            observed_at=observed_at,
-            trade_date=dt.strftime("%Y-%m-%d"),
-            analysis_config=analysis_config,
-        )
 
     return _light_observe(
         item,
@@ -82,73 +78,6 @@ def observe_item(
         slot_key=slot_key,
         observed_at=observed_at,
     )
-
-
-def _full_refresh_observe(
-    item: WatchItem,
-    *,
-    store: WatchlistStore,
-    llm: Any,
-    slot_key: str | None,
-    observed_at: str,
-    trade_date: str,
-    analysis_config: dict[str, Any],
-) -> list[Alert]:
-    ticker = item.baseline.ticker
-    logger.info(
-        "watchlist full refresh for %s (baseline %s → %s)",
-        ticker,
-        item.baseline.trade_date,
-        trade_date,
-    )
-    try:
-        state = run_full_refresh_analysis(
-            item, trade_date=trade_date, config=analysis_config
-        )
-    except Exception as exc:
-        logger.exception("full refresh failed for %s; falling back to light observe", ticker)
-        fail_alert = Alert(
-            kind=_STALE_REFRESH_FAIL_KIND,
-            title="完整再分析失败",
-            detail=f"已回退轻量观察：{exc}",
-            observed_at=observed_at,
-        )
-        store.append_alerts(ticker, [fail_alert])
-        _mirror_alerts_to_inbox(ticker, [fail_alert])
-        # 不写入 slot_key，便于同窗或下一窗重试完整升级
-        return _light_observe(
-            item,
-            store=store,
-            llm=llm,
-            slot_key=None,
-            observed_at=observed_at,
-        )
-
-    log_path = resolve_log_path(ticker, trade_date)
-    refreshed = refresh_from_analysis(
-        state,
-        ticker=ticker,
-        trade_date=trade_date,
-        log_path=log_path,
-        store=store,
-    )
-    stance = refreshed.baseline.stance
-    summary = (
-        f"完整再分析已完成（基准日 {trade_date}）| 立场 {stance}"
-        + (
-            f" | {refreshed.baseline.thesis_summary}"
-            if refreshed.baseline.thesis_summary
-            else ""
-        )
-    )
-    store.mark_observed(
-        ticker,
-        observed_at,
-        slot_key=slot_key,
-        summary=summary,
-        briefing=None,
-    )
-    return []
 
 
 def _light_observe(
@@ -210,7 +139,7 @@ def observe_all(
     slot_key: str | None = None,
     analysis_config: dict[str, Any] | None = None,
 ) -> dict[str, list[Alert]]:
-    """跑一遍全部 enabled 标的。"""
+    """跑一遍全部 enabled 且未过期的标的。"""
     results: dict[str, list[Alert]] = {}
     for item in store.list_items():
         if not item.enabled:

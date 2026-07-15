@@ -21,12 +21,25 @@ class Baseline:
     thesis_summary: str
     major_risks: list[str]
     log_path: str
+    # 操作建议时限（来自 action_plan.horizon）；缺省时观察侧回退默认交易日数
+    horizon_raw: str | None = None
+    valid_trading_days: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Baseline:
+        raw_days = data.get("valid_trading_days")
+        valid_days: int | None
+        if raw_days is None or raw_days == "":
+            valid_days = None
+        else:
+            try:
+                valid_days = int(raw_days)
+            except (TypeError, ValueError):
+                valid_days = None
+        horizon = data.get("horizon_raw")
         return cls(
             ticker=str(data["ticker"]).upper(),
             trade_date=str(data["trade_date"]),
@@ -39,6 +52,8 @@ class Baseline:
             thesis_summary=str(data.get("thesis_summary", "")),
             major_risks=list(data.get("major_risks") or []),
             log_path=str(data.get("log_path", "")),
+            horizon_raw=str(horizon).strip() if horizon else None,
+            valid_trading_days=valid_days,
         )
 
 
