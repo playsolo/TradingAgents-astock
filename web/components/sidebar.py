@@ -12,6 +12,7 @@ from tradingagents.graph.checkpointer import clear_checkpoint
 from tradingagents.llm_clients.model_catalog import MODEL_OPTIONS
 from tradingagents.watchlist.calendar import cn_today
 from web.analysis_queue import (
+    AnalysisJob,
     advance_queue,
     append_jobs,
     clear_queue,
@@ -19,6 +20,7 @@ from web.analysis_queue import (
     mark_serial_queue_session,
     parse_ticker_inputs,
     queue_snapshot,
+    remove_job_identity,
     resolve_ticker_batch,
 )
 from web.history import (
@@ -35,6 +37,7 @@ from web.parallel_runs import (
     active_runs,
     has_running,
     running_count,
+    set_focused_ticker,
     slots_available,
 )
 from web.stock_display import format_list_ticker_label, signal_text_tag
@@ -118,6 +121,79 @@ def _resolve_user_input_for_market(raw: str, market: str) -> tuple[str, str | No
 def _clear_analysis_artifacts(ticker: str, trade_date: str) -> None:
     clear_incomplete_task(ticker, trade_date)
     clear_checkpoint(DEFAULT_CONFIG["data_cache_dir"], ticker, trade_date)
+
+
+def _infer_market_for_ticker(ticker: str, market: str | None = None) -> str:
+    if market in {"CN", "US"}:
+        return market
+    code = (ticker or "").strip()
+    if code.isdigit() and len(code) == 6:
+        return "CN"
+    return "US"
+
+
+def _is_live_incomplete_run(session, ticker: str, trade_date: str) -> bool:
+    for run in active_runs(session):
+        if (
+            run.ticker == ticker
+            and run.trade_date == trade_date
+            and run.is_running
+            and not run.is_complete
+            and not run.error
+        ):
+            return True
+    return False
+
+
+def activate_incomplete_task(
+    session,
+    ticker: str,
+    trade_date: str,
+    market: str | None = None,
+) -> str:
+    """Handle a sidebar click on an incomplete task.
+
+    Returns ``focus`` / ``start`` / ``enqueue`` so the UI can mirror single-task
+    "click to continue" while still allowing parallel slots.
+    """
+    ticker = ticker.strip().upper()
+    trade_date = trade_date.strip()
+    resolved_market = _infer_market_for_ticker(ticker, market)
+
+    session["viewing_history"] = None
+    session["viewing_watchlist"] = False
+
+    if _is_live_incomplete_run(session, ticker, trade_date):
+        set_focused_ticker(session, ticker)
+        return "focus"
+
+    # Drop any queued duplicate before starting, or we risk a second worker
+    # when slots free up later (add_tracker only replaces the session handle).
+    remove_job_identity(session, (resolved_market, ticker, trade_date))
+
+    if slots_available(session) > 0:
+        session["start_analysis"] = {
+            "ticker": ticker,
+            "trade_date": trade_date,
+            "market": resolved_market,
+        }
+        return "start"
+
+    append_jobs(
+        session,
+        [
+            AnalysisJob(
+                ticker=ticker,
+                trade_date=trade_date,
+                market=resolved_market,
+                fresh=False,
+            )
+        ],
+    )
+    session["queue_advance_notice"] = (
+        f"✅ {ticker} 已加入分析队列（并行槽位已满）"
+    )
+    return "enqueue"
 
 
 def _first_raw_ticker(raw_tickers: str) -> str:
@@ -543,8 +619,7 @@ def render_sidebar() -> None:
     if not incomplete:
         st.caption("暂无未完成任务")
     else:
-        is_busy = has_running(st.session_state)
-    for entry in incomplete[:10]:
+        for entry in incomplete[:10]:
             t, d = entry["ticker"], entry["trade_date"]
             status_label = {
                 "error": "出错",
@@ -554,23 +629,24 @@ def render_sidebar() -> None:
             step = entry.get("checkpoint_step")
             step_label = f"step {step}" if step is not None else ""
             label = format_list_ticker_label(t, d, status_label, step_label)
+            # Always clickable (same as single-task resume). Live runs focus;
+            # others start a free parallel slot or enqueue when full.
             if st.button(
                 label,
                 key=f"resume_{t}_{d}",
                 use_container_width=True,
-                disabled=is_busy,
             ):
-                st.session_state["start_analysis"] = {
-                    "ticker": t,
-                    "trade_date": d,
-                    "market": (
+                activate_incomplete_task(
+                    st.session_state,
+                    t,
+                    d,
+                    market=(
                         "CN" if t.isdigit() and len(t) == 6 else "US"
                     ),
-                }
-                st.session_state["viewing_history"] = None
-                st.session_state["viewing_watchlist"] = False
+                )
                 st.query_params.clear()
                 st.query_params["view"] = "home"
+                st.rerun()
 
     st.markdown("---")
     st.markdown("#### 历史记录")

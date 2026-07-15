@@ -327,6 +327,22 @@ def prepend_job(
     _persist(session, store)
 
 
+def remove_job_identity(
+    session: MutableMapping[str, Any],
+    identity: tuple[str, str, str],
+    *,
+    store: AnalysisQueueStore | None = None,
+) -> int:
+    """Drop queued jobs matching ``(market, ticker, trade_date)``. Returns removed count."""
+    queue = _coerce_list(session)
+    kept = [j for j in queue if j.identity() != identity]
+    removed = len(queue) - len(kept)
+    if removed:
+        session[QUEUE_SESSION_KEY] = kept
+        _persist(session, store)
+    return removed
+
+
 def append_jobs(
     session: MutableMapping[str, Any],
     jobs: list[AnalysisJob],
