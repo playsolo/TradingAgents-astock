@@ -1,8 +1,8 @@
-"""Idle 主页视图模式：单票分析 vs 策略扫描（互斥，不走 st.tabs）。
+"""Idle 主页视图模式：策略扫描为默认首页。
 
 Streamlit 1.59.x 的 st.tabs 在 Tab 内 widget/切换后会把所有 Tab 内容叠层显示
-（见 streamlit#15892）。主页用 session_state 互斥渲染规避该问题，
-并让侧栏「价值波段扫描」能直接进入扫描页。
+（见 streamlit#15892）。主页用 session_state 互斥渲染规避该问题；
+首页固定为策略扫描，侧栏「新建分析」仍是单票入口。
 """
 
 from __future__ import annotations
@@ -17,9 +17,9 @@ IdlePanel = Literal["welcome", "scan"]
 
 
 def normalize_home_mode(value: Any) -> str:
-    if value == HOME_MODE_SCAN:
-        return HOME_MODE_SCAN
-    return HOME_MODE_SINGLE
+    if value == HOME_MODE_SINGLE:
+        return HOME_MODE_SINGLE
+    return HOME_MODE_SCAN
 
 
 def get_home_mode(session: Any) -> str:
@@ -31,6 +31,6 @@ def set_home_mode(session: Any, mode: str) -> None:
 
 
 def resolve_idle_panel(mode: Any) -> IdlePanel:
-    if normalize_home_mode(mode) == HOME_MODE_SCAN:
-        return "scan"
-    return "welcome"
+    if normalize_home_mode(mode) == HOME_MODE_SINGLE:
+        return "welcome"
+    return "scan"

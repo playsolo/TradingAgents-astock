@@ -16,6 +16,8 @@ from urllib.parse import quote
 
 import streamlit as st
 
+from web.home_mode import HOME_MODE_SCAN, set_home_mode
+
 
 def _results_dir() -> Path:
     return Path.home() / ".tradingagents" / "logs"
@@ -110,6 +112,7 @@ def apply_query_to_session() -> None:
     # 若 URL 无 history，清掉历史视图（避免刷新后粘住）
     if view == "home":
         st.session_state["viewing_history"] = None
+        set_home_mode(st.session_state, HOME_MODE_SCAN)
 
 
 def navigate(
@@ -161,6 +164,7 @@ def navigate(
         st.session_state["viewing_watchlist"] = False
         st.session_state["viewing_accuracy"] = False
         st.session_state["viewing_history"] = None
+        set_home_mode(st.session_state, HOME_MODE_SCAN)
         params = view_query("home")
 
     st.query_params.clear()

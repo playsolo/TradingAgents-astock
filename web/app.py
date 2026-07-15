@@ -61,13 +61,6 @@ from web.history import (  # noqa: E402
     load_analysis,
     record_incomplete_task,
 )
-from web.home_mode import (  # noqa: E402
-    HOME_MODE_KEY,
-    HOME_MODE_SCAN,
-    HOME_MODE_SINGLE,
-    resolve_idle_panel,
-    set_home_mode,
-)
 from web.navigation import apply_query_to_session  # noqa: E402
 from web.parallel_runs import (
     active_runs,
@@ -648,73 +641,9 @@ elif _all_runs:
     else:
         st.info("所有分析任务已完成，无可用报告。")
 
-# State 0: Idle — exclusive single-stock / strategy-scan panels (no st.tabs;
-# Streamlit 1.59.x can stack all tab bodies after switch/widget rerun).
+# State 0: Idle — strategy scan is the home page (single-stock entry stays in sidebar).
+# No st.tabs for home switch: Streamlit 1.59.x can stack all tab bodies after rerun.
 else:
-    if HOME_MODE_KEY not in st.session_state:
-        set_home_mode(st.session_state, HOME_MODE_SINGLE)
+    from web.components.value_swing_scanner import render_value_swing_scanner
 
-    selected = st.radio(
-        "主页视图",
-        options=[HOME_MODE_SINGLE, HOME_MODE_SCAN],
-        format_func=lambda m: (
-            "📈 单票分析" if m == HOME_MODE_SINGLE else "📊 策略扫描"
-        ),
-        horizontal=True,
-        key=HOME_MODE_KEY,
-        label_visibility="collapsed",
-    )
-
-    if resolve_idle_panel(selected) == "scan":
-        from web.components.value_swing_scanner import render_value_swing_scanner
-
-        render_value_swing_scanner()
-    else:
-        st.markdown(
-            """
-            <div style="
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-                justify-content: center;
-                min-height: 60vh;
-                text-align: center;
-            ">
-                <div style="font-size: 4rem; margin-bottom: 1rem;">📈</div>
-                <div style="
-                    font-size: 2.5rem;
-                    font-weight: 900;
-                    margin-bottom: 0.5rem;
-                ">
-                    <span style="color: #ff5a1f;">Trading</span><span style="color: #f5f1eb;">Agents</span><span style="color: #f5f1eb;">-</span><span style="color: #ff5a1f;">Astock</span>
-                </div>
-                <div style="color: #888; font-size: 1.1rem; max-width: 500px; line-height: 1.6;">
-                    A股 / 美股多Agent投研分析<br>
-                    侧栏选择市场 → 分析师辩论 → 风控评估 → 最终决策
-                </div>
-                <div style="
-                    margin-top: 2rem;
-                    padding: 1rem 2rem;
-                    border: 1px solid #222;
-                    border-radius: 12px;
-                    color: #666;
-                    font-size: 0.9rem;
-                ">
-                    ← 在左侧选择 A股或美股，输入一只或多只代码后开始分析
-                </div>
-                <div style="
-                    margin-top: 2.5rem;
-                    padding: 0.8rem 1.5rem;
-                    color: #555;
-                    font-size: 0.75rem;
-                    max-width: 500px;
-                    line-height: 1.6;
-                    border-top: 1px solid #1a1a1a;
-                ">
-                    ⚠️ 本项目仅供学习研究与技术演示，不构成任何投资建议。<br>
-                    投资决策请咨询持牌专业机构。作者不对使用本工具产生的任何损失承担责任。
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    render_value_swing_scanner()

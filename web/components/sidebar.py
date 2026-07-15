@@ -558,17 +558,24 @@ def render_sidebar() -> None:
     render_logout_button()
     render_admin_panel()
 
+    if st.button(
+        "TradingAgents-Astock",
+        key="nav_brand_home",
+        use_container_width=True,
+        help="回到策略扫描首页",
+    ):
+        set_home_mode(st.session_state, HOME_MODE_SCAN)
+        navigate("home")
     st.markdown(
-        f"""
-        <a href="/?view=home" style="text-decoration:none; display:block; text-align:center; margin-bottom:1.5rem;">
-            <span style="font-size:2rem; font-weight:800; color:#ff5a1f;">Trading</span><span style="font-size:2rem; font-weight:800; color:#f5f1eb;">Agents</span><span style="font-size:2rem; font-weight:800; color:#f5f1eb;">-</span><span style="font-size:2rem; font-weight:800; color:#ff5a1f;">Astock</span>
-            <div style="font-size:0.85rem; color:#888; margin-top:0.2rem;">
+        """
+        <div style="text-align:center; margin:-0.35rem 0 1.25rem 0;">
+            <div style="font-size:0.85rem; color:#888;">
                 A股多Agent投研系统
             </div>
             <div style="font-size:0.7rem; color:#555; margin-top:0.3rem;">
                 by <a href="https://github.com/playsolo" style="color:#ff5a1f; text-decoration:none;">playsolo</a>
             </div>
-        </a>
+        </div>
         """,
         unsafe_allow_html=True,
     )

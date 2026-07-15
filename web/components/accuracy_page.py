@@ -6,6 +6,7 @@ import streamlit as st
 
 from tradingagents.agents.utils.signal_accuracy import get_ledger, run_accuracy_maintenance
 from tradingagents.default_config import DEFAULT_CONFIG
+from web.stock_display import resolve_stock_name
 
 
 def _pct(rate) -> str:
@@ -135,15 +136,20 @@ def render_accuracy_page() -> None:
     if not records:
         st.caption("账本为空。")
         return
+    name_by_ticker: dict[str, str] = {}
     detail_rows = []
     for rec in records:
+        ticker = rec.get("ticker") or ""
+        if ticker not in name_by_ticker:
+            name_by_ticker[ticker] = resolve_stock_name(ticker) or ""
         for h in ("1", "5", "20"):
             cell = (rec.get("horizons") or {}).get(h) or {}
             ret = cell.get("return")
             detail_rows.append(
                 {
                     "日期": rec.get("trade_date"),
-                    "代码": rec.get("ticker"),
+                    "代码": ticker,
+                    "名称": name_by_ticker[ticker],
                     "评级": rec.get("rating"),
                     "方向": rec.get("direction"),
                     "窗口": f"{h}d",

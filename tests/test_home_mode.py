@@ -1,12 +1,10 @@
-"""Idle 主页：单票 / 策略扫描应互斥渲染，避免 st.tabs 叠层。"""
+"""Idle 主页：默认策略扫描；单票入口仅在侧栏。"""
 
 from __future__ import annotations
 
-import ast
 from pathlib import Path
 
 from web.home_mode import (
-    HOME_MODE_KEY,
     HOME_MODE_SCAN,
     HOME_MODE_SINGLE,
     normalize_home_mode,
@@ -14,51 +12,43 @@ from web.home_mode import (
 )
 
 
-def test_normalize_home_mode_defaults_and_rejects_unknown():
-    assert normalize_home_mode(None) == HOME_MODE_SINGLE
-    assert normalize_home_mode("") == HOME_MODE_SINGLE
+def test_normalize_home_mode_defaults_to_scan():
+    assert normalize_home_mode(None) == HOME_MODE_SCAN
+    assert normalize_home_mode("") == HOME_MODE_SCAN
     assert normalize_home_mode("scan") == HOME_MODE_SCAN
     assert normalize_home_mode("single") == HOME_MODE_SINGLE
-    assert normalize_home_mode("wat") == HOME_MODE_SINGLE
+    assert normalize_home_mode("wat") == HOME_MODE_SCAN
 
 
-def test_resolve_idle_panel_is_exclusive():
+def test_resolve_idle_panel_defaults_to_scan():
     assert resolve_idle_panel(HOME_MODE_SINGLE) == "welcome"
     assert resolve_idle_panel(HOME_MODE_SCAN) == "scan"
-    assert resolve_idle_panel("nope") == "welcome"
+    assert resolve_idle_panel(None) == "scan"
+    assert resolve_idle_panel("nope") == "scan"
 
 
-def test_app_idle_does_not_use_st_tabs_for_home_switch():
-    """主页单票/扫描切换不得再用 st.tabs（1.59 会叠层显示全部 Tab 内容）。"""
+def test_app_idle_is_scan_only_without_st_tabs():
+    """首页固定策略扫描，不得再用 st.tabs / 单票欢迎页切换。"""
     src = Path("web/app.py").read_text(encoding="utf-8")
-    # Idle 区块应通过 home_mode 互斥分支，而不是同时挂两个 tab 容器内容
-    assert "st.tabs(" not in src.split("State 0: Idle")[-1], (
-        "idle home must not use st.tabs; use exclusive home_mode rendering"
+    idle = src.split("State 0: Idle")[-1]
+    assert "st.tabs(" not in idle, (
+        "idle home must not use st.tabs; render scan exclusively"
     )
-    assert "resolve_idle_panel" in src or HOME_MODE_KEY in src
-    assert "render_value_swing_scanner" in src
+    assert "render_value_swing_scanner" in idle
+    assert "单票分析" not in idle
+    assert "主页视图" not in idle
+
+
+def test_sidebar_brand_navigates_home():
+    src = Path("web/components/sidebar.py").read_text(encoding="utf-8")
+    assert 'key="nav_brand_home"' in src
+    assert 'navigate("home")' in src
+    assert "set_home_mode" in src and "HOME_MODE_SCAN" in src
 
 
 def test_sidebar_value_swing_sets_scan_mode():
-    """侧栏「价值波段扫描」应切到 scan，而不是仅 navigate(home) 停在欢迎页。"""
+    """侧栏「价值波段扫描」应切到 scan 并 navigate(home)。"""
     src = Path("web/components/sidebar.py").read_text(encoding="utf-8")
-    tree = ast.parse(src)
-
-    found_button = False
-    sets_scan = False
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Constant) and node.value == "📊 价值波段扫描":
-            found_button = True
-        if isinstance(node, ast.Constant) and node.value == HOME_MODE_SCAN:
-            sets_scan = True
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id in {"set_home_mode", "set_home_mode_scan"}
-        ):
-            sets_scan = True
-
-    assert found_button, "value swing sidebar button missing"
-    assert sets_scan or (
-        f'["{HOME_MODE_KEY}"]' in src and f'"{HOME_MODE_SCAN}"' in src
-    ), "sidebar must set home_mode to scan when opening value swing"
+    assert "📊 价值波段扫描" in src
+    assert "set_home_mode" in src and "HOME_MODE_SCAN" in src
+    assert 'navigate("home")' in src
