@@ -13,7 +13,6 @@ from tradingagents.llm_clients.model_catalog import MODEL_OPTIONS
 from tradingagents.watchlist.calendar import cn_today
 from web.analysis_queue import (
     AnalysisJob,
-    advance_queue,
     append_jobs,
     clear_queue,
     format_queue_job_caption,
@@ -36,6 +35,7 @@ from web.navigation import navigate
 from web.parallel_runs import (
     active_runs,
     has_running,
+    request_fill_parallel_slots,
     running_count,
     set_focused_ticker,
     slots_available,
@@ -247,12 +247,20 @@ def _submit_analysis_jobs(raw_tickers: str, market: str, trade_date: str) -> Non
             if t.ticker and t.trade_date:
                 exclude.add((getattr(t, "market", market), t.ticker, t.trade_date))
         added = append_jobs(st.session_state, jobs, exclude=exclude)
-        st.session_state["queue_advance_notice"] = (
-            f"✅ 已加入分析队列 {added} 只（当前队列 {len(queue_snapshot(st.session_state))}）"
-        )
+        slots = slots_available(st.session_state)
+        queued = len(queue_snapshot(st.session_state))
+        if slots > 0 and added > 0:
+            st.session_state["queue_advance_notice"] = (
+                f"✅ 已加入 {added} 只，空闲 {slots} 个槽位将自动并行开跑"
+                f"（队列共 {queued}）"
+            )
+        else:
+            st.session_state["queue_advance_notice"] = (
+                f"✅ 已加入分析队列 {added} 只（当前队列 {queued}）"
+            )
         if added > 0:
             request_clear_ticker_input(st.session_state)
-            # Rerun so apply_pending_clear_ticker_input runs before text_area.
+            # Rerun so lifecycle fills free slots and clears the ticker box.
             st.rerun()
         return
 
@@ -313,15 +321,14 @@ def _render_analysis_queue() -> None:
         disabled=is_busy and not jobs,
         type="primary",
     ):
-        head = advance_queue(st.session_state)
-        if head is not None:
-            mark_serial_queue_session(st.session_state, True)
-            st.session_state["start_analysis"] = head.to_start_request()
-            st.session_state["viewing_history"] = None
-            st.session_state["viewing_watchlist"] = False
-            st.query_params.clear()
-            st.query_params["view"] = "home"
-            st.rerun()
+        # Force-fill free slots (overrides refresh incomplete gate).
+        mark_serial_queue_session(st.session_state, True)
+        request_fill_parallel_slots(st.session_state, force=True)
+        st.session_state["viewing_history"] = None
+        st.session_state["viewing_watchlist"] = False
+        st.query_params.clear()
+        st.query_params["view"] = "home"
+        st.rerun()
     if clear_col.button("清空队列", key="clear_analysis_queue", use_container_width=True):
         clear_queue(st.session_state)
         st.rerun()

@@ -78,6 +78,7 @@ from web.parallel_runs import (
     stop_run_by_ticker,
     pause_run_by_ticker,
     resume_run_by_ticker,
+    try_fill_parallel_slots,
 )
 from web.progress import ProgressTracker  # noqa: E402
 from web.runner import run_analysis_in_thread  # noqa: E402
@@ -493,6 +494,8 @@ def _consume_watchlist_refresh_pending(active: ProgressTracker) -> None:
 
 
 # ── Multi-run lifecycle: clean finished trackers, fill empty slots ──────
+# Fill whenever free slots + queued jobs (not only after a finish), so busy
+# enqueue / idle multi-submit / 「继续队列」都能立刻并行开跑。
 if not st.session_state.get("_parallel_lifecycle_ran"):
     st.session_state["_parallel_lifecycle_ran"] = True
     need_rerun = False
@@ -502,14 +505,25 @@ if not st.session_state.get("_parallel_lifecycle_ran"):
             _consume_watchlist_refresh_pending(t)
             remove_finished_tracker(st.session_state, t.ticker, t.trade_date)
 
-    if need_rerun:
-        from web.parallel_runs import pop_and_start_queued_jobs
-
-        started = pop_and_start_queued_jobs(
-            st.session_state, _begin_analysis_from_job
+    _fill_incomplete = None
+    if not has_running(st.session_state):
+        # Cold / refresh session: avoid overlapping a daemon still marked running.
+        _fill_incomplete = list_active_incomplete_tasks()
+    started = try_fill_parallel_slots(
+        st.session_state,
+        _begin_analysis_from_job,
+        incomplete_entries=_fill_incomplete,
+    )
+    if started:
+        tickers = ", ".join(t.ticker for t in started)
+        remaining = len(st.session_state.get("analysis_queue") or [])
+        suffix = f"（队列剩余 {remaining}）" if remaining else ""
+        st.session_state["queue_advance_notice"] = (
+            f"并行开跑 {tickers}{suffix}"
         )
-        if started:
-            st.rerun()
+        st.rerun()
+    elif need_rerun:
+        st.rerun()
 
 st.session_state["_parallel_lifecycle_ran"] = False
 

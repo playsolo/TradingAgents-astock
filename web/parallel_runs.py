@@ -18,6 +18,7 @@ from web.progress import ProgressTracker
 
 ACTIVE_RUNS_KEY = "_parallel_active_runs"
 FOCUSED_RUN_KEY = "_parallel_focused_ticker"
+FORCE_FILL_KEY = "_force_fill_parallel_slots"
 
 # ── Config (env override) ────────────────────────────────────────────────────
 
@@ -212,6 +213,51 @@ def pop_and_start_queued_jobs(
             prepend_job(session, job)
             break
     return started
+
+
+def request_fill_parallel_slots(
+    session: MutableMapping[str, Any],
+    *,
+    force: bool = False,
+) -> None:
+    """Ask the next lifecycle pass to fill free slots from the queue.
+
+    ``force=True`` overrides the disk incomplete-run gate (侧栏「继续队列」).
+    """
+    if force:
+        session[FORCE_FILL_KEY] = True
+
+
+def can_fill_parallel_slots(
+    session: MutableMapping[str, Any],
+    *,
+    incomplete_entries: list[Any] | None = None,
+) -> bool:
+    """True when free slots + queued jobs should be started now."""
+    if slots_available(session) <= 0:
+        return False
+    if not queue_snapshot(session):
+        return False
+    if has_running(session):
+        return True
+    if session.get(FORCE_FILL_KEY):
+        return True
+    from web.analysis_queue import has_blocking_incomplete_run
+
+    return not has_blocking_incomplete_run(incomplete_entries)
+
+
+def try_fill_parallel_slots(
+    session: MutableMapping[str, Any],
+    begin_analysis_fn: Callable[[AnalysisJob], ProgressTracker],
+    *,
+    incomplete_entries: list[Any] | None = None,
+) -> list[ProgressTracker]:
+    """Fill free parallel slots from the queue when allowed; clear force flag."""
+    if not can_fill_parallel_slots(session, incomplete_entries=incomplete_entries):
+        return []
+    session.pop(FORCE_FILL_KEY, None)
+    return pop_and_start_queued_jobs(session, begin_analysis_fn)
 
 
 def stop_all_runs(session: MutableMapping[str, Any]) -> None:

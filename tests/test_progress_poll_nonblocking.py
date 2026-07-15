@@ -52,9 +52,10 @@ def test_app_reruns_after_begin_so_sidebar_shows_running_task():
     begin_idx = app_src.find("_begin_analysis(start_req)")
     assert begin_idx != -1
     assert "st.rerun()" in app_src[begin_idx : begin_idx + 280]
-    # In multi-run mode, the lifecycle block handles queue advance via rerun.
-    assert "pop_and_start_queued_jobs" in app_src
-    assert "st.rerun()" in app_src[app_src.find("pop_and_start_queued_jobs"):app_src.find("pop_and_start_queued_jobs") + 350]
+    # In multi-run mode, the lifecycle block fills free slots then reruns.
+    lifecycle = app_src.split("# ── Multi-run lifecycle")[1].split("# ── State routing")[0]
+    assert "try_fill_parallel_slots" in lifecycle
+    assert "st.rerun()" in lifecycle
 
 
 def test_submit_records_incomplete_before_start_and_skips_double_resolve():
