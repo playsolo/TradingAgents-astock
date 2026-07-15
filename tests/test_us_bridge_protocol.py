@@ -100,6 +100,23 @@ def test_serialize_final_state_keeps_report_fields_only():
     json.dumps(out)
 
 
+def test_serialize_final_state_keeps_action_plan_dict():
+    """The post-analysis structured plan must survive serialization so the
+    UI / history can prefer action_plan.rating over prose."""
+    raw = {
+        "final_trade_decision": "**最终评级**：减持",
+        "action_plan": {
+            "rating": "Underweight",
+            "holders_action": "减仓",
+            "levels": {"watch_support": 96.0},
+        },
+    }
+    out = serialize_final_state(raw)
+    assert out["action_plan"]["rating"] == "Underweight"
+    assert out["action_plan"]["levels"]["watch_support"] == 96.0
+    json.dumps(out)
+
+
 def test_apply_bridge_event_updates_tracker():
     tracker = ProgressTracker(ticker="NVDA", trade_date="2024-05-10")
     tracker.is_running = True

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import re
 from typing import Any, Callable
 
@@ -56,6 +57,142 @@ _ANALYST_SECTIONS = [
 def _safe_filename_label(label: str) -> str:
     cleaned = re.sub(r'[\\/:*?"<>|\s]+', "_", label).strip("_")
     return cleaned or "report"
+
+
+_RATING_STYLE: dict[str, tuple[str, str]] = {
+    "buy": ("#22c55e", "买入"),
+    "overweight": ("#22c55e", "增持"),
+    "hold": ("#fbbf24", "持有"),
+    "underweight": ("#ef4444", "减持"),
+    "sell": ("#ef4444", "卖出"),
+}
+
+
+def action_plan_rating_style(rating: str) -> tuple[str, str]:
+    """Map a 5-tier rating to (hex color, Chinese label).
+
+    Unknown values fall back to the neutral colour with the raw text so the
+    card still renders something sensible.
+    """
+    return _RATING_STYLE.get(str(rating or "").strip().lower(), ("#fbbf24", str(rating or "")))
+
+
+def _fmt_price(value: Any) -> str:
+    """Render a price with up to 2 decimals, trimming trailing zeros."""
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    text = f"{num:.2f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _zone(low: Any, high: Any) -> str | None:
+    """Format a price zone; tolerate a single stated bound."""
+    parts = [_fmt_price(v) for v in (low, high) if v is not None]
+    if not parts:
+        return None
+    return " – ".join(parts)
+
+
+def format_action_plan_levels(levels: dict[str, Any]) -> list[tuple[str, str]]:
+    """Turn the ActionPlanLevels dict into labeled, display-ready rows.
+
+    Only levels explicitly present (non-null) are returned, in a fixed order:
+    减持区间 → 止损位 → 关注支撑 → 回补区间.
+    """
+    levels = levels or {}
+    rows: list[tuple[str, str]] = []
+
+    reduce_zone = _zone(levels.get("reduce_low"), levels.get("reduce_high"))
+    if reduce_zone:
+        rows.append(("减持区间", reduce_zone))
+
+    if levels.get("stop_loss") is not None:
+        rows.append(("止损位", _fmt_price(levels["stop_loss"])))
+
+    if levels.get("watch_support") is not None:
+        rows.append(("关注支撑", _fmt_price(levels["watch_support"])))
+
+    reentry_zone = _zone(levels.get("reentry_low"), levels.get("reentry_high"))
+    if reentry_zone:
+        rows.append(("回补区间", reentry_zone))
+
+    return rows
+
+
+def action_plan_card_html(plan: dict[str, Any]) -> str:
+    """Build the action-plan card HTML.
+
+    All model-generated text (summary / horizon / rating label) is
+    HTML-escaped before interpolation because the card is rendered with
+    ``unsafe_allow_html=True``.
+    """
+    color, rating_cn = action_plan_rating_style(plan.get("rating", ""))
+    summary = _strip_think(str(plan.get("summary") or ""))
+    horizon = str(plan.get("horizon") or "").strip()
+
+    horizon_html = (
+        f'<span style="margin-left:auto; font-size:0.85rem; color:#9aa4b2;">时限 {html.escape(horizon)}</span>'
+        if horizon
+        else ""
+    )
+    header = (
+        '<div style="display:flex; align-items:center; gap:0.6rem; margin-bottom:0.6rem;">'
+        '<span style="font-size:0.8rem; letter-spacing:2px; color:#9aa4b2;">操作建议</span>'
+        f'<span style="background:{color}22; color:{color}; font-weight:800;'
+        ' padding:2px 12px; border-radius:12px; border:1px solid '
+        f'{color}55;">{html.escape(rating_cn)}</span>'
+        f"{horizon_html}"
+        "</div>"
+    )
+    summary_html = (
+        f'<div style="color:#e8e3da; font-size:0.98rem; line-height:1.5;">{html.escape(summary)}</div>'
+        if summary
+        else ""
+    )
+    return (
+        f'<div style="'
+        f"background:#12151c;"
+        f"border:1px solid #2a2f3a;"
+        f"border-left:4px solid {color};"
+        f"border-radius:12px;"
+        f"padding:1rem 1.2rem;"
+        f'margin:-0.5rem 0 1.5rem;">'
+        f"{header}{summary_html}"
+        f"</div>"
+    )
+
+
+def _render_action_plan_card(final_state: dict[str, Any]) -> None:
+    """Render the structured action-plan card below the signal banner.
+
+    Non-fatal: if no ``action_plan`` was extracted (older run or a provider
+    without structured output), nothing is shown and the prose report stands.
+    """
+    plan = final_state.get("action_plan")
+    if not isinstance(plan, dict) or not plan.get("rating"):
+        return
+
+    holders = _strip_think(str(plan.get("holders_action") or ""))
+    non_holders = _strip_think(str(plan.get("non_holders_action") or ""))
+    rows = format_action_plan_levels(plan.get("levels") or {})
+
+    st.markdown(action_plan_card_html(plan), unsafe_allow_html=True)
+
+    if holders or non_holders:
+        col_h, col_n = st.columns(2)
+        with col_h:
+            st.caption("已持仓者")
+            st.markdown(f"**{holders or '—'}**")
+        with col_n:
+            st.caption("未持仓者")
+            st.markdown(f"**{non_holders or '—'}**")
+
+    if rows:
+        cols = st.columns(len(rows))
+        for col, (label, value) in zip(cols, rows):
+            col.metric(label, value)
 
 
 def _display_report_text(text: Any, ticker: str, final_state: dict[str, Any]) -> str:
@@ -303,6 +440,8 @@ def render_report(
         """,
         unsafe_allow_html=True,
     )
+
+    _render_action_plan_card(final_state)
 
     st.caption("⚠️ 本报告由 AI 自动生成，仅供学习研究，不构成投资建议。")
 

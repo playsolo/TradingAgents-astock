@@ -34,6 +34,7 @@ _FINAL_STATE_KEYS = (
     "final_trade_decision",
     "investment_debate_state",
     "risk_debate_state",
+    "action_plan",
 )
 
 _DEBATE_KEYS = ("bull_history", "bear_history", "history", "current_response", "judge_decision")

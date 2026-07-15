@@ -35,9 +35,6 @@ def _prefer_us_on_sys_path() -> Path:
     return us_root
 
 
-_prefer_us_on_sys_path()
-
-
 def _emit(event: str, **payload: Any) -> None:
     print(json.dumps({"event": event, **payload}, ensure_ascii=False, default=str), flush=True)
 
@@ -102,6 +99,7 @@ def _serialize(state: dict[str, Any]) -> dict[str, Any]:
         "final_trade_decision",
         "investment_debate_state",
         "risk_debate_state",
+        "action_plan",
     )
     debate_keys = ("bull_history", "bear_history", "history", "current_response", "judge_decision")
     risk_keys = (
@@ -120,6 +118,8 @@ def _serialize(state: dict[str, Any]) -> dict[str, Any]:
             out[key] = {k: str(value.get(k) or "") for k in debate_keys if k in value}
         elif key == "risk_debate_state" and isinstance(value, dict):
             out[key] = {k: str(value.get(k) or "") for k in risk_keys if k in value}
+        elif isinstance(value, (dict, list)):
+            out[key] = value
         else:
             out[key] = "" if value is None else str(value)
     if out.get("trader_investment_plan"):
@@ -127,7 +127,57 @@ def _serialize(state: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+# 5-tier PortfolioRating → 3-tier sidebar signal (inlined; the A-stock
+# action_plan module is not importable under the US checkout's PYTHONPATH).
+_RATING_TO_SIGNAL = {
+    "buy": "Buy",
+    "overweight": "Buy",
+    "hold": "Hold",
+    "underweight": "Sell",
+    "sell": "Sell",
+}
+
+
+def _signal_from_action_plan(merged: dict[str, Any]) -> str | None:
+    plan = merged.get("action_plan")
+    if isinstance(plan, dict):
+        rating = str(plan.get("rating") or "").strip().lower()
+        if rating in _RATING_TO_SIGNAL:
+            return _RATING_TO_SIGNAL[rating]
+    return None
+
+
+def _finalize_or_signal(graph: Any, ticker: str, trade_date: str, merged: dict[str, Any]) -> str:
+    """Finalize the run and derive the sidebar signal, tolerating older US graphs.
+
+    The US checkout's ``TradingAgentsGraph`` may predate the A-stock
+    ``finalize_graph_run`` refactor (or its post-analysis action_plan extract).
+    Any failure there must not abort the completed analysis — fall back to the
+    plain ``process_signal``. If finalize already populated ``action_plan``
+    before raising, prefer its rating so the emitted signal never contradicts
+    the structured plan the UI will display.
+    """
+    finalize = getattr(graph, "finalize_graph_run", None)
+    if callable(finalize):
+        try:
+            return finalize(ticker, trade_date, merged)
+        except Exception:
+            _emit(
+                "warn",
+                message="finalize_graph_run 不可用，回退 process_signal（美股图较旧）",
+            )
+
+    from_plan = _signal_from_action_plan(merged)
+    if from_plan is not None:
+        return from_plan
+    raw = graph.process_signal(str(merged.get("final_trade_decision") or ""))
+    # process_signal may return 5-tier (Overweight/Underweight); collapse to the
+    # 3-tier sidebar buckets. Unknown values pass through unchanged.
+    return _RATING_TO_SIGNAL.get(str(raw).strip().lower(), raw)
+
+
 def main() -> int:
+    _prefer_us_on_sys_path()
     ticker = (os.environ.get("US_BRIDGE_TICKER") or "").strip()
     trade_date = (os.environ.get("US_BRIDGE_TRADE_DATE") or "").strip()
     if not ticker or not trade_date:
@@ -185,9 +235,10 @@ def main() -> int:
             # Fallback invoke if stream yielded nothing useful
             merged = graph.graph.invoke(init_state, **args)
 
-        final_state = _serialize(merged)
-        # Same post-analysis action_plan extract + disk log as the CN path.
-        signal = graph.finalize_graph_run(ticker, trade_date, merged)
+        # Same post-analysis action_plan extract + disk log as the CN path,
+        # but tolerate older US graphs without finalize_graph_run. Serialize
+        # after finalize so any action_plan it sets propagates to the UI.
+        signal = _finalize_or_signal(graph, ticker, trade_date, merged)
         _emit("complete", signal=signal, state=_serialize(merged))
         return 0
     except Exception as exc:
