@@ -54,7 +54,10 @@ def save_output(data: pd.DataFrame, tag: str, save_path: SavePathType = None) ->
 
 
 def get_current_date():
-    return date.today().strftime("%Y-%m-%d")
+    """Beijing calendar date (A-share analysis default)."""
+    from tradingagents.watchlist.calendar import cn_today
+
+    return cn_today().isoformat()
 
 
 def decorate_all_methods(decorator):

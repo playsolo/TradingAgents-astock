@@ -1,11 +1,13 @@
 # TradingAgents/graph/propagation.py
 
 from typing import Dict, Any, List, Optional
+
 from tradingagents.agents.utils.agent_states import (
     AgentState,
     InvestDebateState,
     RiskDebateState,
 )
+from tradingagents.watchlist.calendar import to_cn_datetime
 
 
 class Propagator:
@@ -23,6 +25,8 @@ class Propagator:
             "messages": [("human", company_name)],
             "company_of_interest": company_name,
             "trade_date": str(trade_date),
+            # Freeze Beijing clock once so Trader/PM share the same session timing
+            "analysis_clock": to_cn_datetime().isoformat(timespec="seconds"),
             "past_context": past_context,
             "investment_debate_state": InvestDebateState(
                 {

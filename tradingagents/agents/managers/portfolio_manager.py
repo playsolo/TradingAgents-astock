@@ -12,8 +12,10 @@ from __future__ import annotations
 
 from tradingagents.agents.schemas import PortfolioDecision, render_pm_decision
 from tradingagents.agents.utils.agent_utils import (
+    actionability_instruction,
     analysis_date_instruction,
     build_instrument_context,
+    clock_from_state,
     get_language_instruction,
 )
 from tradingagents.agents.utils.structured import (
@@ -27,7 +29,11 @@ def create_portfolio_manager(llm):
 
     def portfolio_manager_node(state) -> dict:
         instrument_context = build_instrument_context(state["company_of_interest"])
-        date_rule = analysis_date_instruction(state.get("trade_date", ""))
+        trade_date = state.get("trade_date", "")
+        date_rule = analysis_date_instruction(trade_date) + actionability_instruction(
+            trade_date,
+            now=clock_from_state(state),
+        )
 
         history = state["risk_debate_state"]["history"]
         risk_debate_state = state["risk_debate_state"]
@@ -49,7 +55,7 @@ def create_portfolio_manager(llm):
 ---
 
 **A-Stock Trading Constraints** (must factor into your decision):
-- T+1 settlement: shares bought today cannot be sold until the next trading day
+- T+1 settlement: shares bought on the actionable session day cannot be sold until the following trading day (see Execution timing)
 - Daily price limits: main board ±10%, STAR/ChiNext ±20%, ST stocks ±5%
 - Minimum lot size: 100 shares (1 手) for main board; 200 shares for STAR/ChiNext
 - Trading hours: 09:30-11:30, 13:00-15:00 (Beijing time)

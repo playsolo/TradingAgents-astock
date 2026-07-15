@@ -6,6 +6,9 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from enum import Enum
+from zoneinfo import ZoneInfo
+
 
 # 产品确认默认：开盘确认 / 午后 / 收盘
 OBSERVE_SLOTS: list[tuple[int, int]] = [(9, 35), (13, 5), (15, 5)]
@@ -14,6 +17,24 @@ _SLOT_WINDOW_MINUTES = 5
 
 # 完整分析过期：距 Baseline.trade_date 的交易日数严格大于该阈值则升级再分析
 FULL_ANALYSIS_STALE_TRADING_DAYS = 3
+
+CN_TZ = ZoneInfo("Asia/Shanghai")
+
+# A 股连续竞价边界（分钟自 00:00）
+_CN_MORNING_OPEN_MIN = 9 * 60 + 30
+_CN_MORNING_CLOSE_MIN = 11 * 60 + 30
+_CN_AFTERNOON_OPEN_MIN = 13 * 60
+_CN_AFTERNOON_CLOSE_MIN = 15 * 60
+
+
+class CnSessionPhase(str, Enum):
+    """Wall-clock A-share session relative to continuous auction."""
+
+    IN_SESSION = "in_session"
+    LUNCH_BREAK = "lunch_break"
+    PRE_MARKET = "pre_market"
+    AFTER_HOURS = "after_hours"
+    NON_TRADING_DAY = "non_trading_day"
 
 
 def is_cn_trading_day(dt: datetime | date) -> bool:
@@ -28,6 +49,63 @@ def _as_date(value: datetime | date | str) -> date:
     if isinstance(value, date):
         return value
     return date.fromisoformat(str(value)[:10])
+
+
+def to_cn_datetime(dt: datetime | None = None) -> datetime:
+    """Normalize to Asia/Shanghai. Naive datetimes are treated as Beijing time."""
+    if dt is None:
+        return datetime.now(CN_TZ)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=CN_TZ)
+    return dt.astimezone(CN_TZ)
+
+
+def cn_today(dt: datetime | None = None) -> date:
+    """Calendar date in Asia/Shanghai."""
+    return to_cn_datetime(dt).date()
+
+
+def cn_session_phase(dt: datetime | None = None) -> CnSessionPhase:
+    """Classify current moment into an A-share session phase (Beijing time)."""
+    now = to_cn_datetime(dt)
+    if not is_cn_trading_day(now):
+        return CnSessionPhase.NON_TRADING_DAY
+    minutes = now.hour * 60 + now.minute
+    if minutes < _CN_MORNING_OPEN_MIN:
+        return CnSessionPhase.PRE_MARKET
+    if _CN_MORNING_OPEN_MIN <= minutes < _CN_MORNING_CLOSE_MIN:
+        return CnSessionPhase.IN_SESSION
+    if _CN_MORNING_CLOSE_MIN <= minutes < _CN_AFTERNOON_OPEN_MIN:
+        return CnSessionPhase.LUNCH_BREAK
+    if _CN_AFTERNOON_OPEN_MIN <= minutes < _CN_AFTERNOON_CLOSE_MIN:
+        return CnSessionPhase.IN_SESSION
+    return CnSessionPhase.AFTER_HOURS
+
+
+def next_cn_trading_day(value: datetime | date | str) -> date:
+    """First approximate trading day strictly after ``value``."""
+    day = _as_date(value) + timedelta(days=1)
+    while not is_cn_trading_day(day):
+        day += timedelta(days=1)
+    return day
+
+
+def actionable_cn_trading_day(dt: datetime | None = None) -> date:
+    """Next session on which new orders can still be placed (wall-clock).
+
+    Pre-market / lunch / continuous auction → that calendar day.
+    After close or non-trading day → next Mon–Fri approximating the next session.
+    """
+    now = to_cn_datetime(dt)
+    phase = cn_session_phase(now)
+    today = now.date()
+    if phase in (
+        CnSessionPhase.IN_SESSION,
+        CnSessionPhase.LUNCH_BREAK,
+        CnSessionPhase.PRE_MARKET,
+    ):
+        return today
+    return next_cn_trading_day(today)
 
 
 def cn_trading_days_since(

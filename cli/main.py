@@ -509,8 +509,10 @@ def get_user_selections():
     )
     selected_ticker = get_ticker()
 
-    # Step 2: Analysis date
-    default_date = datetime.datetime.now().strftime("%Y-%m-%d")
+    # Step 2: Analysis date (Beijing calendar — A-share session alignment)
+    from tradingagents.watchlist.calendar import cn_today
+
+    default_date = cn_today().isoformat()
     console.print(
         create_question_box(
             "Step 2: Analysis Date",
@@ -632,14 +634,14 @@ def get_ticker():
 
 def get_analysis_date():
     """Get the analysis date from user input."""
+    from tradingagents.watchlist.calendar import cn_today
+
     while True:
-        date_str = typer.prompt(
-            "", default=datetime.datetime.now().strftime("%Y-%m-%d")
-        )
+        date_str = typer.prompt("", default=cn_today().isoformat())
         try:
-            # Validate date format and ensure it's not in the future
+            # Validate date format and ensure it's not in the future (Beijing)
             analysis_date = datetime.datetime.strptime(date_str, "%Y-%m-%d")
-            if analysis_date.date() > datetime.datetime.now().date():
+            if analysis_date.date() > cn_today():
                 console.print("[red]Error: Analysis date cannot be in the future[/red]")
                 continue
             return date_str

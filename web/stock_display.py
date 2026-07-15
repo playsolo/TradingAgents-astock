@@ -71,8 +71,40 @@ class StockNameCache:
             mem[code] = clean
             self._save()
 
+    def find_code_by_name(self, name: str) -> str | None:
+        """Reverse lookup code from a Chinese stock name already in the local cache.
+
+        Exact match only — partial hits are unsafe on a sparse cache (could bind the
+        wrong ticker while the full market map would disambiguate or reject).
+        """
+        clean = _clean_stock_name(name).replace(" ", "").replace("　", "")
+        if not clean or not _looks_like_stock_name(clean):
+            return None
+        with self._lock:
+            mem = self._load()
+            exact = [
+                code
+                for code, cached in mem.items()
+                if cached.replace(" ", "").replace("　", "") == clean
+            ]
+            if len(exact) == 1:
+                return exact[0]
+            return None
+
 
 _NAME_CACHE = StockNameCache()
+
+
+def lookup_code_by_cached_name(name: str) -> str | None:
+    """Fast name→code using ~/.tradingagents/stock_names.json only (no mootdx)."""
+    return _NAME_CACHE.find_code_by_name(name)
+
+
+def remember_resolved_name(code: str, raw_name: str) -> None:
+    """Backfill local cache after a slow resolve so next click is instant."""
+    if not _looks_like_stock_name(raw_name):
+        return
+    _NAME_CACHE.set(code, raw_name)
 
 
 def _looks_like_stock_name(value: str) -> bool:

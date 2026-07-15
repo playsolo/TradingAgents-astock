@@ -19,6 +19,9 @@ QUEUE_SESSION_KEY = "analysis_queue"
 SERIAL_QUEUE_SESSION_KEY = "serial_queue_session"
 _HYDRATED_FLAG = "_analysis_queue_hydrated"
 
+# Disk incomplete statuses that may still mean a background analysis is alive.
+_BLOCKING_INCOMPLETE_STATUSES = frozenset({"running", "paused"})
+
 # Split on whitespace / common list separators; keep Yahoo symbols like BRK.B intact.
 _TICKER_SPLIT_RE = re.compile(r"[\s,，;；、]+")
 
@@ -47,9 +50,18 @@ class AnalysisJob:
         return (self.market, self.ticker, self.trade_date)
 
     @classmethod
-    def from_mapping(cls, raw: MutableMapping[str, Any] | AnalysisJob) -> "AnalysisJob":
-        if isinstance(raw, AnalysisJob):
+    def from_mapping(cls, raw: Any) -> "AnalysisJob":
+        if isinstance(raw, cls):
             return raw
+        # Streamlit hot-reload replaces this class; session may still hold instances
+        # from the previous class object (isinstance fails, but attributes remain).
+        if not isinstance(raw, (dict, MutableMapping)) and hasattr(raw, "ticker"):
+            return cls(
+                ticker=str(getattr(raw, "ticker")),
+                trade_date=str(getattr(raw, "trade_date", "")),
+                market=str(getattr(raw, "market", None) or "CN"),
+                fresh=bool(getattr(raw, "fresh", True)),
+            )
         return cls(
             ticker=str(raw["ticker"]),
             trade_date=str(raw["trade_date"]),
@@ -219,6 +231,85 @@ def hydrate_queue(
     if jobs:
         mark_serial_queue_session(session, True)
     return len(jobs)
+
+
+def has_blocking_incomplete_run(
+    incomplete_entries: list[Any] | None,
+) -> bool:
+    """True when disk still shows a run that may overlap a new analysis."""
+    for entry in incomplete_entries or []:
+        if isinstance(entry, MutableMapping):
+            status = entry.get("status")
+        else:
+            status = getattr(entry, "status", None)
+        if status in _BLOCKING_INCOMPLETE_STATUSES:
+            return True
+    return False
+
+
+def format_restored_queue_blocked_notice(
+    restored: int,
+    *,
+    tracker_running: bool,
+    incomplete_entries: list[Any] | None = None,
+    start_already_set: bool = False,
+) -> str:
+    """User-facing notice when hydrate restored jobs but auto-start was skipped."""
+    base = f"已从本地恢复分析队列 {restored} 只"
+    if tracker_running:
+        return base + "（当前仍有分析在跑，恢复的队列将排队等候）"
+    if has_blocking_incomplete_run(incomplete_entries):
+        return (
+            base
+            + "（存在进行中/已暂停任务，不会自动开跑以免重叠；确认空闲后点侧栏「继续队列」）"
+        )
+    if start_already_set:
+        return base + "（已有待启动任务，未重复自动开跑）"
+    return base + "（队列为空或无法自动开跑；可点侧栏「继续队列」）"
+
+
+def maybe_autostart_restored_queue(
+    session: MutableMapping[str, Any],
+    *,
+    restored: int,
+    tracker_running: bool,
+    incomplete_entries: list[Any] | None = None,
+    store: AnalysisQueueStore | None = None,
+    before_commit: Callable[[AnalysisJob], None] | None = None,
+) -> Optional[AnalysisJob]:
+    """Pop and stage the next job when a refresh restored a queue while idle.
+
+    ``before_commit`` runs after the idle gate passes but *before* the queue pop
+    is persisted — use it to write a running incomplete marker so another Web
+    session cannot also autostart.
+
+    Returns the started job, or ``None`` when auto-start is skipped (overlap risk
+    or nothing to restore). Callers should fall back to
+    :func:`format_restored_queue_blocked_notice`.
+    """
+    if restored <= 0 or tracker_running:
+        return None
+    if has_blocking_incomplete_run(incomplete_entries):
+        return None
+    if session.get("start_analysis"):
+        return None
+    queue = _coerce_list(session)
+    if not queue:
+        return None
+    head = queue[0]
+    if before_commit is not None:
+        before_commit(head)
+    head = advance_queue(session, store=store)
+    if head is None:
+        return None
+    mark_serial_queue_session(session, True)
+    session["start_analysis"] = head.to_start_request()
+    session["viewing_history"] = None
+    session["viewing_watchlist"] = False
+    session["queue_advance_notice"] = (
+        f"已从本地恢复分析队列 {restored} 只，空闲故自动开始 {head.ticker}"
+    )
+    return head
 
 
 def prepend_job(

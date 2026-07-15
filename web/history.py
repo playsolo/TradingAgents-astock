@@ -54,13 +54,6 @@ def _completed_key(ticker: str, trade_date: str) -> tuple[str, str]:
     return ticker.upper(), trade_date
 
 
-def _completed_keys() -> set[tuple[str, str]]:
-    return {
-        _completed_key(entry["ticker"], entry["date"])
-        for entry in get_history()
-    }
-
-
 def _load_incomplete_index() -> list[dict[str, Any]]:
     if not _INCOMPLETE_TASKS_FILE.exists():
         return []
@@ -164,25 +157,57 @@ def clear_incomplete_task(ticker: str, trade_date: str) -> None:
 
 
 def get_incomplete_history() -> list[dict[str, Any]]:
-    """Return unfinished tasks that can be resumed from their checkpoint."""
-    completed = _completed_keys()
+    """Return unfinished tasks that can be resumed from their checkpoint.
+
+    Entries stay until ``clear_incomplete_task`` (successful finish / stop).
+    Report file mtime is intentionally ignored — section repair and same-day
+    re-runs both rewrite ``full_states_log_*.json`` without ending the task.
+    """
     active_entries: list[dict[str, Any]] = []
 
     with _INCOMPLETE_TASKS_LOCK:
         entries = _load_incomplete_index()
         for entry in entries:
-            key = _completed_key(entry["ticker"], entry["trade_date"])
-            if key in completed:
-                continue
-
             step = _checkpoint_step(entry["ticker"], entry["trade_date"])
-            entry["checkpoint_step"] = step
-            active_entries.append(entry)
+            view = dict(entry)
+            view["checkpoint_step"] = step
+            active_entries.append(view)
 
         active_entries.sort(key=lambda e: float(e.get("updated_at", 0)), reverse=True)
-        if len(active_entries) != len(entries):
-            _save_incomplete_index(active_entries)
     return active_entries
+
+
+def list_active_incomplete_tasks() -> list[dict[str, Any]]:
+    """Incomplete runs that should surface after a page refresh (no live tracker)."""
+    active_statuses = {"running", "paused", "error"}
+    return [
+        entry
+        for entry in get_incomplete_history()
+        if entry.get("status") in active_statuses
+    ]
+
+
+def format_refresh_incomplete_notice(entries: list[dict[str, Any]]) -> str | None:
+    """User-facing notice when session lost its ProgressTracker after refresh."""
+    if not entries:
+        return None
+    parts: list[str] = []
+    for entry in entries[:5]:
+        status_label = {
+            "error": "出错",
+            "paused": "已暂停",
+            "running": "进行中",
+        }.get(str(entry.get("status")), "未完成")
+        stages = entry.get("completed_stages") or []
+        stage_bit = f"，已完成 {len(stages)} 阶段" if stages else ""
+        parts.append(
+            f"{entry['ticker']}（{status_label}{stage_bit}）"
+        )
+    joined = "、".join(parts)
+    return (
+        f"刷新后失去实时进度面板；检测到未完成任务：{joined}。"
+        "侧栏「未完成任务」可从断点继续（勿与仍在后台跑的旧线程重叠时重复开跑）。"
+    )
 
 
 def load_analysis(path: str) -> dict[str, Any]:
@@ -195,15 +220,61 @@ def extract_signal(state: dict[str, Any]) -> str:
     """Extract the short signal (Buy/Sell/Hold) from a final state dict."""
     import re
 
+    cn_map = {
+        "买入": "Buy",
+        "加仓": "Buy",
+        "增持": "Buy",
+        "卖出": "Sell",
+        "减仓": "Sell",
+        "清仓": "Sell",
+        "持有": "Hold",
+        "观望": "Hold",
+    }
+    rating_map = {
+        "BUY": "Buy",
+        "OVERWEIGHT": "Buy",
+        "HOLD": "Hold",
+        "UNDERWEIGHT": "Sell",
+        "SELL": "Sell",
+    }
+
     for field in (
+        "final_trade_decision",
         "investment_plan",
         "trader_investment_decision",
-        "final_trade_decision",
+        "trader_investment_plan",
     ):
         text = state.get(field, "")
         if not text:
             continue
         cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+
+        # Structured English rating line first
+        m = re.search(
+            r"\*\*Rating\*\*\s*:\s*\*?\*?([A-Za-z]+)",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        if m:
+            mapped = rating_map.get(m.group(1).upper())
+            if mapped:
+                return mapped
+
+        m = re.search(r"最终评级[：:]\s*\*?\*?\s*([^\n*]+)", cleaned)
+        if m:
+            label = m.group(1).strip()
+            for cn, en in cn_map.items():
+                if cn in label:
+                    return en
+            up = label.upper()
+            for key, en in rating_map.items():
+                if key in up:
+                    return en
+
+        for cn, en in cn_map.items():
+            if cn in cleaned:
+                return en
+
         for keyword in ("BUY", "SELL", "HOLD"):
             if keyword in cleaned.upper():
                 return keyword.capitalize()

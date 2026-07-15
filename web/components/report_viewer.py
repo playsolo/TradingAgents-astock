@@ -3,12 +3,30 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Callable
 
 import streamlit as st
 
 from web.pdf_export import generate_markdown, generate_pdf
+from web.report_repair import (
+    has_missing_data,
+    list_repairable_missing_sections,
+    probe_section_data,
+    regenerate_section,
+    repair_all_missing_sections,
+    section_supports_repair,
+)
 from web.stock_display import normalize_stock_mentions, stock_display_label
+
+_SECTION_TITLES = {
+    "market_report": "技术分析",
+    "sentiment_report": "市场情绪",
+    "news_report": "新闻舆情",
+    "fundamentals_report": "基本面",
+    "policy_report": "政策分析",
+    "hot_money_report": "游资追踪",
+    "lockup_report": "解禁/减持",
+}
 
 
 def _strip_think(text: str) -> str:
@@ -68,12 +86,190 @@ def resolve_report_market(
     return "CN"
 
 
+def _probe_session_key(section_key: str, ticker: str, trade_date: str) -> str:
+    return f"probe_ok::{ticker}::{trade_date}::{section_key}"
+
+
+def _batch_detail_key(ticker: str, trade_date: str) -> str:
+    return f"batch_repair_detail::{ticker}::{trade_date}"
+
+
+def _batch_flash_key(ticker: str, trade_date: str) -> str:
+    return f"batch_repair_flash::{ticker}::{trade_date}"
+
+
+def _render_batch_repair_banner(
+    *,
+    final_state: dict[str, Any],
+    ticker: str,
+    trade_date: str,
+    log_path: str | None,
+    llm_config: dict[str, Any] | None,
+    on_state_updated: Callable[[dict[str, Any]], None] | None,
+) -> None:
+    """Top-level one-click: probe all missing sections, then auto-regenerate."""
+    flash = st.session_state.pop(_batch_flash_key(ticker, trade_date), None)
+    if isinstance(flash, dict):
+        for line in flash.get("success") or []:
+            st.success(line)
+        for line in flash.get("error") or []:
+            st.error(line)
+        for line in flash.get("info") or []:
+            st.info(line)
+
+    missing = list_repairable_missing_sections(final_state)
+    detail = st.session_state.get(_batch_detail_key(ticker, trade_date))
+    if detail and (missing or flash):
+        with st.expander("一键重试详情", expanded=bool(flash)):
+            st.code(detail, language="text")
+
+    if not missing:
+        return
+
+    labels = "、".join(_SECTION_TITLES.get(k, k) for k in missing)
+    st.warning(f"检测到可修复的数据缺失：{labels}")
+
+    if not llm_config:
+        st.caption("请先配置 LLM，再使用一键重试。")
+        return
+
+    if st.button(
+        "🔁 一键重试并重新生成",
+        key=f"batch_repair_{ticker}_{trade_date}",
+        type="primary",
+        use_container_width=True,
+        help="重新拉取缺失章节的数据源；成功后自动重写该节报告并刷新质量门控",
+    ):
+        with st.spinner("正在重试数据并自动重新生成缺失章节…"):
+            try:
+                result = repair_all_missing_sections(
+                    state=final_state,
+                    config=llm_config,
+                    log_path=log_path,
+                )
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"一键重试失败：{exc}")
+                return
+
+        st.session_state[_batch_detail_key(ticker, trade_date)] = result.detail
+        for key in result.regenerated:
+            probe_key = _probe_session_key(key, ticker, trade_date)
+            st.session_state.pop(probe_key, None)
+            st.session_state.pop(f"{probe_key}::detail", None)
+
+        if on_state_updated:
+            on_state_updated(result.state)
+
+        flash_msg: dict[str, list[str]] = {"success": [], "error": [], "info": []}
+        if result.regenerated:
+            done = "、".join(_SECTION_TITLES.get(k, k) for k in result.regenerated)
+            flash_msg["success"].append(f"已自动重新生成：{done}")
+            if "final_trade_decision" in (result.state or {}) and (
+                "downstream" in (result.detail or "")
+            ):
+                flash_msg["success"].append(
+                    "已按修复后的证据重新生成投资计划与最终决策（请下拉查看最新「最终投资建议」）"
+                )
+        if result.probe_failed:
+            failed = "、".join(_SECTION_TITLES.get(k, k) for k in result.probe_failed)
+            flash_msg["error"].append(f"数据源仍失败，未重新生成：{failed}")
+        if result.errors:
+            flash_msg["error"].append(
+                "部分章节生成失败：\n" + "\n".join(result.errors)
+            )
+        if not result.regenerated and not result.probe_failed and not result.errors:
+            flash_msg["info"].append("没有需要处理的章节。")
+        st.session_state[_batch_flash_key(ticker, trade_date)] = flash_msg
+        st.rerun()
+
+
+def _render_section_repair(
+    *,
+    section_key: str,
+    title: str,
+    content: str,
+    final_state: dict[str, Any],
+    ticker: str,
+    trade_date: str,
+    log_path: str | None,
+    llm_config: dict[str, Any] | None,
+    on_state_updated: Callable[[dict[str, Any]], None] | None,
+) -> None:
+    """Show retry / regenerate controls when a section contains [数据缺失]."""
+    if not has_missing_data(content):
+        return
+    if not section_supports_repair(section_key):
+        st.info(
+            f"{title} 存在数据缺失标记；本节暂不支持单独修复，请在侧栏对同标的重新完整分析。"
+        )
+        return
+    if not llm_config:
+        st.caption("检测到数据缺失；请配置 LLM 后使用「重试数据 / 重新生成本节」。")
+        return
+
+    st.warning(f"{title} 存在 `[数据缺失]` 标记，可先重试数据源，成功后再重新生成本节。")
+    probe_key = _probe_session_key(section_key, ticker, trade_date)
+    col_probe, col_regen = st.columns(2)
+    with col_probe:
+        if st.button(
+            "🔄 重试数据",
+            key=f"probe_btn_{ticker}_{trade_date}_{section_key}",
+            use_container_width=True,
+        ):
+            with st.spinner("正在重新拉取本节关键数据…"):
+                result = probe_section_data(section_key, ticker, trade_date)
+            st.session_state[probe_key] = result.ok
+            st.session_state[f"{probe_key}::detail"] = result.detail
+            if result.ok:
+                st.success("数据源已恢复，可重新生成本节。")
+            else:
+                st.error("数据源仍失败，稍后可再试。")
+
+    with col_regen:
+        probe_ok = bool(st.session_state.get(probe_key))
+        if st.button(
+            "✨ 重新生成本节",
+            key=f"regen_btn_{ticker}_{trade_date}_{section_key}",
+            use_container_width=True,
+            disabled=not probe_ok,
+            help="需先「重试数据」成功后才能重新生成",
+        ):
+            with st.spinner(f"正在重新生成{title}并刷新质量门控…"):
+                try:
+                    updated = regenerate_section(
+                        state=final_state,
+                        section_key=section_key,
+                        config=llm_config,
+                        log_path=log_path,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"重新生成失败：{exc}")
+                    return
+            if on_state_updated:
+                on_state_updated(updated)
+            st.session_state.pop(probe_key, None)
+            st.session_state.pop(f"{probe_key}::detail", None)
+            if log_path:
+                st.success(f"{title} 已重新生成，并写入报告文件。")
+            else:
+                st.success(f"{title} 已重新生成（仅当前会话；未找到可写报告文件）。")
+            st.rerun()
+
+    detail = st.session_state.get(f"{probe_key}::detail")
+    if detail:
+        with st.expander("最近一次数据重试结果", expanded=False):
+            st.code(detail, language="text")
+
+
 def render_report(
     final_state: dict[str, Any],
     ticker: str,
     trade_date: str,
     signal: str,
     elapsed: float | None = None,
+    log_path: str | None = None,
+    llm_config: dict[str, Any] | None = None,
+    on_state_updated: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
     """Render the full analysis report."""
 
@@ -109,6 +305,15 @@ def render_report(
     )
 
     st.caption("⚠️ 本报告由 AI 自动生成，仅供学习研究，不构成投资建议。")
+
+    _render_batch_repair_banner(
+        final_state=final_state,
+        ticker=ticker,
+        trade_date=trade_date,
+        log_path=log_path,
+        llm_config=llm_config,
+        on_state_updated=on_state_updated,
+    )
 
     # Markdown export always works (no font dependency); PDF is generated
     # lazily and guarded so a PDF/font failure never crashes the results page.
@@ -181,7 +386,18 @@ def render_report(
         content = final_state.get(key, "")
         if not content:
             continue
-        with st.expander(title, expanded=False):
+        with st.expander(title, expanded=has_missing_data(content)):
+            _render_section_repair(
+                section_key=key,
+                title=title,
+                content=str(content),
+                final_state=final_state,
+                ticker=ticker,
+                trade_date=trade_date,
+                log_path=log_path,
+                llm_config=llm_config,
+                on_state_updated=on_state_updated,
+            )
             st.markdown(_display_report_text(content, ticker, final_state))
 
     debate = final_state.get("investment_debate_state")

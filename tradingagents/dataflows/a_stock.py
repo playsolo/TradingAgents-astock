@@ -379,24 +379,52 @@ _EM_SESSION.headers.update({"User-Agent": _UA})
 # 两次东财请求最小间隔(秒)；批量多 Agent 场景可设环境变量 EM_MIN_INTERVAL=1.5~2 降速。
 _EM_MIN_INTERVAL = float(os.environ.get("EM_MIN_INTERVAL", "1.0"))
 _em_last_call = [0.0]  # 模块级上次东财请求时间戳
+# SSL/连接闪断在东财 push2his 上偶发；短暂重试通常可恢复（如主力资金日 K）。
+_EM_MAX_ATTEMPTS = 3
+_EM_RETRY_BASE_DELAY = 0.5
+_EM_RETRY_EXCEPTIONS = (
+    _requests.exceptions.SSLError,
+    _requests.exceptions.ConnectionError,
+    _requests.exceptions.Timeout,
+    _requests.exceptions.ChunkedEncodingError,
+)
 
 
 def _em_get(url, params=None, headers=None, timeout=15, **kwargs):
-    """东财统一请求入口：自动节流 + 复用 session + 默认 UA。
+    """东财统一请求入口：自动节流 + 复用 session + 默认 UA + 瞬态重试。
 
     所有 eastmoney.com 接口都应通过它请求，避免多 Agent 高频拉数据被封 IP。
     串行限流：与上次东财请求间隔 < EM_MIN_INTERVAL 时 sleep 补足 + 0.1~0.5s 随机抖动。
     传入的 headers 会覆盖 session 默认 UA（用于保留各端点自己的 Referer/Origin）。
+    SSL/连接/超时类错误最多重试 _EM_MAX_ATTEMPTS 次（指数退避）。
     """
-    wait = _EM_MIN_INTERVAL - (time.time() - _em_last_call[0])
-    if wait > 0:
-        time.sleep(wait + random.uniform(0.1, 0.5))
-    try:
-        return _EM_SESSION.get(
-            url, params=params, headers=headers, timeout=timeout, **kwargs
-        )
-    finally:
-        _em_last_call[0] = time.time()
+    last_exc: Exception | None = None
+    for attempt in range(_EM_MAX_ATTEMPTS):
+        wait = _EM_MIN_INTERVAL - (time.time() - _em_last_call[0])
+        if wait > 0:
+            time.sleep(wait + random.uniform(0.1, 0.5))
+        try:
+            return _EM_SESSION.get(
+                url, params=params, headers=headers, timeout=timeout, **kwargs
+            )
+        except _EM_RETRY_EXCEPTIONS as exc:
+            last_exc = exc
+            if attempt + 1 >= _EM_MAX_ATTEMPTS:
+                break
+            delay = _EM_RETRY_BASE_DELAY * (2**attempt) + random.uniform(0.0, 0.2)
+            logger.warning(
+                "eastmoney request failed (%s), retry %d/%d in %.1fs: %s",
+                type(exc).__name__,
+                attempt + 1,
+                _EM_MAX_ATTEMPTS - 1,
+                delay,
+                url,
+            )
+            time.sleep(delay)
+        finally:
+            _em_last_call[0] = time.time()
+    assert last_exc is not None
+    raise last_exc
 
 
 def _eastmoney_datacenter(
@@ -435,21 +463,29 @@ def _ths_eps_forecast(code: str) -> pd.DataFrame:
     """Fetch consensus EPS forecast from 同花顺 (direct HTTP).
 
     Returns DataFrame with columns roughly: 年度, 预测机构数, 最小值, 均值, 最大值.
+    SPA pages and HTML parse failures return an empty DataFrame (no exception).
     """
     url = f"https://basic.10jqka.com.cn/new/{code}/worth.html"
     headers = {
         "User-Agent": _UA,
         "Referer": "https://basic.10jqka.com.cn/",
     }
-    r = _requests.get(url, headers=headers, timeout=15)
-    r.encoding = "gbk"
-    dfs = pd.read_html(r.text)
-    # Find the table containing EPS data
+    try:
+        r = _requests.get(url, headers=headers, timeout=15)
+        r.encoding = "gbk"
+        html = r.text or ""
+        if not html.strip() or "<table" not in html.lower():
+            # Modern F10 pages are JS-rendered SPAs without static tables
+            return pd.DataFrame()
+        dfs = pd.read_html(html)
+    except Exception as exc:
+        logger.warning("Consensus EPS forecast failed for %s: %s", code, exc)
+        return pd.DataFrame()
+
     for df in dfs:
         cols = [str(c) for c in df.columns]
         if any("每股收益" in c or "均值" in c for c in cols):
             return df
-    # Fallback: return first table if exists
     return dfs[0] if dfs else pd.DataFrame()
 
 
@@ -993,12 +1029,64 @@ def _sina_stock_code(code: str) -> str:
     return f"{_get_prefix(code)}{code}"
 
 
+def _sina_report_list_to_df(report_list: dict) -> pd.DataFrame:
+    """Convert Sina report_list dict → wide DataFrame (one row per period)."""
+    if not isinstance(report_list, dict) or not report_list:
+        return pd.DataFrame()
+
+    rows: list[dict] = []
+    for date_key, report in report_list.items():
+        if not isinstance(report, dict):
+            continue
+        row: dict = {
+            "报告日": date_key,
+            "publish_date": report.get("publish_date", ""),
+            "rType": report.get("rType", ""),
+        }
+        for item in report.get("data") or []:
+            if not isinstance(item, dict):
+                continue
+            title = (item.get("item_title") or "").strip()
+            value = item.get("item_value")
+            if not title or value in (None, ""):
+                continue
+            row[title] = value
+        rows.append(row)
+
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
+
+
+def _filter_financial_df(
+    df: pd.DataFrame, freq: str, curr_date: str | None,
+) -> pd.DataFrame:
+    if df.empty or "报告日" not in df.columns:
+        return df
+
+    df = df.copy()
+    df["报告日"] = pd.to_datetime(df["报告日"], errors="coerce")
+    df = df.dropna(subset=["报告日"])
+
+    if curr_date:
+        cutoff = pd.to_datetime(curr_date)
+        df = df[df["报告日"] <= cutoff]
+
+    if freq.lower() == "annual":
+        df = df[df["报告日"].dt.month == 12]
+
+    return df.sort_values("报告日", ascending=False).head(8).reset_index(drop=True)
+
+
 def _get_financial_report_sina(
     code: str, report_type: str, freq: str, curr_date: str = None,
 ) -> pd.DataFrame:
     """Shared helper: fetch financial report via Sina direct HTTP API.
 
     report_type: '资产负债表' | '利润表' | '现金流量表'
+
+    Sina currently returns ``report_list`` keyed by YYYYMMDD. Legacy payloads
+    that expose a top-level ``fzb``/``lrb``/``llb`` list are still accepted.
     """
     _report_type_map = {
         "资产负债表": "fzb",
@@ -1007,8 +1095,7 @@ def _get_financial_report_sina(
     }
     source_type = _report_type_map.get(report_type, "lrb")
 
-    prefix = "sh" if code.startswith("6") else "sz"
-    paper_code = f"{prefix}{code}"
+    paper_code = _sina_stock_code(code)
     url = "https://quotes.sina.cn/cn/api/openapi.php/CompanyFinanceService.getFinanceReport2022"
     params = {
         "paperCode": paper_code,
@@ -1021,24 +1108,41 @@ def _get_financial_report_sina(
     d = r.json()
 
     result = d.get("result", {}).get("data", {})
-    items = result.get(source_type, [])
-    if not isinstance(items, list) or not items:
+    if not isinstance(result, dict):
         return pd.DataFrame()
 
-    df = pd.DataFrame(items)
+    # Legacy: top-level list under fzb/lrb/llb
+    items = result.get(source_type, [])
+    if isinstance(items, list) and items:
+        df = pd.DataFrame(items)
+        return _filter_financial_df(df, freq, curr_date)
 
-    # Filter by curr_date
-    if curr_date and "报告日" in df.columns:
-        df["报告日"] = pd.to_datetime(df["报告日"], errors="coerce")
-        cutoff = pd.to_datetime(curr_date)
-        df = df[df["报告日"] <= cutoff]
+    # Current: nested report_list
+    df = _sina_report_list_to_df(result.get("report_list") or {})
+    return _filter_financial_df(df, freq, curr_date)
 
-    # Filter by frequency (annual = month 12 reports only)
-    if freq.lower() == "annual" and "报告日" in df.columns:
-        months = pd.to_datetime(df["报告日"], errors="coerce").dt.month
-        df = df[months == 12]
 
-    return df.head(8)
+def _append_debt_ratio_summary(df: pd.DataFrame) -> str:
+    """Compute 资产负债率 lines from 资产总计/负债合计 columns when present."""
+    if df.empty or "资产总计" not in df.columns or "负债合计" not in df.columns:
+        return ""
+
+    lines = ["# Derived 资产负债率 (负债合计 / 资产总计):"]
+    for _, row in df.iterrows():
+        try:
+            assets = float(row["资产总计"])
+            liab = float(row["负债合计"])
+        except (TypeError, ValueError):
+            continue
+        if assets <= 0:
+            continue
+        date_label = row["报告日"]
+        if hasattr(date_label, "strftime"):
+            date_label = date_label.strftime("%Y-%m-%d")
+        lines.append(f"{date_label}: {liab / assets * 100:.2f}%")
+    if len(lines) == 1:
+        return ""
+    return "\n".join(lines) + "\n\n"
 
 
 def get_balance_sheet(
@@ -1056,6 +1160,7 @@ def get_balance_sheet(
             return f"No balance sheet data found for A-stock '{code}'"
 
         csv_string = df.to_csv(index=False)
+        ratio_block = _append_debt_ratio_summary(df)
 
         header = f"# Balance Sheet for {code} (A-stock, {freq})\n"
         header += "# Data source: sina direct HTTP\n"
@@ -1063,7 +1168,7 @@ def get_balance_sheet(
             f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         )
 
-        return header + csv_string
+        return header + ratio_block + csv_string
 
     except Exception as e:
         return f"Error retrieving balance sheet for {code}: {str(e)}"
@@ -1392,50 +1497,187 @@ def get_global_news(
 # ---- 9. get_insider_transactions ----
 
 
+def _coerce_f10_text(payload) -> str:
+    """Normalize mootdx F10 payloads (str or dict-of-sections) to plain text."""
+    if payload is None:
+        return ""
+    if isinstance(payload, str):
+        return payload
+    if isinstance(payload, dict):
+        parts = []
+        for key, value in payload.items():
+            if value is None:
+                continue
+            chunk = value if isinstance(value, str) else str(value)
+            if not chunk.strip():
+                continue
+            parts.append(chunk if key in chunk[:40] else f"【{key}】\n{chunk}")
+        return "\n\n".join(parts)
+    return str(payload)
+
+
+def _em_security_code(code: str) -> str:
+    """6-digit code → Eastmoney F10 code, e.g. SH688401 / SZ000001."""
+    prefix = _get_prefix(code).upper()
+    return f"{prefix}{code}"
+
+
+def _em_shareholder_research(code: str) -> str:
+    """Shareholder / institution holdings via Eastmoney PC_HSF10 PageAjax."""
+    url = (
+        "https://emweb.securities.eastmoney.com"
+        "/PC_HSF10/ShareholderResearch/PageAjax"
+    )
+    r = _em_get(
+        url,
+        params={"code": _em_security_code(code)},
+        timeout=15,
+    )
+    d = r.json()
+    if not isinstance(d, dict) or not d:
+        return ""
+
+    lines = [
+        f"# Shareholder Research for {code} (A-stock)",
+        "# Note: A-stock equivalent of insider transactions",
+        "# Data source: 东财 F10 ShareholderResearch",
+        f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+    ]
+
+    controllers = d.get("sjkzr") or []
+    if controllers:
+        lines.append("## 实际控制人")
+        for row in controllers:
+            lines.append(
+                f"  {row.get('HOLDER_NAME', '')}: "
+                f"持股比例 {row.get('HOLD_RATIO', '')}%"
+            )
+
+    tops = d.get("sdgd") or []
+    if tops:
+        end_date = str(tops[0].get("END_DATE", ""))[:10]
+        lines.append(f"\n## 十大股东 ({end_date})")
+        lines.append("排名 | 股东 | 持股数 | 占比(%)")
+        for row in tops[:10]:
+            lines.append(
+                f"  {row.get('HOLDER_RANK', '')} "
+                f"| {row.get('HOLDER_NAME', '')} "
+                f"| {row.get('HOLD_NUM', '')} "
+                f"| {row.get('HOLD_NUM_RATIO', '')}"
+            )
+
+    float_tops = d.get("sdltgd") or []
+    if float_tops:
+        end_date = str(float_tops[0].get("END_DATE", ""))[:10]
+        lines.append(f"\n## 十大流通股东 ({end_date})")
+        lines.append("排名 | 股东 | 类型 | 持股数 | 占比(%)")
+        for row in float_tops[:10]:
+            lines.append(
+                f"  {row.get('HOLDER_RANK', '')} "
+                f"| {row.get('HOLDER_NAME', '')} "
+                f"| {row.get('HOLDER_TYPE', '')} "
+                f"| {row.get('HOLD_NUM', '')} "
+                f"| {row.get('HOLD_NUM_RATIO', '')}"
+            )
+
+    orgs = d.get("jgcc") or []
+    if orgs:
+        lines.append("\n## 机构持仓汇总")
+        lines.append("报告期 | 机构类型 | 家数 | 占总股本比(%)")
+        for row in orgs[:12]:
+            lines.append(
+                f"  {str(row.get('REPORT_DATE', ''))[:10]} "
+                f"| {row.get('ORG_TYPE', '')} "
+                f"| {row.get('TOTAL_ORG_NUM', '')} "
+                f"| {row.get('TOTAL_SHARES_RATIO', '')}"
+            )
+
+    holders = d.get("gdrs") or []
+    if holders:
+        lines.append("\n## 股东户数")
+        lines.append("期末 | 股东户数 | 户均持股 | 较上期")
+        for row in holders[:8]:
+            lines.append(
+                f"  {str(row.get('END_DATE', ''))[:10]} "
+                f"| {row.get('HOLDER_TOTAL_NUM', '')} "
+                f"| {row.get('AVG_FREE_SHARES', '')} "
+                f"| {row.get('TOTAL_NUM_RATIO', '')}"
+            )
+
+    # Need at least one meaningful section besides headers
+    if len(lines) <= 5:
+        return ""
+    return "\n".join(lines)
+
+
 def get_insider_transactions(
     ticker: Annotated[str, "A-stock code"],
 ) -> str:
-    """Get shareholder/insider activity via mootdx F10.
+    """Get shareholder/insider activity (东财 F10 primary, mootdx F10 fallback).
 
     Note: A-stock insider transaction data differs from US markets.
-    Uses mootdx F10 shareholder research as the closest equivalent.
+    mootdx ``F10(name=股东研究)`` currently often returns the 最新提示 tab
+    instead of shareholder sections, so Eastmoney ShareholderResearch is
+    preferred.
     """
     code = _normalize_ticker(ticker)
+    last_err: Exception | None = None
+
+    try:
+        em_text = _em_shareholder_research(code)
+        if em_text:
+            return em_text
+    except Exception as em_exc:
+        last_err = em_exc
+        logger.warning(
+            "Eastmoney shareholder research failed for %s: %s", code, em_exc
+        )
 
     try:
         with _mootdx_client_session() as client:
-            text = client.F10(symbol=code, name="股东研究")
+            payload = client.F10(symbol=code, name="股东研究")
 
-        if not text or not text.strip():
-            return f"No insider/shareholder data found for A-stock '{code}'"
-
-        header = f"# Shareholder Research for {code} (A-stock)\n"
-        header += "# Note: A-stock equivalent of insider transactions\n"
-        header += "# Data source: mootdx F10\n"
-        header += (
-            f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        text = _coerce_f10_text(payload)
+        # Require explicit shareholder-structure markers; 最新提示 often
+        # mentions 「股东人数」 in a headline metric and must not qualify.
+        has_shareholder_section = any(
+            key in text
+            for key in ("【4.股东变化】", "十大股东", "十大流通股东")
         )
+        if text.strip() and has_shareholder_section:
+            header = f"# Shareholder Research for {code} (A-stock)\n"
+            header += "# Note: A-stock equivalent of insider transactions\n"
+            header += "# Data source: mootdx F10\n"
+            header += (
+                f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            )
 
-        import re
+            import re
 
-        sec4_hits = list(re.finditer(r"\r?\n【4\.股东变化】\r?\n", text))
-        if sec4_hits:
-            sec4_pos = sec4_hits[-1].start()
-            before_sec4 = text[:sec4_pos]
-            sec4_text = text[sec4_pos:]
-            cut_at = 2000
-            if len(sec4_text) > cut_at:
-                sec4_text = (
-                    sec4_text[:cut_at]
-                    + "\n\n(... older shareholder history omitted, "
-                    f"{len(text) - sec4_pos - cut_at} chars truncated ...)"
-                )
-            text = before_sec4 + sec4_text
+            sec4_hits = list(re.finditer(r"\r?\n【4\.股东变化】\r?\n", text))
+            if sec4_hits:
+                sec4_pos = sec4_hits[-1].start()
+                before_sec4 = text[:sec4_pos]
+                sec4_text = text[sec4_pos:]
+                cut_at = 2000
+                if len(sec4_text) > cut_at:
+                    sec4_text = (
+                        sec4_text[:cut_at]
+                        + "\n\n(... older shareholder history omitted, "
+                        f"{len(text) - sec4_pos - cut_at} chars truncated ...)"
+                    )
+                text = before_sec4 + sec4_text
 
-        return header + text
-
+            return header + text
     except Exception as e:
-        return f"Error retrieving insider/shareholder data for {code}: {str(e)}"
+        last_err = e
+
+    if last_err is not None:
+        return (
+            f"Error retrieving insider/shareholder data for {code}: {last_err}"
+        )
+    return f"No insider/shareholder data found for A-stock '{code}'"
 
 
 # ---- 10. get_profit_forecast ----
@@ -1791,13 +2033,69 @@ _BAIDU_PAE_HEADERS = {
 # ---- 13. get_concept_blocks ----
 
 
+def _em_concept_blocks(code: str) -> str:
+    """Concept / industry boards via Eastmoney CoreConception PageAjax."""
+    url = (
+        "https://emweb.securities.eastmoney.com"
+        "/PC_HSF10/CoreConception/PageAjax"
+    )
+    r = _em_get(
+        url,
+        params={"code": _em_security_code(code)},
+        timeout=15,
+    )
+    d = r.json()
+    if not isinstance(d, dict):
+        return ""
+
+    boards = d.get("ssbk") or []
+    themes = d.get("hxtc") or []
+    if not boards and not themes:
+        return ""
+
+    lines = [
+        f"# Concept & Sector Blocks for {code} (A-stock)",
+        "# Source: 东财 F10 CoreConception",
+        f"# Retrieved: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+    ]
+
+    concept_names: list[str] = []
+    if boards:
+        lines.append("## 所属板块")
+        for row in boards:
+            name = (row.get("BOARD_NAME") or "").strip()
+            if not name:
+                continue
+            rank = row.get("BOARD_RANK", "")
+            suffix = f" (rank {rank})" if rank not in (None, "") else ""
+            lines.append(f"  {name}{suffix}")
+            concept_names.append(name)
+
+    if themes:
+        lines.append("\n## 核心题材 / 主营要点")
+        for row in themes[:12]:
+            keyword = (row.get("KEYWORD") or "").strip()
+            klass = (row.get("KEY_CLASSIF") or "").strip()
+            content = (row.get("MAINPOINT_CONTENT") or "").strip()
+            label = keyword or klass or "要点"
+            detail = content[:120] + ("…" if len(content) > 120 else "")
+            lines.append(f"  {label}" + (f"：{detail}" if detail else ""))
+            if keyword and keyword not in concept_names:
+                concept_names.append(keyword)
+
+    if concept_names:
+        lines.append(f"\nConcept tags: {' / '.join(concept_names[:20])}")
+    return "\n".join(lines)
+
+
 def get_concept_blocks(
     ticker: Annotated[str, "A-stock code (e.g. 688017)"],
 ) -> str:
-    """Get concept/sector/region blocks that a stock belongs to (百度股市通).
+    """Get concept/sector/region blocks for a stock.
 
-    Returns industry classification (申万), concept themes, and region.
-    Each block includes current day's change percentage.
+    Primary: 百度股市通 PAE. Fallback: 东财 F10 CoreConception when Baidu
+    returns non-zero ResultCode (403 is common) or empty payload.
     """
     import requests
 
@@ -1812,48 +2110,59 @@ def get_concept_blocks(
         r = requests.get(url, headers=_BAIDU_PAE_HEADERS, timeout=10)
         d = r.json()
 
-        if str(d.get("ResultCode", -1)) != "0":
-            return (
-                f"Baidu PAE error: ResultCode={d.get('ResultCode')} "
-                f"{d.get('ResultMsg', '')}"
+        if str(d.get("ResultCode", -1)) == "0":
+            result = d.get("Result", {})
+            categories = result.get(code, [])
+            if categories:
+                lines = [
+                    f"# Concept & Sector Blocks for {code} (A-stock)",
+                    "# Source: 百度股市通 (Baidu PAE)",
+                    f"# Retrieved: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                    "",
+                ]
+                concept_names: list[str] = []
+                for cat in categories:
+                    cat_name = cat.get("name", "")
+                    items = cat.get("list", [])
+                    if not items:
+                        continue
+                    lines.append(f"## {cat_name}")
+                    for item in items:
+                        name = item.get("name", "")
+                        ratio = item.get("ratio", "")
+                        desc = item.get("describe", "")
+                        suffix = f" ({desc})" if desc else ""
+                        lines.append(f"  {name}{suffix}: {ratio}")
+                        if cat_name == "概念":
+                            concept_names.append(name)
+                if concept_names:
+                    lines.append(f"\nConcept tags: {' / '.join(concept_names)}")
+                return "\n".join(lines)
+            baidu_err = "empty Result"
+        else:
+            baidu_err = (
+                f"ResultCode={d.get('ResultCode')} {d.get('ResultMsg', '')}".strip()
             )
-
-        result = d.get("Result", {})
-        categories = result.get(code, [])
-        if not categories:
-            return f"No concept/block data for {code}"
-
-        lines = [
-            f"# Concept & Sector Blocks for {code} (A-stock)",
-            f"# Source: 百度股市通 (Baidu PAE)",
-            f"# Retrieved: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            "",
-        ]
-
-        concept_names: list[str] = []
-
-        for cat in categories:
-            cat_name = cat.get("name", "")
-            items = cat.get("list", [])
-            if not items:
-                continue
-            lines.append(f"## {cat_name}")
-            for item in items:
-                name = item.get("name", "")
-                ratio = item.get("ratio", "")
-                desc = item.get("describe", "")
-                suffix = f" ({desc})" if desc else ""
-                lines.append(f"  {name}{suffix}: {ratio}")
-                if cat_name == "概念":
-                    concept_names.append(name)
-
-        if concept_names:
-            lines.append(f"\nConcept tags: {' / '.join(concept_names)}")
-
-        return "\n".join(lines)
-
     except Exception as e:
-        return f"Error fetching concept blocks for {code}: {str(e)}"
+        baidu_err = f"{type(e).__name__}: {e}"
+
+    try:
+        em_text = _em_concept_blocks(code)
+        if em_text:
+            return em_text
+    except Exception as em_exc:
+        logger.warning(
+            "Eastmoney concept fallback failed for %s: %s", code, em_exc
+        )
+        return (
+            f"Error fetching concept blocks for {code}: "
+            f"Baidu ({baidu_err}); EM ({em_exc})"
+        )
+
+    return (
+        f"No concept/block data for {code} "
+        f"(Baidu: {baidu_err}; Eastmoney fallback empty)"
+    )
 
 
 # ---- 14. get_fund_flow ----
@@ -1932,6 +2241,8 @@ def get_fund_flow(
                     lines.append(
                         f"  {parts[0]}: "
                         f"主力={float(parts[1])/1e4:.0f}万 "
+                        f"小单={float(parts[2])/1e4:.0f}万 "
+                        f"中单={float(parts[3])/1e4:.0f}万 "
                         f"大单={float(parts[4])/1e4:.0f}万 "
                         f"超大单={float(parts[5])/1e4:.0f}万"
                     )
@@ -1955,41 +2266,57 @@ def get_fund_flow(
                 "No realtime fund flow (non-trading hours or holiday)"
             )
 
-        # Historical daily fund flow (push2his)
+        # Historical daily fund flow (push2his) — isolated so SSL flakes
+        # do not discard an otherwise successful realtime section.
         if include_history:
-            url_hist = (
-                "https://push2his.eastmoney.com"
-                "/api/qt/stock/fflow/daykline/get"
-            )
-            params_hist = {
-                "secid": secid, "lmt": 20, "klt": 101,
-                "fields1": "f1,f2,f3,f7",
-                "fields2": "f51,f52,f53,f54,f55,f56,f57",
-            }
-            rh = _em_get(url_hist, params=params_hist, timeout=10)
-            dh = rh.json()
-            hist_klines = dh.get("data", {}).get("klines", [])
+            try:
+                url_hist = (
+                    "https://push2his.eastmoney.com"
+                    "/api/qt/stock/fflow/daykline/get"
+                )
+                params_hist = {
+                    "secid": secid, "lmt": 20, "klt": 101,
+                    "fields1": "f1,f2,f3,f7",
+                    "fields2": "f51,f52,f53,f54,f55,f56,f57",
+                }
+                rh = _em_get(url_hist, params=params_hist, timeout=10)
+                dh = rh.json()
+                hist_klines = dh.get("data", {}).get("klines", [])
 
-            if hist_klines:
-                lines.append(
-                    f"\n## Historical Daily Fund Flow "
-                    f"(last {len(hist_klines)} trading days)"
+                if hist_klines:
+                    lines.append(
+                        f"\n## Historical Daily Fund Flow "
+                        f"(last {len(hist_klines)} trading days)"
+                    )
+                    lines.append(
+                        "Date | 主力净流入(万) | 大单(万) "
+                        "| 中单(万) | 小单(万) | 超大单(万)"
+                    )
+                    for line in hist_klines:
+                        parts = line.split(",")
+                        if len(parts) >= 6:
+                            lines.append(
+                                f"  {parts[0]} "
+                                f"| main={float(parts[1])/1e4:.0f} "
+                                f"| large={float(parts[4])/1e4:.0f} "
+                                f"| mid={float(parts[3])/1e4:.0f} "
+                                f"| small={float(parts[2])/1e4:.0f} "
+                                f"| super={float(parts[5])/1e4:.0f}"
+                            )
+                else:
+                    lines.append(
+                        "\n## Historical Daily Fund Flow\n"
+                        "No historical fund-flow series returned."
+                    )
+            except Exception as hist_exc:
+                logger.warning(
+                    "fund flow history failed for %s: %s", code, hist_exc
                 )
                 lines.append(
-                    "Date | 主力净流入(万) | 大单(万) "
-                    "| 中单(万) | 小单(万) | 超大单(万)"
+                    "\n## Historical Daily Fund Flow\n"
+                    f"(历史日度暂不可用: {type(hist_exc).__name__} — "
+                    "盘中分时资金流仍可用，勿因此标注报告级数据缺失)"
                 )
-                for line in hist_klines:
-                    parts = line.split(",")
-                    if len(parts) >= 6:
-                        lines.append(
-                            f"  {parts[0]} "
-                            f"| main={float(parts[1])/1e4:.0f} "
-                            f"| large={float(parts[4])/1e4:.0f} "
-                            f"| mid={float(parts[3])/1e4:.0f} "
-                            f"| small={float(parts[2])/1e4:.0f} "
-                            f"| super={float(parts[5])/1e4:.0f}"
-                        )
 
         return "\n".join(lines)
 
@@ -2243,6 +2570,9 @@ def get_industry_comparison(
             "fields": "f2,f3,f4,f12,f13,f14,f104,f105,f128,f136,f140,f141,f207",
         }
         r = _em_get(url, params=params, timeout=15)
+        # Empty / HTML 502 bodies raise JSONDecodeError → fallback below
+        if not (r.text or "").strip() or (r.text or "").lstrip().startswith("<"):
+            raise ValueError(f"empty or non-JSON industry payload (HTTP {r.status_code})")
         d = r.json()
         items = d.get("data", {}).get("diff", [])
 
@@ -2273,5 +2603,15 @@ def get_industry_comparison(
             lines.append("行业数据获取为空。")
     except Exception as e:
         lines.append(f"行业对比查询失败: {e}")
+        try:
+            concept = _em_concept_blocks(code)
+            if concept:
+                lines.append(
+                    "\n## 个股所属板块兜底 (东财 CoreConception)\n"
+                    "全市场行业排名暂不可用，以下为该股板块归属："
+                )
+                lines.append(concept)
+        except Exception as fb_exc:
+            lines.append(f"板块兜底也失败: {fb_exc}")
 
     return "\n".join(lines)

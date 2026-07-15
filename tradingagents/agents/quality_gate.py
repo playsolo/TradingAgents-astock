@@ -75,7 +75,10 @@ def _build_review_prompt(
         if not content:
             content = "（报告为空）"
         if len(content) > 3000:
-            content = content[:3000] + "\n... (truncated for review)"
+            content = (
+                content[:3000]
+                + "\n…（审核输入篇幅裁剪，原文可能更长，请勿仅据此判定报告被截断）"
+            )
         report_sections.append(f"### {name} ({analyst_type})\n{content}")
 
     all_reports = "\n\n".join(report_sections)

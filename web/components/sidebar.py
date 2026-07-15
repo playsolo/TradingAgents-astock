@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import os
-from datetime import date
 
 import streamlit as st
 
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.checkpointer import clear_checkpoint
 from tradingagents.llm_clients.model_catalog import MODEL_OPTIONS
+from tradingagents.watchlist.calendar import cn_today
 from web.analysis_queue import (
     advance_queue,
     append_jobs,
@@ -69,11 +69,20 @@ def _resolve_user_input(raw: str) -> tuple[str, str | None]:
 
     Accepts 6-digit codes or Chinese stock names (e.g. '宝光股份').
     Returns (code, None) on success or ("", error_msg) on failure.
+    Prefers local stock_names reverse lookup so Streamlit click handlers
+    do not block on mootdx full-market map builds.
     """
+    from web.stock_display import lookup_code_by_cached_name, remember_resolved_name
+
+    cached = lookup_code_by_cached_name(raw)
+    if cached:
+        return cached, None
+
     from tradingagents.dataflows.a_stock import resolve_ticker
 
     try:
         code = resolve_ticker(raw)
+        remember_resolved_name(code, raw)
         return code, None
     except ValueError as e:
         return "", str(e)
@@ -99,6 +108,24 @@ def _clear_analysis_artifacts(ticker: str, trade_date: str) -> None:
 def _first_raw_ticker(raw_tickers: str) -> str:
     tokens = parse_ticker_inputs(raw_tickers)
     return tokens[0] if tokens else ""
+
+
+# Streamlit forbids mutating a widget key after the widget is instantiated in
+# the same run. Defer clear to the next run (before text_area is created).
+_PENDING_CLEAR_INPUT_TICKERS = "_pending_clear_input_tickers"
+_INPUT_TICKERS_KEY = "input_tickers"
+
+
+def request_clear_ticker_input(session_state) -> None:
+    session_state[_PENDING_CLEAR_INPUT_TICKERS] = True
+
+
+def apply_pending_clear_ticker_input(session_state) -> bool:
+    """Apply a deferred clear of the ticker text_area. Call before the widget."""
+    if not session_state.pop(_PENDING_CLEAR_INPUT_TICKERS, False):
+        return False
+    session_state[_INPUT_TICKERS_KEY] = ""
+    return True
 
 
 def _submit_analysis_jobs(raw_tickers: str, market: str, trade_date: str) -> None:
@@ -128,28 +155,41 @@ def _submit_analysis_jobs(raw_tickers: str, market: str, trade_date: str) -> Non
             market_now = getattr(tracker, "market", None) or market
             exclude = {(market_now, tracker.ticker, tracker.trade_date)}
         added = append_jobs(st.session_state, jobs, exclude=exclude)
-        st.success(
+        st.session_state["queue_advance_notice"] = (
             f"✅ 已加入分析队列 {added} 只（当前队列 {len(queue_snapshot(st.session_state))}）"
         )
+        if added > 0:
+            request_clear_ticker_input(st.session_state)
+            # Rerun so apply_pending_clear_ticker_input runs before text_area.
+            st.rerun()
         return
 
     head, *rest = jobs
-    if market == "CN":
-        for token in tokens:
-            code, err = _resolve_user_input(token)
-            if not err and code != token.strip():
-                st.success(f"✅ {token.strip()} → {code}")
-                break
+    if market == "CN" and tokens:
+        # jobs 已解析过；不要再次 resolve_ticker（中文名会卡 mootdx 全表）。
+        raw0 = tokens[0].strip()
+        if raw0 and raw0 != head.ticker and not (
+            raw0.isdigit() and len(raw0) == 6
+        ):
+            st.success(f"✅ {raw0} → {head.ticker}")
     # Idle “开始分析” starts a new batch; drop any leftover queued jobs.
     clear_queue(st.session_state)
     append_jobs(st.session_state, rest)
     if rest:
         mark_serial_queue_session(st.session_state, True)
+    # Record before sidebar继续往下画「未完成任务」，同一次脚本即可看到进行中。
+    record_incomplete_task(
+        head.ticker,
+        head.trade_date,
+        status="running",
+        completed_stages=[],
+    )
     st.session_state["start_analysis"] = head.to_start_request()
     st.session_state["viewing_history"] = None
     st.session_state["viewing_watchlist"] = False
     st.query_params.clear()
     st.query_params["view"] = "home"
+    # Clear ticker input only after app.py successfully begins analysis.
 
 
 def _resolve_cn_or_raise(raw: str) -> str:
@@ -164,7 +204,10 @@ def _render_analysis_queue() -> None:
     if not jobs:
         return
     st.markdown("#### 分析队列")
-    st.caption("串行执行，与观察池无关；完成后自动开始下一只。刷新后会从本地恢复。")
+    st.caption(
+        "串行执行，与观察池无关；完成后自动开始下一只。"
+        "刷新后会从本地恢复，空闲时自动开跑。"
+    )
     for idx, job in enumerate(jobs, start=1):
         st.caption(format_queue_job_caption(job, idx))
 
@@ -369,6 +412,7 @@ def render_sidebar() -> None:
     market = "US" if market_label == "美股" else "CN"
     st.session_state["analysis_market"] = market
 
+    apply_pending_clear_ticker_input(st.session_state)
     ticker_input = st.text_area(
         "股票代码（可多个）",
         placeholder=(
@@ -376,7 +420,7 @@ def render_sidebar() -> None:
             if market == "US"
             else "每行一个，或逗号分隔\n例: 300750, 600519\n或: 宁德时代"
         ),
-        key="input_tickers",
+        key=_INPUT_TICKERS_KEY,
         height=88,
         help=(
             "支持一次输入多只美股代码（Yahoo 风格）。分析为串行队列，不会加入观察池。"
@@ -387,7 +431,7 @@ def render_sidebar() -> None:
 
     trade_date = st.date_input(
         "分析日期",
-        value=date.today(),
+        value=cn_today(),
         key="input_date",
     )
 
@@ -428,6 +472,16 @@ def render_sidebar() -> None:
 
     if market == "CN":
         st.markdown("---")
+        st.markdown("#### 策略")
+        if st.button(
+            "📊 价值波段扫描",
+            key="nav_value_swing",
+            use_container_width=True,
+            help="全市场 → 流动性/估值筛选 → 催化剂评分 → 推荐分级",
+        ):
+            from web.navigation import navigate
+            navigate("home")  # 回到主页（在扫描 tab 中展示）
+
         st.markdown("#### 观察")
         from tradingagents.watchlist.store import default_store
 

@@ -8,8 +8,10 @@ from langchain_core.messages import AIMessage
 
 from tradingagents.agents.schemas import TraderProposal, render_trader_proposal
 from tradingagents.agents.utils.agent_utils import (
+    actionability_instruction,
     analysis_date_instruction,
     build_instrument_context,
+    clock_from_state,
     get_language_instruction,
 )
 from tradingagents.agents.utils.structured import (
@@ -25,7 +27,11 @@ def create_trader(llm):
         company_name = state["company_of_interest"]
         instrument_context = build_instrument_context(company_name)
         investment_plan = state["investment_plan"]
-        date_rule = analysis_date_instruction(state.get("trade_date", ""))
+        trade_date = state.get("trade_date", "")
+        date_rule = analysis_date_instruction(trade_date) + actionability_instruction(
+            trade_date,
+            now=clock_from_state(state),
+        )
 
         # Collect A-stock specific analyst reports
         policy_report = state.get("policy_report", "")
@@ -49,7 +55,9 @@ def create_trader(llm):
                     "You are a trading agent specialising in A-share (China mainland) stocks. "
                     "Translate the Research Manager's investment plan into a concrete, executable "
                     "transaction proposal. You must factor in A-stock trading constraints:\n"
-                    "- T+1 settlement: shares bought today cannot be sold until the next trading day\n"
+                    "- T+1 settlement: shares bought on the actionable session day "
+                    "cannot be sold until the following trading day "
+                    "(see Execution timing for which day is actionable)\n"
                     "- Daily price limits: main board ±10%, STAR/ChiNext ±20%, ST stocks ±5%\n"
                     "- Minimum lot: 100 shares (main board) or 200 shares (STAR/ChiNext)\n"
                     "- Trading hours: 09:30-11:30, 13:00-15:00 Beijing time\n"

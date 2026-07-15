@@ -33,15 +33,24 @@ import streamlit as st  # noqa: E402
 from tradingagents.default_config import DEFAULT_CONFIG  # noqa: E402
 
 from web.analysis_queue import (  # noqa: E402
+    format_restored_queue_blocked_notice,
     hydrate_queue,
+    maybe_autostart_restored_queue,
     prepend_job,
     take_next_job,
 )
 from web.components.progress_panel import render_running_progress  # noqa: E402
 from web.components.report_viewer import render_report  # noqa: E402
-from web.components.sidebar import render_sidebar  # noqa: E402
+from web.components.sidebar import render_sidebar, request_clear_ticker_input  # noqa: E402
 from web.components.watch_page import render_watch_page  # noqa: E402
-from web.history import clear_incomplete_task, extract_signal, load_analysis  # noqa: E402
+from web.history import (  # noqa: E402
+    clear_incomplete_task,
+    extract_signal,
+    format_refresh_incomplete_notice,
+    list_active_incomplete_tasks,
+    load_analysis,
+    record_incomplete_task,
+)
 from web.navigation import apply_query_to_session  # noqa: E402
 from web.progress import ProgressTracker  # noqa: E402
 from web.runner import run_analysis_in_thread  # noqa: E402
@@ -60,15 +69,61 @@ st.set_page_config(
 apply_query_to_session()
 
 # Restore waiting queue after browser refresh (session_state is empty on new session).
-# Do NOT auto-start the next job here: Streamlit refresh drops the tracker but the
-# previous analysis daemon thread may still be running; launching another ticker
-# would overlap runs.
+# Auto-start only when idle: no live tracker and no running/paused incomplete task
+# on disk (refresh drops ProgressTracker while a daemon thread may still be alive).
 _restored = hydrate_queue(st.session_state)
+_tracker = st.session_state.get("tracker")
+_tracker_running = bool(_tracker is not None and getattr(_tracker, "is_running", False))
+
+# Refresh drops ProgressTracker; surface any incomplete run still recorded on disk.
+_active_incomplete: list = []
+if (
+    not st.session_state.get("_refresh_incomplete_noticed")
+    and _tracker is None
+):
+    st.session_state["_refresh_incomplete_noticed"] = True
+    _active_incomplete = list_active_incomplete_tasks()
+
+_started = None
 if _restored > 0:
-    st.session_state["queue_advance_notice"] = (
-        f"已从本地恢复分析队列 {_restored} 只"
-        "（不会自动开跑，避免与刷新前仍在后台的分析重叠；空闲时点侧栏「继续队列」）"
+    # Always re-check disk for the overlap gate (listing above is notice-only once).
+    _gate_incomplete = _active_incomplete or list_active_incomplete_tasks()
+    def _mark_autostart_running(job) -> None:
+        # Before queue pop is persisted — blocks other sessions' idle gate.
+        record_incomplete_task(
+            job.ticker,
+            job.trade_date,
+            status="running",
+            completed_stages=[],
+        )
+
+    _started = maybe_autostart_restored_queue(
+        st.session_state,
+        restored=_restored,
+        tracker_running=_tracker_running,
+        incomplete_entries=_gate_incomplete,
+        before_commit=_mark_autostart_running,
     )
+    if _started is not None:
+        # Match「继续队列」: drop history/watch URL so rerun shows live progress.
+        st.query_params.clear()
+        st.query_params["view"] = "home"
+    else:
+        st.session_state["queue_advance_notice"] = format_restored_queue_blocked_notice(
+            _restored,
+            tracker_running=_tracker_running,
+            incomplete_entries=_gate_incomplete,
+            start_already_set=bool(st.session_state.get("start_analysis")),
+        )
+
+# After a successful auto-start, skip the overlap warning — a new run was just staged.
+if _active_incomplete and _started is None:
+    _incomplete_notice = format_refresh_incomplete_notice(_active_incomplete)
+    if _incomplete_notice:
+        existing = st.session_state.get("queue_advance_notice")
+        st.session_state["queue_advance_notice"] = (
+            f"{existing}；{_incomplete_notice}" if existing else _incomplete_notice
+        )
 
 
 # 默认可由独立守护 tradingagents-watch 负责到点观察（不开 Web 也跑）。
@@ -289,6 +344,10 @@ with st.sidebar:
 start_req = st.session_state.pop("start_analysis", None)
 if start_req:
     _begin_analysis(start_req)
+    # Only after a successful begin: clear ticker box on the following rerun.
+    request_clear_ticker_input(st.session_state)
+    # Sidebar already rendered above; rerun so 暂停/未完成任务/队列控件与 tracker 同步。
+    st.rerun()
 
 
 # ── Main area state machine ─────────────────────────────────────────────────
@@ -365,6 +424,7 @@ if tracker and not tracker.is_running and (tracker.is_complete or tracker.error)
     if next_job is not None:
         try:
             tracker = _begin_analysis(next_job.to_start_request())
+            st.rerun()
         except Exception as exc:  # noqa: BLE001
             prepend_job(st.session_state, next_job)
             st.session_state.pop("queue_advance_notice", None)
@@ -387,7 +447,20 @@ elif viewing_history:
         signal = extract_signal(state)
         ticker = Path(viewing_history).parent.parent.name
         trade_date = Path(viewing_history).stem.replace("full_states_log_", "")
-        render_report(state, ticker, trade_date, signal)
+
+        def _on_history_state_updated(updated: dict) -> None:
+            # Report JSON already persisted by regenerate_section; keep session coherent.
+            st.session_state["viewing_history"] = viewing_history
+
+        render_report(
+            state,
+            ticker,
+            trade_date,
+            signal,
+            log_path=viewing_history,
+            llm_config=_build_config(),
+            on_state_updated=_on_history_state_updated,
+        )
     except Exception as exc:
         st.error(f"加载失败: {exc}")
 
@@ -397,12 +470,26 @@ elif tracker and tracker.is_running:
 
 # State 3: Analysis complete
 elif tracker and tracker.is_complete:
+    def _on_live_state_updated(updated: dict) -> None:
+        tracker.final_state = updated
+        st.session_state["tracker"] = tracker
+
+    live_config = _build_config()
+    live_log = (
+        Path(live_config["results_dir"])
+        / tracker.ticker.upper()
+        / "TradingAgentsStrategy_logs"
+        / f"full_states_log_{tracker.trade_date}.json"
+    )
     render_report(
         tracker.final_state,
         tracker.ticker,
         tracker.trade_date,
         tracker.signal,
         elapsed=tracker.elapsed,
+        log_path=str(live_log) if live_log.exists() else None,
+        llm_config=live_config,
+        on_state_updated=_on_live_state_updated,
     )
 
 # State 4: Analysis errored
@@ -417,53 +504,59 @@ elif tracker and tracker.error:
         st.session_state["viewing_history"] = None
         st.rerun()
 
-# State 0: Idle — welcome screen
+# State 0: Idle — welcome screen with tabs for single-stock and strategy scan
 else:
-    st.markdown(
-        """
-        <div style="
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            min-height: 60vh;
-            text-align: center;
-        ">
-            <div style="font-size: 4rem; margin-bottom: 1rem;">📈</div>
+    tab_single, tab_scan = st.tabs(["📈 单票分析", "📊 策略扫描"])
+    with tab_single:
+        st.markdown(
+            """
             <div style="
-                font-size: 2.5rem;
-                font-weight: 900;
-                margin-bottom: 0.5rem;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                min-height: 60vh;
+                text-align: center;
             ">
-                <span style="color: #ff5a1f;">Trading</span><span style="color: #f5f1eb;">Agents</span><span style="color: #f5f1eb;">-</span><span style="color: #ff5a1f;">Astock</span>
+                <div style="font-size: 4rem; margin-bottom: 1rem;">📈</div>
+                <div style="
+                    font-size: 2.5rem;
+                    font-weight: 900;
+                    margin-bottom: 0.5rem;
+                ">
+                    <span style="color: #ff5a1f;">Trading</span><span style="color: #f5f1eb;">Agents</span><span style="color: #f5f1eb;">-</span><span style="color: #ff5a1f;">Astock</span>
+                </div>
+                <div style="color: #888; font-size: 1.1rem; max-width: 500px; line-height: 1.6;">
+                    A股 / 美股多Agent投研分析<br>
+                    侧栏选择市场 → 分析师辩论 → 风控评估 → 最终决策
+                </div>
+                <div style="
+                    margin-top: 2rem;
+                    padding: 1rem 2rem;
+                    border: 1px solid #222;
+                    border-radius: 12px;
+                    color: #666;
+                    font-size: 0.9rem;
+                ">
+                    ← 在左侧选择 A股或美股，输入一只或多只代码后开始分析
+                </div>
+                <div style="
+                    margin-top: 2.5rem;
+                    padding: 0.8rem 1.5rem;
+                    color: #555;
+                    font-size: 0.75rem;
+                    max-width: 500px;
+                    line-height: 1.6;
+                    border-top: 1px solid #1a1a1a;
+                ">
+                    ⚠️ 本项目仅供学习研究与技术演示，不构成任何投资建议。<br>
+                    投资决策请咨询持牌专业机构。作者不对使用本工具产生的任何损失承担责任。
+                </div>
             </div>
-            <div style="color: #888; font-size: 1.1rem; max-width: 500px; line-height: 1.6;">
-                A股 / 美股多Agent投研分析<br>
-                侧栏选择市场 → 分析师辩论 → 风控评估 → 最终决策
-            </div>
-            <div style="
-                margin-top: 2rem;
-                padding: 1rem 2rem;
-                border: 1px solid #222;
-                border-radius: 12px;
-                color: #666;
-                font-size: 0.9rem;
-            ">
-                ← 在左侧选择 A股或美股，输入一只或多只代码后开始分析
-            </div>
-            <div style="
-                margin-top: 2.5rem;
-                padding: 0.8rem 1.5rem;
-                color: #555;
-                font-size: 0.75rem;
-                max-width: 500px;
-                line-height: 1.6;
-                border-top: 1px solid #1a1a1a;
-            ">
-                ⚠️ 本项目仅供学习研究与技术演示，不构成任何投资建议。<br>
-                投资决策请咨询持牌专业机构。作者不对使用本工具产生的任何损失承担责任。
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with tab_scan:
+        from web.components.value_swing_scanner import render_value_swing_scanner
+        render_value_swing_scanner()
