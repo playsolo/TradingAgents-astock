@@ -43,7 +43,7 @@ class _FlakyRawClient:
         raise AssertionError("name map must not call client.stocks() (pandas/pyarrow crash path)")
 
 
-def test_build_name_code_map_retries_after_none_count(monkeypatch):
+def test_build_name_code_map_retries_after_none_count(tmp_path, monkeypatch):
     from tradingagents.dataflows import a_stock
 
     a_stock._name_to_code = None
@@ -51,6 +51,10 @@ def test_build_name_code_map_retries_after_none_count(monkeypatch):
     flaky = _FlakyRawClient(fail_times=2)
     resets = {"n": 0}
 
+    monkeypatch.setattr(
+        a_stock, "_name_map_cache_path", lambda: tmp_path / "missing.json"
+    )
+    monkeypatch.setattr(a_stock, "_NAME_MAP_MIN_DISK_ENTRIES", 1)
     monkeypatch.setattr(a_stock, "_get_mootdx_client", lambda: flaky)
     monkeypatch.setattr(
         a_stock,
@@ -64,13 +68,17 @@ def test_build_name_code_map_retries_after_none_count(monkeypatch):
     assert resets["n"] >= 1
 
 
-def test_build_name_code_map_never_calls_stocks(monkeypatch):
+def test_build_name_code_map_never_calls_stocks(tmp_path, monkeypatch):
     """回归：名称映射不得走 mootdx.stocks()（pandas→pyarrow→SIGSEGV）。"""
     from tradingagents.dataflows import a_stock
 
     a_stock._name_to_code = None
     a_stock._code_to_name = None
     client = _FlakyRawClient(fail_times=0)
+    monkeypatch.setattr(
+        a_stock, "_name_map_cache_path", lambda: tmp_path / "missing.json"
+    )
+    monkeypatch.setattr(a_stock, "_NAME_MAP_MIN_DISK_ENTRIES", 1)
     monkeypatch.setattr(a_stock, "_get_mootdx_client", lambda: client)
 
     def _boom(*_a, **_k):

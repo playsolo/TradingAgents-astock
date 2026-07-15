@@ -15,11 +15,12 @@ Data sources:
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 from contextlib import contextmanager
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from io import StringIO
+from pathlib import Path
 import json as _json
 import os
 import logging
@@ -114,6 +115,83 @@ _NAME_MAP_MAX_ATTEMPTS = 3
 _name_map_lock = threading.RLock()
 # 通达信 get_security_list 分页大小（与 mootdx.stocks 一致）
 _SECURITY_LIST_PAGE = 1000
+# 全市场名称映射磁盘缓存（命中则不走远程通达信）。可用 ASTOCK_NAME_MAP_CACHE 覆盖路径。
+# 代码/简称极少变更（IPO/更名/退市），TTL 宜长；过期后才尝试远程刷新，失败仍回退磁盘。
+_NAME_MAP_DISK_TTL_SECONDS = 180 * 24 * 3600
+_NAME_MAP_MIN_DISK_ENTRIES = 1000
+
+
+def _name_map_cache_path() -> Path:
+    override = os.environ.get("ASTOCK_NAME_MAP_CACHE", "").strip()
+    if override:
+        return Path(override)
+    return Path.home() / ".tradingagents" / "cache" / "astock_name_code_map.json"
+
+
+def _normalize_name_map_pair(
+    n2c_raw: Any, c2n_raw: Any
+) -> tuple[dict[str, str], dict[str, str]] | None:
+    if not isinstance(n2c_raw, dict) or not isinstance(c2n_raw, dict):
+        return None
+    n2c: dict[str, str] = {}
+    c2n: dict[str, str] = {}
+    for name, code in n2c_raw.items():
+        clean_name = str(name).replace(" ", "").replace("　", "").strip()
+        clean_code = str(code).strip()
+        if clean_name and _re.match(r"^[036]\d{5}$", clean_code):
+            n2c[clean_name] = clean_code
+    for code, name in c2n_raw.items():
+        clean_code = str(code).strip()
+        clean_name = str(name).replace(" ", "").replace("　", "").strip()
+        if clean_name and _re.match(r"^[036]\d{5}$", clean_code):
+            c2n[clean_code] = clean_name
+    if len(n2c) < _NAME_MAP_MIN_DISK_ENTRIES or len(c2n) < _NAME_MAP_MIN_DISK_ENTRIES:
+        return None
+    return n2c, c2n
+
+
+def _load_name_map_disk() -> tuple[dict[str, str], dict[str, str], float] | None:
+    """Load cached maps from disk. Returns (n2c, c2n, updated_at) or None."""
+    path = _name_map_cache_path()
+    try:
+        if not path.exists():
+            return None
+        with open(path, encoding="utf-8") as f:
+            payload = _json.load(f)
+        if not isinstance(payload, dict):
+            return None
+        maps = _normalize_name_map_pair(
+            payload.get("name_to_code"), payload.get("code_to_name")
+        )
+        if maps is None:
+            return None
+        updated_at = float(payload.get("updated_at") or 0.0)
+        return maps[0], maps[1], updated_at
+    except (OSError, TypeError, ValueError, _json.JSONDecodeError) as e:
+        logger.warning("读取股票名称映射磁盘缓存失败：%s", e)
+        return None
+
+
+def _save_name_map_disk(n2c: dict[str, str], c2n: dict[str, str]) -> None:
+    path = _name_map_cache_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": 1,
+            "updated_at": time.time(),
+            "name_to_code": n2c,
+            "code_to_name": c2n,
+        }
+        tmp = path.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            _json.dump(payload, f, ensure_ascii=False)
+        tmp.replace(path)
+        logger.info(
+            "Persisted stock name-code map to disk: %d entries (%s)",
+            len(n2c), path,
+        )
+    except OSError as e:
+        logger.warning("写入股票名称映射磁盘缓存失败：%s", e)
 
 
 def _iter_mootdx_security_rows(client, market: int):
@@ -149,13 +227,51 @@ def _iter_mootdx_security_rows(client, market: int):
                 yield code, name
 
 
-def _build_name_code_map() -> tuple[dict[str, str], dict[str, str]]:
-    """Build name→code and code→name maps via mootdx (both SH & SZ markets).
+def _fetch_name_map_from_mootdx() -> tuple[dict[str, str], dict[str, str]]:
+    """Pull SH/SZ name maps from mootdx with reconnect retries."""
+    last_err: Exception | None = None
+    for attempt in range(1, _NAME_MAP_MAX_ATTEMPTS + 1):
+        try:
+            # Hold mootdx lock for the full list pull so a concurrent
+            # reset cannot close the TCP socket mid-iteration.
+            with _mootdx_client_session() as client:
+                n2c: dict[str, str] = {}
+                c2n: dict[str, str] = {}
+                for market in (0, 1):  # 0=SZ, 1=SH
+                    for code, name in _iter_mootdx_security_rows(client, market):
+                        if not _re.match(r"^[036]\d{5}$", code):
+                            continue
+                        clean_name = name.replace(" ", "").replace("　", "")
+                        n2c[clean_name] = code
+                        c2n[code] = clean_name
 
-    失败时重连并重试（#46/#66）：count/list 在 socket 抖动时会因
-    `get_security_count()` 返回 None 抛 TypeError，或返回空列表；两种瞬时故障
-    过去都会一次即放弃、逼用户手输代码。这里重试 `_NAME_MAP_MAX_ATTEMPTS` 次，
-    每次失败后 `_reset_mootdx_client()` 强制重连（可能切到别的服务器）。
+                if not n2c:
+                    raise ValueError("mootdx 返回股票列表为空")
+                return n2c, c2n
+        except Exception as e:
+            last_err = e
+            logger.warning(
+                "构建股票名称映射失败（第 %d/%d 次）：%s",
+                attempt, _NAME_MAP_MAX_ATTEMPTS, e,
+            )
+            _reset_mootdx_client()
+            if attempt < _NAME_MAP_MAX_ATTEMPTS:
+                time.sleep(0.5 * attempt)
+
+    raise ValueError(
+        "无法通过 mootdx 解析股票名称（通达信服务暂时不可达）：%s。"
+        "请稍后重试，或直接输入 6 位股票代码。" % last_err
+    ) from last_err
+
+
+def _build_name_code_map() -> tuple[dict[str, str], dict[str, str]]:
+    """Build name→code and code→name maps (disk cache first, mootdx as refresh).
+
+    优先级：
+    1. 进程内内存
+    2. 未过期的磁盘缓存（命中则**不走**远程通达信）
+    3. mootdx 远程拉取（成功后落盘）
+    4. 过期/任意可用磁盘缓存回退（通达信 RST/不可达时保底）
 
     实现刻意绕过 ``Quotes.stocks()``，避免分析线程上 pyarrow 段错误导致 Python quit。
     """
@@ -167,48 +283,36 @@ def _build_name_code_map() -> tuple[dict[str, str], dict[str, str]]:
         if _name_to_code is not None:  # 双重检查：等锁期间别的线程可能已构建好
             return _name_to_code, _code_to_name
 
-        last_err: Exception | None = None
-        for attempt in range(1, _NAME_MAP_MAX_ATTEMPTS + 1):
-            try:
-                # Hold mootdx lock for the full list pull so a concurrent
-                # reset cannot close the TCP socket mid-iteration.
-                with _mootdx_client_session() as client:
-                    n2c: dict[str, str] = {}
-                    c2n: dict[str, str] = {}
-                    for market in (0, 1):  # 0=SZ, 1=SH
-                        for code, name in _iter_mootdx_security_rows(
-                            client, market
-                        ):
-                            if not _re.match(r"^[036]\d{5}$", code):
-                                continue
-                            clean_name = name.replace(" ", "").replace("　", "")
-                            n2c[clean_name] = code
-                            c2n[code] = clean_name
-
-                    if not n2c:
-                        # 两个市场都空通常也是瞬时故障，交给重试而非缓存空映射
-                        raise ValueError("mootdx 返回股票列表为空")
-
-                    _name_to_code = n2c
-                    _code_to_name = c2n
-                    logger.info("Built stock name-code map: %d entries", len(n2c))
-                    return _name_to_code, _code_to_name
-            except Exception as e:
-                last_err = e
-                logger.warning(
-                    "构建股票名称映射失败（第 %d/%d 次）：%s",
-                    attempt, _NAME_MAP_MAX_ATTEMPTS, e,
+        disk = _load_name_map_disk()
+        if disk is not None:
+            n2c, c2n, updated_at = disk
+            age = time.time() - updated_at
+            if age <= _NAME_MAP_DISK_TTL_SECONDS:
+                _name_to_code, _code_to_name = n2c, c2n
+                logger.info(
+                    "Loaded stock name-code map from disk cache: %d entries (age=%.0fs)",
+                    len(n2c), max(age, 0.0),
                 )
-                # 强制下次重连，规避 None count / 脏 socket（与 RPC 串行化）
-                _reset_mootdx_client()
-                if attempt < _NAME_MAP_MAX_ATTEMPTS:
-                    time.sleep(0.5 * attempt)
+                return _name_to_code, _code_to_name
 
-        # 网络抖动/通达信不可达时给出明确提示，而非冒泡成风马牛不相及的报错（#46/#66）
-        raise ValueError(
-            "无法通过 mootdx 解析股票名称（通达信服务暂时不可达）：%s。"
-            "请稍后重试，或直接输入 6 位股票代码。" % last_err
-        ) from last_err
+        try:
+            n2c, c2n = _fetch_name_map_from_mootdx()
+            _name_to_code, _code_to_name = n2c, c2n
+            _save_name_map_disk(n2c, c2n)
+            logger.info("Built stock name-code map: %d entries", len(n2c))
+            return _name_to_code, _code_to_name
+        except Exception as remote_err:
+            if disk is not None:
+                n2c, c2n, updated_at = disk
+                _name_to_code, _code_to_name = n2c, c2n
+                logger.warning(
+                    "通达信拉取名称映射失败，回退磁盘缓存 %d 条（age=%.0fs）：%s",
+                    len(n2c),
+                    max(time.time() - updated_at, 0.0),
+                    remote_err,
+                )
+                return _name_to_code, _code_to_name
+            raise
 
 
 def resolve_ticker(user_input: str) -> str:
@@ -258,9 +362,11 @@ _mootdx_client = None
 # 避免名称映射重试关闭连接时打断分析线程的 bars()/finance()/F10()。
 _mootdx_lock = threading.RLock()
 
-# 实测可用的通达信备选服务器（按延迟排序，2026-06 验证）。用于规避 mootdx
-# 0.11.x 全新安装时 BESTIP.HQ 为空串导致的 `ValueError: not enough values to unpack`。
+# 通达信 HQ 冗余列表。经典联通/电信骨干站优先（2026-07 在新加坡出口验证：
+# 华为云镜像 TCP 通但 SetupCmd1 阶段 RST；仅 TCP probe 会误选坏节点）。
 _TDX_SERVERS = [
+    ("123.125.108.14", 7709), ("180.153.18.170", 7709),
+    ("218.75.126.9", 7709), ("60.12.136.250", 7709),
     ("119.97.185.59", 7709), ("124.70.133.119", 7709), ("116.205.183.150", 7709),
     ("123.60.73.44", 7709), ("116.205.163.254", 7709), ("121.36.225.169", 7709),
     ("123.60.70.228", 7709), ("124.71.9.153", 7709), ("110.41.147.114", 7709),
@@ -277,12 +383,33 @@ def _probe_tdx(ip: str, port: int, timeout: float = 2.0) -> bool:
         return False
 
 
+def _connect_tdx_quotes(ip: str, port: int, timeout: float = 5.0):
+    """建立 mootdx Quotes 并做一次廉价 RPC，确认协议握手成功。
+
+    仅 TCP connect 不够：部分 HQ 会 accept 后在 SetupCmd1 上 RST。
+    """
+    from mootdx.quotes import Quotes
+
+    client = Quotes.factory(market="std", server=(ip, port), timeout=timeout)
+    try:
+        count = client.stock_count(market=0)
+        if count is None:
+            raise RuntimeError("stock_count returned None")
+    except Exception:
+        try:
+            client.close()
+        except Exception:
+            pass
+        raise
+    return client
+
+
 def _get_mootdx_client():
     """Lazy-init 健壮版 mootdx Quotes client（TCP 连接，可复用）。
 
-    规避 mootdx 0.11.x 全新安装的 BESTIP 空串 bug：先 TCP 探测内置服务器列表、
-    用第一个可达的显式 server 绕过 BESTIP；三级 fallback（bestip 测速 → 裸 factory →
-    明确 RuntimeError）保证 IP 老化/换网/老用户场景都能工作。
+    规避 mootdx 0.11.x BESTIP 空串 bug，并对每个候选做协议级校验：
+    TCP 通但握手 RST 的节点会被跳过，继续尝试下一台。再 fallback 到
+    bestip / 裸 factory。
 
     Prefer ``_mootdx_client_session()`` for RPCs so the lock covers the full call.
     """
@@ -293,22 +420,36 @@ def _get_mootdx_client():
 
         from mootdx.quotes import Quotes
 
+        last_err: Exception | None = None
         for ip, port in _TDX_SERVERS:
-            if _probe_tdx(ip, port):
-                _mootdx_client = Quotes.factory(market="std", server=(ip, port))
+            if not _probe_tdx(ip, port):
+                continue
+            try:
+                _mootdx_client = _connect_tdx_quotes(ip, port)
+                logger.info("mootdx connected via %s:%s", ip, port)
                 return _mootdx_client
+            except Exception as e:
+                last_err = e
+                logger.warning(
+                    "mootdx handshake failed on %s:%s：%s", ip, port, e
+                )
         try:
-            _mootdx_client = Quotes.factory(market="std", bestip=True)  # fallback 1
-            return _mootdx_client
-        except Exception:
-            pass
-        try:
-            _mootdx_client = Quotes.factory(market="std")  # fallback 2（老用户 config 已有 IP）
+            client = Quotes.factory(market="std", bestip=True)  # fallback 1
+            client.stock_count(market=0)
+            _mootdx_client = client
             return _mootdx_client
         except Exception as e:
+            last_err = e
+        try:
+            client = Quotes.factory(market="std")  # fallback 2（老用户 config 已有 IP）
+            client.stock_count(market=0)
+            _mootdx_client = client
+            return _mootdx_client
+        except Exception as e:
+            last_err = e
             raise RuntimeError(
                 "mootdx 通达信服务器均不可达（TCP 7709）。海外网络通常全部超时，"
-                "请走国内代理或直接使用 6 位股票代码。原始错误：%s" % e
+                "请走国内代理或直接使用 6 位股票代码。原始错误：%s" % last_err
             ) from e
 
 
