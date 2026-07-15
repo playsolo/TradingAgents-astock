@@ -1,0 +1,24 @@
+# TradingAgents-Astock Web UI（生产参考单元）
+#
+# 关键：生产设 TRADINGAGENTS_ANALYSIS_EXECUTOR=worker，Web 只入队、不在进程内
+# 跑分析；真正的执行交给 tradingagents-analyze.service。
+
+[Unit]
+Description=TradingAgents Astock Web UI
+After=network.target
+
+[Service]
+Type=simple
+User=solo
+WorkingDirectory=/home/solo/TradingAgents-astock
+Environment="PATH=/home/solo/TradingAgents-astock/.venv/bin"
+Environment="ARROW_DEFAULT_MEMORY_POOL=system"
+# 只入队，交后台 worker 执行
+Environment="TRADINGAGENTS_ANALYSIS_EXECUTOR=worker"
+Environment="TRADINGAGENTS_MAX_PARALLEL=3"
+ExecStart=/home/solo/TradingAgents-astock/.venv/bin/streamlit run web/app.py --server.port 8501 --server.headless true --server.address 127.0.0.1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

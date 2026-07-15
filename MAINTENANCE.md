@@ -113,6 +113,45 @@ ssh solo@m.wcc.io "sudo journalctl -u tradingagents-astock.service -f --no-hostn
 ssh solo@m.wcc.io "cd /home/solo/TradingAgents-astock && git pull origin dev && sudo systemctl restart tradingagents-astock.service"
 ```
 
+## 后台分析 worker（关闭页面也跑完队列）
+
+生产采用「Web 只入队 + 独立 worker 执行」模式：
+
+| 项 | 内容 |
+|---|---|
+| Web Service | `tradingagents-astock.service`，需设 `Environment="TRADINGAGENTS_ANALYSIS_EXECUTOR=worker"` |
+| Worker Service | `tradingagents-analyze.service`（`deploy/` 下有单元模板） |
+| 队列文件 | `~/.tradingagents/analysis_queue.json`（Web 与 worker 通过 flock 原子读写） |
+| 互斥锁 | `~/.tradingagents/analyze.worker.lock`（全局仅一个 worker） |
+| 并发上限 | `TRADINGAGENTS_MAX_PARALLEL`（默认 3，两个 service 都要设一致） |
+
+**首次安装 worker：**
+
+```bash
+ssh solo@m.wcc.io
+cd /home/solo/TradingAgents-astock && git pull origin dev
+# 重装 console 入口（新增 tradingagents-analyze）
+.venv/bin/pip install -e . --no-deps
+sudo cp deploy/tradingagents-analyze.service /etc/systemd/system/
+# Web 单元加 EXECUTOR=worker（编辑 /etc/systemd/system/tradingagents-astock.service，
+# 或参考 deploy/tradingagents-astock.service）
+sudo systemctl daemon-reload
+sudo systemctl enable --now tradingagents-analyze.service
+sudo systemctl restart tradingagents-astock.service
+```
+
+**worker 管理命令：**
+
+```bash
+ssh solo@m.wcc.io "systemctl status tradingagents-analyze.service"
+ssh solo@m.wcc.io "sudo journalctl -u tradingagents-analyze.service -f --no-hostname -n 50"
+# 手动把当前队列耗尽后退出（调试用）
+ssh solo@m.wcc.io "cd /home/solo/TradingAgents-astock && .venv/bin/tradingagents-analyze --once -v"
+```
+
+> 前提：admin 已在 Web 里保存过模型配置（`~/.tradingagents/model_config.json`），
+> worker 无 Streamlit session，模型来源只认该文件（缺失时回退到 `.env`）。
+
 ## 工作流总结
 
 ```

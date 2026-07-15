@@ -35,6 +35,7 @@ from tradingagents.auth.model_config import load_model_config, model_config_exis
 
 from web.analysis_queue import (  # noqa: E402
     AnalysisJob,
+    default_store,
     format_restored_queue_blocked_notice,
     hydrate_queue,
     maybe_autostart_restored_queue,
@@ -42,6 +43,7 @@ from web.analysis_queue import (  # noqa: E402
     set_begin_analysis_hook,
     take_next_job,
 )
+from tradingagents.analyze_worker import is_worker_mode  # noqa: E402
 from web.components.progress_panel import (  # noqa: E402
     render_multi_progress,
     render_running_progress,
@@ -119,7 +121,7 @@ if (
     _active_incomplete = list_active_incomplete_tasks()
 
 _started = None
-if _restored > 0:
+if _restored > 0 and not is_worker_mode():
     # Always re-check disk for the overlap gate (listing above is notice-only once).
     _gate_incomplete = _active_incomplete or list_active_incomplete_tasks()
     def _mark_autostart_running(job) -> None:
@@ -411,6 +413,27 @@ def _begin_analysis_from_job(job: AnalysisJob) -> ProgressTracker:
     return _begin_analysis(job.to_start_request())
 
 
+def _enqueue_start_request(start_req: dict) -> None:
+    """Worker mode: push a start request onto the disk queue instead of running it."""
+    market = _infer_market(start_req["ticker"], start_req.get("market"))
+    job = AnalysisJob(
+        ticker=start_req["ticker"],
+        trade_date=start_req["trade_date"],
+        market=market,
+        fresh=bool(start_req.get("fresh", True)),
+    )
+    added = default_store().append_atomic([job])
+    st.session_state["viewing_history"] = None
+    st.session_state["viewing_watchlist"] = False
+    st.session_state["viewing_inbox"] = False
+    if added:
+        st.session_state["queue_advance_notice"] = (
+            f"✅ {job.ticker} 已提交后台分析队列，完成后可在历史查看"
+        )
+    else:
+        st.session_state["queue_advance_notice"] = f"{job.ticker} 已在后台队列中"
+
+
 # Register the hook so analysis_queue can start jobs without circular import.
 set_begin_analysis_hook(_begin_analysis_from_job)
 
@@ -425,8 +448,12 @@ with st.sidebar:
 
 start_req = st.session_state.pop("start_analysis", None)
 if start_req:
-    _begin_analysis(start_req)
-    # Only after a successful begin: clear ticker box on the following rerun.
+    if is_worker_mode():
+        # Web only enqueues; the standalone worker executes the analysis.
+        _enqueue_start_request(start_req)
+    else:
+        _begin_analysis(start_req)
+    # Only after a successful begin/enqueue: clear ticker box on the following rerun.
     request_clear_ticker_input(st.session_state)
     # Sidebar already rendered above; rerun so 暂停/未完成任务/队列控件与 tracker 同步。
     st.rerun()
@@ -496,7 +523,8 @@ def _consume_watchlist_refresh_pending(active: ProgressTracker) -> None:
 # ── Multi-run lifecycle: clean finished trackers, fill empty slots ──────
 # Fill whenever free slots + queued jobs (not only after a finish), so busy
 # enqueue / idle multi-submit / 「继续队列」都能立刻并行开跑。
-if not st.session_state.get("_parallel_lifecycle_ran"):
+# In worker mode the standalone process owns execution — Web never runs here.
+if not is_worker_mode() and not st.session_state.get("_parallel_lifecycle_ran"):
     st.session_state["_parallel_lifecycle_ran"] = True
     need_rerun = False
     for t in active_runs(st.session_state):

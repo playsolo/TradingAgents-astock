@@ -203,15 +203,13 @@ def _run_us(ticker: str, trade_date: str, config: dict, tracker: ProgressTracker
     )
 
 
-def run_analysis_in_thread(
+def _setup_tracker_for_run(
     ticker: str,
     trade_date: str,
-    config: dict,
     tracker: ProgressTracker,
-    market: str = "CN",
-    extra_past_context: str = "",
-) -> threading.Thread:
-    """Launch the pipeline in a daemon thread. Returns the thread handle."""
+    market: str,
+) -> None:
+    """Prime the tracker + record a running marker before the pipeline starts."""
     tracker.ticker = ticker
     tracker.trade_date = trade_date
     tracker.market = market if market in {"CN", "US"} else "CN"
@@ -221,10 +219,9 @@ def run_analysis_in_thread(
         from web.us_bridge.protocol import US_PIPELINE_STAGES
 
         tracker.stages = list(US_PIPELINE_STAGES)
-        tracker.mark_stage_active("market")
     else:
         tracker.stages = list(PIPELINE_STAGES)
-        tracker.mark_stage_active("market")
+    tracker.mark_stage_active("market")
 
     record_incomplete_task(
         ticker,
@@ -233,43 +230,103 @@ def run_analysis_in_thread(
         completed_stages=tracker.completed_stages,
     )
 
+
+def _run_pipeline_body(
+    ticker: str,
+    trade_date: str,
+    config: dict,
+    tracker: ProgressTracker,
+    extra_past_context: str = "",
+) -> None:
+    """Run the pipeline synchronously; record error/stop terminal state.
+
+    Assumes the tracker was already primed via :func:`_setup_tracker_for_run`.
+    Never raises — terminal state is written to the tracker + incomplete index.
+    """
+    try:
+        if tracker.market == "US":
+            _run_us(ticker, trade_date, config, tracker)
+        else:
+            _run(
+                ticker,
+                trade_date,
+                config,
+                tracker,
+                extra_past_context=extra_past_context,
+            )
+    except Exception as exc:
+        if tracker.stop_requested:
+            try:
+                if tracker.market == "US":
+                    clear_incomplete_task(ticker, trade_date)
+                    tracker.mark_stopped()
+                else:
+                    _discard_stopped_run(ticker, trade_date, config, tracker)
+            except Exception:
+                traceback.print_exc()
+            return
+        traceback.print_exc()
+        record_incomplete_task(
+            ticker,
+            trade_date,
+            status="error",
+            error=str(exc),
+            completed_stages=tracker.completed_stages,
+        )
+        tracker.mark_error(str(exc))
+
+
+def execute_analysis_run(
+    ticker: str,
+    trade_date: str,
+    config: dict,
+    tracker: ProgressTracker,
+    market: str = "CN",
+    extra_past_context: str = "",
+    *,
+    notify_inbox: bool = True,
+) -> ProgressTracker:
+    """Run one analysis synchronously in the current thread (no Streamlit).
+
+    This is the out-of-process worker entry point: it primes the tracker,
+    runs the pipeline to a terminal state, and optionally posts an inbox event.
+    """
+    from tradingagents.runtime.arrow_safety import ensure_arrow_safe_for_current_thread
+
+    ensure_arrow_safe_for_current_thread()
+    _setup_tracker_for_run(ticker, trade_date, tracker, market)
+    _run_pipeline_body(
+        ticker, trade_date, config, tracker, extra_past_context=extra_past_context
+    )
+    if notify_inbox:
+        _notify_inbox_terminal(tracker)
+    return tracker
+
+
+def run_analysis_in_thread(
+    ticker: str,
+    trade_date: str,
+    config: dict,
+    tracker: ProgressTracker,
+    market: str = "CN",
+    extra_past_context: str = "",
+) -> threading.Thread:
+    """Launch the pipeline in a daemon thread. Returns the thread handle."""
+    # Prime synchronously so the sidebar immediately reflects the running task.
+    _setup_tracker_for_run(ticker, trade_date, tracker, market)
+
     def _target() -> None:
         # Worker threads hit pandas→pyarrow; ensure safe allocator before DF work.
         from tradingagents.runtime.arrow_safety import ensure_arrow_safe_for_current_thread
 
         ensure_arrow_safe_for_current_thread()
-        try:
-            if tracker.market == "US":
-                _run_us(ticker, trade_date, config, tracker)
-            else:
-                _run(
-                    ticker,
-                    trade_date,
-                    config,
-                    tracker,
-                    extra_past_context=extra_past_context,
-                )
-        except Exception as exc:
-            if tracker.stop_requested:
-                try:
-                    if tracker.market == "US":
-                        clear_incomplete_task(ticker, trade_date)
-                        tracker.mark_stopped()
-                    else:
-                        _discard_stopped_run(ticker, trade_date, config, tracker)
-                except Exception:
-                    traceback.print_exc()
-                return
-            traceback.print_exc()
-            record_incomplete_task(
-                ticker,
-                trade_date,
-                status="error",
-                error=str(exc),
-                completed_stages=tracker.completed_stages,
-            )
-            tracker.mark_error(str(exc))
-
+        _run_pipeline_body(
+            ticker,
+            trade_date,
+            config,
+            tracker,
+            extra_past_context=extra_past_context,
+        )
         # 站内事件中心：在 runner 线程（session 无关）发终态通知，浏览器刷新也不丢。
         # notify_tracker_terminal 只对 complete/error 发事件，被停止的运行会被跳过。
         _notify_inbox_terminal(tracker)

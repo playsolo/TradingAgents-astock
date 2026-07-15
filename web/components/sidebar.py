@@ -15,6 +15,7 @@ from web.analysis_queue import (
     AnalysisJob,
     append_jobs,
     clear_queue,
+    default_store,
     format_queue_job_caption,
     mark_serial_queue_session,
     parse_ticker_inputs,
@@ -22,6 +23,7 @@ from web.analysis_queue import (
     remove_job_identity,
     resolve_ticker_batch,
 )
+from tradingagents.analyze_worker import is_worker_mode
 from web.history import (
     clear_incomplete_task,
     get_history,
@@ -163,6 +165,23 @@ def activate_incomplete_task(
     session["viewing_history"] = None
     session["viewing_watchlist"] = False
 
+    if is_worker_mode():
+        # Worker mode: never run in-process. Push onto the disk queue.
+        default_store().append_atomic(
+            [
+                AnalysisJob(
+                    ticker=ticker,
+                    trade_date=trade_date,
+                    market=resolved_market,
+                    fresh=False,
+                )
+            ]
+        )
+        session["queue_advance_notice"] = (
+            f"✅ {ticker} 已提交后台分析队列，完成后可在历史查看"
+        )
+        return "enqueue"
+
     if _is_live_incomplete_run(session, ticker, trade_date):
         set_focused_ticker(session, ticker)
         return "focus"
@@ -238,6 +257,17 @@ def _submit_analysis_jobs(raw_tickers: str, market: str, trade_date: str) -> Non
         st.error("❌ 没有可分析的有效代码")
         return
 
+    if is_worker_mode():
+        # Web only enqueues; the standalone worker drains the disk queue.
+        added = default_store().append_atomic(jobs)
+        queued = len(default_store().load())
+        st.session_state["queue_advance_notice"] = (
+            f"✅ 已提交 {added} 只到后台分析队列，完成后见历史（队列共 {queued}）"
+        )
+        request_clear_ticker_input(st.session_state)
+        st.rerun()
+        return
+
     running = running_count(st.session_state)
     is_busy = running > 0 or has_running(st.session_state)
     if is_busy:
@@ -300,6 +330,9 @@ def _resolve_cn_or_raise(raw: str) -> str:
 
 
 def _render_analysis_queue() -> None:
+    if is_worker_mode():
+        _render_worker_queue()
+        return
     jobs = queue_snapshot(st.session_state)
     if not jobs:
         return
@@ -331,6 +364,23 @@ def _render_analysis_queue() -> None:
         st.rerun()
     if clear_col.button("清空队列", key="clear_analysis_queue", use_container_width=True):
         clear_queue(st.session_state)
+        st.rerun()
+
+
+def _render_worker_queue() -> None:
+    """Worker mode: queue is disk-authoritative and drained by a separate process."""
+    jobs = default_store().load()
+    if not jobs:
+        return
+    st.markdown("#### 分析队列")
+    st.caption(
+        f"共 {len(jobs)} 只等待后台执行（最多 {max_jobs_configured()} 并行）。"
+        "关闭页面也会继续跑，完成后见历史。"
+    )
+    for idx, job in enumerate(jobs, start=1):
+        st.caption(format_queue_job_caption(job, idx))
+    if st.button("清空队列", key="clear_analysis_queue_worker", use_container_width=True):
+        default_store().clear_atomic()
         st.rerun()
 
 

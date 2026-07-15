@@ -11,9 +11,10 @@ import json
 import os
 import re
 import threading
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable, MutableMapping, Optional
+from typing import Any, Callable, Iterator, MutableMapping, Optional
 
 QUEUE_SESSION_KEY = "analysis_queue"
 SERIAL_QUEUE_SESSION_KEY = "serial_queue_session"
@@ -116,6 +117,83 @@ class AnalysisQueueStore:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
             tmp.replace(self.path)
+
+    # ── Cross-process atomic ops (Web appends, worker claims) ─────────────
+    #
+    # ``save`` uses tmp+replace which swaps the inode, so flock must live on a
+    # separate sidecar file (``.lock``) rather than the data file itself.
+    # These guard the whole read-modify-write so a Web append and a worker
+    # claim on different processes never clobber each other.
+
+    def _lock_path(self) -> Path:
+        return self.path.with_suffix(".lock")
+
+    @contextmanager
+    def exclusive(self) -> Iterator[None]:
+        """Hold an exclusive inter-process lock around a read-modify-write.
+
+        Falls back to a no-op file lock on platforms without ``fcntl``
+        (e.g. Windows); the in-process ``_STORE_LOCK`` still applies.
+        """
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            import fcntl
+        except ImportError:  # pragma: no cover - non-POSIX fallback
+            with _STORE_LOCK:
+                yield
+            return
+        fh = open(self._lock_path(), "a+", encoding="utf-8")
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            with _STORE_LOCK:
+                yield
+        finally:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            finally:
+                fh.close()
+
+    def claim_next(self) -> Optional[AnalysisJob]:
+        """Atomically pop and return the head job, or None when empty."""
+        with self.exclusive():
+            jobs = self.load()
+            if not jobs:
+                return None
+            head = jobs.pop(0)
+            self.save(jobs)
+            return head
+
+    def append_atomic(
+        self,
+        new_jobs: list[AnalysisJob],
+        *,
+        exclude: Optional[set[tuple[str, str, str]]] = None,
+    ) -> int:
+        """Atomically append jobs to the on-disk queue, skipping duplicates.
+
+        Returns the number of jobs actually added.
+        """
+        with self.exclusive():
+            jobs = self.load()
+            existing = {j.identity() for j in jobs}
+            if exclude:
+                existing |= exclude
+            added = 0
+            for job in new_jobs:
+                ident = job.identity()
+                if ident in existing:
+                    continue
+                jobs.append(job)
+                existing.add(ident)
+                added += 1
+            if added:
+                self.save(jobs)
+            return added
+
+    def clear_atomic(self) -> None:
+        """Atomically empty the on-disk queue."""
+        with self.exclusive():
+            self.save([])
 
 
 def default_store() -> AnalysisQueueStore:

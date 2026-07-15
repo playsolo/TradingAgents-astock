@@ -1,0 +1,72 @@
+"""Web worker 模式：只入队、不在进程内执行分析。"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from web.analysis_queue import QUEUE_SESSION_KEY, AnalysisJob, AnalysisQueueStore
+from web.components import sidebar
+from web.parallel_runs import ACTIVE_RUNS_KEY
+
+
+@pytest.fixture
+def worker_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("TRADINGAGENTS_ANALYSIS_EXECUTOR", "worker")
+    store = AnalysisQueueStore(tmp_path / "analysis_queue.json")
+    monkeypatch.setattr(sidebar, "default_store", lambda: store)
+    return store
+
+
+# ── Source-level guards (worker must not run analysis in-process) ────────────
+
+def test_app_start_request_enqueues_in_worker_mode():
+    app_src = Path("web/app.py").read_text(encoding="utf-8")
+    assert "is_worker_mode" in app_src
+    block = app_src.split("start_req = st.session_state.pop")[1].split(
+        "# ── Main area state machine"
+    )[0]
+    assert "is_worker_mode()" in block
+    assert "_enqueue_start_request" in block
+
+
+def test_app_lifecycle_fill_skipped_in_worker_mode():
+    app_src = Path("web/app.py").read_text(encoding="utf-8")
+    lifecycle_guard = app_src.split("# ── Multi-run lifecycle")[1].split(
+        "st.session_state[\"_parallel_lifecycle_ran\"] = False"
+    )[0]
+    assert "is_worker_mode()" in lifecycle_guard
+
+
+def test_submit_has_worker_only_enqueue_branch():
+    src = Path("web/components/sidebar.py").read_text(encoding="utf-8")
+    submit = src.split("def _submit_analysis_jobs")[1].split("def _resolve_cn")[0]
+    assert "is_worker_mode()" in submit
+    assert "append_atomic" in submit
+    # Worker branch must not set start_analysis / run in-process.
+    worker_branch = submit.split("is_worker_mode()")[1].split("return")[0]
+    assert "start_analysis" not in worker_branch
+
+
+# ── Behavior: activate incomplete + queue read from disk ─────────────────────
+
+def test_activate_incomplete_enqueues_to_disk_in_worker_mode(worker_env):
+    session: dict = {ACTIVE_RUNS_KEY: []}
+    action = sidebar.activate_incomplete_task(
+        session, "300253", "2026-07-15", market="CN"
+    )
+    assert action == "enqueue"
+    # Not started in-process:
+    assert "start_analysis" not in session
+    # Written to disk queue, not session queue:
+    queued = worker_env.load()
+    assert [j.ticker for j in queued] == ["300253"]
+
+
+def test_activate_incomplete_dedupes_on_disk(worker_env):
+    worker_env.save([AnalysisJob(ticker="300253", trade_date="2026-07-15", market="CN")])
+    session: dict = {ACTIVE_RUNS_KEY: []}
+    sidebar.activate_incomplete_task(session, "300253", "2026-07-15", market="CN")
+    queued = worker_env.load()
+    assert [j.ticker for j in queued] == ["300253"]

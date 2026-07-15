@@ -54,6 +54,7 @@ tradingagents = "cli.main:app"
 tradingagents-web = "web.launch:main"
 tradingagents-watch = "tradingagents.watchlist.daemon:main"
 tradingagents-scan = "tradingagents.strategies.scan_cli:main"
+tradingagents-analyze = "tradingagents.analyze_worker.daemon:main"
 
 [tool.setuptools.packages.find]
 include = ["tradingagents*", "cli*", "web*"]
