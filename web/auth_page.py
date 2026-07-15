@@ -1,18 +1,19 @@
 """Streamlit login / register / pending / admin page for TradingAgents-Astock.
 
 Supports:
-- Persistent login via URL query parameter (survives refresh, no cookie dependency)
+- Persistent login via server-side session token + browser cookie (set via JS)
+- Reliable behind nginx reverse proxy (no HttpOnly cookie dependency)
 - Registration with pending approval (non-admin users)
 - Admin review panel for pending accounts
 - First-user auto-creates admin (immediately active)
-
-Uses ``st.query_params`` for persistence — works reliably behind nginx reverse
-proxy without any extra dependencies.
 """
 
 from __future__ import annotations
 
+import json
+import secrets
 import time
+from pathlib import Path
 
 import streamlit as st
 
@@ -27,12 +28,14 @@ _SESSION_USER = "auth_user"
 _SESSION_PAGE = "auth_page"
 _SESSION_LOGOUT_PENDING = "_auth_logout_pending"
 
-# URL query param used for cross-refresh session persistence.
-# Single opaque token: the username. Safe because it carries no auth power
-# by itself — every page load re-validates against UserManager.
-_QUERY_AUTH = "_auth"
-
 _PENDING_SESSION = "_auth_pending_username"
+
+# Session token stored server-side at ~/.tradingagents/auth/sessions/<token>.json
+_SESSIONS_DIR = Path.home() / ".tradingagents" / "auth" / "sessions"
+_SESSION_TTL = 30 * 24 * 3600  # 30 days
+
+# Cookie name set via frontend JS
+_COOKIE_NAME = "ta_user"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -58,8 +61,68 @@ def get_current_user():
     return st.session_state.get(_SESSION_USER)
 
 
-def _restore_from_query() -> bool:
-    """Try to restore a logged-in session from URL query param.
+def _ensure_sessions_dir() -> None:
+    _SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _create_session_token(username: str) -> str:
+    """Create a server-side session file and return the token."""
+    _ensure_sessions_dir()
+    token = secrets.token_urlsafe(32)
+    payload = {
+        "username": username,
+        "expires": time.time() + _SESSION_TTL,
+    }
+    (_SESSIONS_DIR / f"{token}.json").write_text(json.dumps(payload))
+    return token
+
+
+def _validate_session_token(token: str) -> str | None:
+    """Validate a session token and return the username, or None."""
+    session_file = _SESSIONS_DIR / f"{token}.json"
+    if not session_file.exists():
+        return None
+    try:
+        data = json.loads(session_file.read_text())
+        if time.time() > data.get("expires", 0):
+            session_file.unlink(missing_ok=True)
+            return None
+        return data.get("username")
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _delete_session_token(token: str) -> None:
+    session_file = _SESSIONS_DIR / f"{token}.json"
+    session_file.unlink(missing_ok=True)
+
+
+def _read_cookie_via_query() -> str | None:
+    """Read the session token from the URL query param.
+
+    On page load, a tiny frontend script copies the cookie value into the URL
+    query param so the Streamlit server can read it.
+    """
+    token = st.query_params.get(_COOKIE_NAME)
+    return str(token) if token else None
+
+
+def _set_cookie_query(token: str) -> None:
+    """Write the token to URL query param so the server can read it."""
+    st.query_params[_COOKIE_NAME] = token
+
+
+def _remove_cookie_query() -> None:
+    st.query_params.pop(_COOKIE_NAME, None)
+
+
+def _restore_session() -> bool:
+    """Try to restore a logged-in session from server-side token.
+
+    Priority:
+    1. st.session_state already has user
+    2. token in URL query param (from cookie on page load)
+    3. nothing → return False
 
     Called once per page load in ``require_auth()``.
     Returns ``True`` if a session was restored.
@@ -67,15 +130,21 @@ def _restore_from_query() -> bool:
     if _SESSION_USER in st.session_state:
         return True
 
-    saved_username = st.query_params.get(_QUERY_AUTH)
-    if not saved_username:
+    token = _read_cookie_via_query()
+    if not token:
+        return False
+
+    username = _validate_session_token(token)
+    if username is None:
+        # Token expired or invalid — clear query param.
+        _remove_cookie_query()
         return False
 
     mgr = _get_manager()
-    stored_user = mgr.get_user(str(saved_username))
+    stored_user = mgr.get_user(username)
     if stored_user is None or stored_user.status != "active":
-        # Stale token — clear it from URL.
-        st.query_params.pop(_QUERY_AUTH, None)
+        _remove_cookie_query()
+        _delete_session_token(token)
         return False
 
     stored_user.is_authenticated = True
@@ -84,13 +153,47 @@ def _restore_from_query() -> bool:
     return True
 
 
-def _save_query(username: str) -> None:
-    """Persist ``username`` in URL query param for cross-refresh survival."""
-    st.query_params[_QUERY_AUTH] = username
+def _save_session(username: str) -> None:
+    """Create a server-side session and set the cookie via URL param.
+
+    On the current page load the JS hasn't run yet, but on *subsequent* page
+    loads a tiny frontend script will copy the cookie from document.cookie
+    into the URL so the server can read it.
+    """
+    token = _create_session_token(username)
+    _set_cookie_query(token)
+    # Inject inline JS to persist the token into a real browser cookie.
+    st.markdown(
+        f"""<script>
+(function() {{
+    var name = "{_COOKIE_NAME}";
+    var value = "{token}";
+    var expires = new Date(Date.now() + {_SESSION_TTL * 1000}).toUTCString();
+    document.cookie = name + "=" + value + "; expires=" + expires + "; path=/; SameSite=Lax";
+}})();
+</script>""",
+        unsafe_allow_html=True,
+    )
 
 
-def _clear_query() -> None:
-    st.query_params.pop(_QUERY_AUTH, None)
+def _clear_session() -> None:
+    """Destroy the server-side session and remove the URL query param."""
+    token = _read_cookie_via_query()
+    if token:
+        _delete_session_token(token)
+    _remove_cookie_query()
+    # Also clear the cookie via JS.
+    st.markdown(
+        f"""<script>
+(function() {{
+    document.cookie = "{_COOKIE_NAME}=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; SameSite=Lax";
+    var url = new URL(window.location.href);
+    url.searchParams.delete("{_COOKIE_NAME}");
+    window.history.replaceState({{}}, "", url);
+}})();
+</script>""",
+        unsafe_allow_html=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -103,34 +206,59 @@ def require_auth() -> None:
 
     Must be called from ``web/app.py`` **after** ``st.set_page_config()``.
     """
+    # On every page load, copy the session cookie into the URL query param
+    # so the Streamlit server can read it.  If the cookie exists but no
+    # token is in the URL yet, do a one-time redirect to "/?ta_token=xxx"
+    # so the server picks it up on the next load.
+    st.markdown(
+        f"""<script>
+(function() {{
+    var name = "{_COOKIE_NAME}";
+    var match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
+    if (match) {{
+        var url = new URL(window.location.href);
+        if (!url.searchParams.has(name)) {{
+            url.searchParams.set(name, match[2]);
+            window.location.replace(url.toString());
+        }}
+    }}
+}})();
+</script>""",
+        unsafe_allow_html=True,
+    )
+
     mgr = _get_manager()
 
     # Handle deferred logout: clear everything and rerun.
     if st.session_state.pop(_SESSION_LOGOUT_PENDING, False):
         st.session_state.pop(_SESSION_USER, None)
         st.session_state[_SESSION_PAGE] = "login"
-        _clear_query()
+        _clear_session()
         st.rerun()
 
-    # Try query-param-based restore (on refresh / new tab).
+    # Try server-side-session-based restore (on refresh / new tab).
     if _SESSION_USER not in st.session_state:
-        _restore_from_query()
+        _restore_session()
 
     user = st.session_state.get(_SESSION_USER)
 
     # Authenticated + active → proceed to the app.
     if user and getattr(user, "is_authenticated", False):
         if user.status == "active":
-            # Ensure the query param is present (first login after refresh).
-            if _QUERY_AUTH not in st.query_params:
-                _save_query(user.username)
+            # Ensure the token is in the URL for the current page load.
+            token = _read_cookie_via_query()
+            if not token:
+                # Edge case: session exists but URL param missing (very first
+                # load after login where the JS cookie script already ran but
+                # the URL query param somehow got lost).  Re-create it.
+                _save_session(user.username)
             return
         if user.status == "pending":
             _render_pending_page(user)
             st.stop()
         # disabled → force logout.
         st.session_state.pop(_SESSION_USER, None)
-        _clear_query()
+        _clear_session()
 
     page = st.session_state.get(_SESSION_PAGE, "login")
 
@@ -339,7 +467,7 @@ def _render_login(mgr: UserManager) -> None:
                             else:
                                 st.session_state[_SESSION_USER] = user
                                 st.session_state[_SESSION_PAGE] = "login"
-                                _save_query(user.username)
+                                _save_session(user.username)
                                 st.rerun()
                         else:
                             st.error("用户名或密码错误")
@@ -411,7 +539,7 @@ def _render_register(mgr: UserManager) -> None:
                                 if user:
                                     st.session_state[_SESSION_USER] = user
                                     st.session_state[_SESSION_PAGE] = "login"
-                                    _save_query(user.username)
+                                    _save_session(user.username)
                                     st.rerun()
                             else:
                                 st.success(f"账号 {new_username} 注册成功！请等待管理员审核通过后登录。")
