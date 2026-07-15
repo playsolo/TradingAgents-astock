@@ -1,11 +1,13 @@
 """Streamlit login / register / pending / admin page for TradingAgents-Astock.
 
 Supports:
-- Persistent login via server-side session token + browser cookie (set via JS)
-- Reliable behind nginx reverse proxy (no HttpOnly cookie dependency)
+- Persistent login via server-side session token + browser cookie
+- Cookie written by ``st.html(..., unsafe_allow_javascript=True)`` (main page)
+- Cookie read server-side by ``st.context.cookies`` (works on new tabs)
 - Registration with pending approval (non-admin users)
 - Admin review panel for pending accounts
 - First-user auto-creates admin (immediately active)
+- Admin-only model configuration (applied to all users)
 """
 
 from __future__ import annotations
@@ -16,9 +18,10 @@ import time
 from pathlib import Path
 
 import streamlit as st
-import streamlit.components.v1 as components
 
 from tradingagents.auth import UserManager, AuthConfig
+from tradingagents.auth.model_config import load_model_config, save_model_config
+from tradingagents.llm_clients.model_catalog import MODEL_OPTIONS
 
 
 # ---------------------------------------------------------------------------
@@ -35,8 +38,8 @@ _PENDING_SESSION = "_auth_pending_username"
 _SESSIONS_DIR = Path.home() / ".tradingagents" / "auth" / "sessions"
 _SESSION_TTL = 30 * 24 * 3600  # 30 days
 
-# Cookie name set via frontend JS
-_COOKIE_NAME = "ta_user"
+# Cookie name — written by main-page JS (st.html), read by st.context.cookies
+_COOKIE_NAME = "ta_token"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -98,104 +101,173 @@ def _delete_session_token(token: str) -> None:
     session_file.unlink(missing_ok=True)
 
 
-def _read_cookie_via_query() -> str | None:
-    """Read the session token from the URL query param.
+def _read_token() -> str | None:
+    """Read session token from session_state, URL query, or browser cookie.
 
-    On page load, a tiny frontend script copies the cookie value into the URL
-    query param so the Streamlit server can read it.
+    Order matters: after a fresh login the query param / session_state hold the
+    new token, while an expired cookie from a previous session may still be
+    present. Prefer the newer sources, then fall back to the cookie.
     """
-    token = st.query_params.get(_COOKIE_NAME)
-    return str(token) if token else None
+    # 1. In-memory token from this Streamlit session (set at login / restore).
+    mem = st.session_state.get("_auth_token")
+    if mem:
+        return str(mem)
+
+    # 2. URL query param (same-tab fallback right after login).
+    for key in (_COOKIE_NAME, "ta_user"):
+        qp = st.query_params.get(key)
+        if qp:
+            return str(qp)
+
+    # 3. Browser cookie (new tab / cold start).
+    try:
+        cookie_val = st.context.cookies.get(_COOKIE_NAME)
+        if cookie_val:
+            return str(cookie_val)
+        legacy = st.context.cookies.get("ta_user")
+        if legacy:
+            return str(legacy)
+    except Exception:
+        pass
+
+    return None
 
 
-def _set_cookie_query(token: str) -> None:
-    """Write the token to URL query param so the server can read it."""
-    st.query_params[_COOKIE_NAME] = token
+def _set_browser_cookie(token: str) -> None:
+    """Write the session cookie on the main page via st.html JS.
+
+    Must use ``st.html(..., unsafe_allow_javascript=True)`` — both
+    ``st.markdown`` and sandboxed ``components.html`` cannot set the
+    parent-page cookie reliably.
+    """
+    st.html(
+        f"""<script>
+(function() {{
+    var name = "{_COOKIE_NAME}";
+    var value = "{token}";
+    var maxAge = {_SESSION_TTL};
+    var secure = (location.protocol === "https:") ? "; Secure" : "";
+    document.cookie = name + "=" + encodeURIComponent(value)
+        + "; max-age=" + maxAge
+        + "; path=/; SameSite=Lax" + secure;
+    // Remove old cookie name from previous deploys.
+    document.cookie = "ta_user=; max-age=0; path=/; SameSite=Lax" + secure;
+    // Drop token from the address bar once the cookie is set.
+    try {{
+        var url = new URL(window.location.href);
+        var dirty = false;
+        if (url.searchParams.has(name)) {{ url.searchParams.delete(name); dirty = true; }}
+        if (url.searchParams.has("ta_user")) {{ url.searchParams.delete("ta_user"); dirty = true; }}
+        if (dirty) window.history.replaceState({{}}, "", url);
+    }} catch (e) {{}}
+}})();
+</script>""",
+        unsafe_allow_javascript=True,
+    )
 
 
-def _remove_cookie_query() -> None:
-    st.query_params.pop(_COOKIE_NAME, None)
+def _clear_browser_cookie() -> None:
+    """Clear session cookie + URL params via main-page JS."""
+    for key in (_COOKIE_NAME, "ta_user"):
+        st.query_params.pop(key, None)
+
+    st.html(
+        f"""<script>
+(function() {{
+    var secure = (location.protocol === "https:") ? "; Secure" : "";
+    document.cookie = "{_COOKIE_NAME}=; max-age=0; path=/; SameSite=Lax" + secure;
+    document.cookie = "ta_user=; max-age=0; path=/; SameSite=Lax" + secure;
+    try {{
+        var url = new URL(window.location.href);
+        url.searchParams.delete("{_COOKIE_NAME}");
+        url.searchParams.delete("ta_user");
+        window.history.replaceState({{}}, "", url);
+    }} catch (e) {{}}
+}})();
+</script>""",
+        unsafe_allow_javascript=True,
+    )
+
+
+def _cookie_matches(token: str) -> bool:
+    """Return True if the browser cookie already equals ``token``."""
+    try:
+        current = st.context.cookies.get(_COOKIE_NAME) or st.context.cookies.get("ta_user")
+        return bool(current) and str(current) == str(token)
+    except Exception:
+        return False
 
 
 def _restore_session() -> bool:
-    """Try to restore a logged-in session from server-side token.
+    """Try to restore a logged-in session from cookie / URL token.
 
     Priority:
     1. st.session_state already has user
-    2. token in URL query param (from cookie on page load)
+    2. token from session_state / URL query / cookie
     3. nothing → return False
-
-    Called once per page load in ``require_auth()``.
-    Returns ``True`` if a session was restored.
     """
     if _SESSION_USER in st.session_state:
         return True
 
-    token = _read_cookie_via_query()
+    token = _read_token()
     if not token:
         return False
 
     username = _validate_session_token(token)
     if username is None:
-        # Token expired or invalid — clear query param.
-        _remove_cookie_query()
+        # Stale token — clear cookie/URL so a future login can succeed.
+        st.session_state.pop("_auth_token", None)
+        _clear_browser_cookie()
         return False
 
     mgr = _get_manager()
     stored_user = mgr.get_user(username)
     if stored_user is None or stored_user.status != "active":
-        _remove_cookie_query()
         _delete_session_token(token)
+        st.session_state.pop("_auth_token", None)
+        _clear_browser_cookie()
         return False
 
     stored_user.is_authenticated = True
     st.session_state[_SESSION_USER] = stored_user
     st.session_state[_SESSION_PAGE] = "login"
+    st.session_state["_auth_token"] = token
     return True
 
 
 def _save_session(username: str) -> None:
-    """Create a server-side session and set the cookie via JS in an iframe.
+    """Create a server-side session; cookie is set on the next authenticated render.
 
-    On the current page load the iframe JS hasn't set the cookie yet, but on
-    *subsequent* page loads the cookie will be available.
+    Login handlers call ``st.rerun()`` immediately after this, so injecting JS
+    here would be discarded.  Token is kept in session_state and the cookie is
+    written when ``require_auth`` returns into the main app.
     """
     token = _create_session_token(username)
-    _set_cookie_query(token)
-    # Use components.html (iframe) to execute JS — st.markdown strips <script> tags.
-    components.html(
-        f"""<script>
-(function() {{
-    var name = "{_COOKIE_NAME}";
-    var value = "{token}";
-    var expires = new Date(Date.now() + {_SESSION_TTL * 1000}).toUTCString();
-    document.cookie = name + "=" + value + "; expires=" + expires + "; path=/; SameSite=Lax";
-}})();
-</script>""",
-        height=0,
-        width=0,
-    )
+    st.session_state["_auth_token"] = token
+    st.query_params[_COOKIE_NAME] = token
+    st.query_params.pop("ta_user", None)
+
+
+def _ensure_session_cookie() -> None:
+    """If the browser cookie is missing or stale, inject JS to set the current token."""
+    token = st.session_state.get("_auth_token") or _read_token()
+    if not token:
+        return
+    if _cookie_matches(token):
+        # Cookie is good — scrub token from URL if still present.
+        if _COOKIE_NAME in st.query_params or "ta_user" in st.query_params:
+            st.query_params.pop(_COOKIE_NAME, None)
+            st.query_params.pop("ta_user", None)
+        return
+    _set_browser_cookie(token)
 
 
 def _clear_session() -> None:
-    """Destroy the server-side session and remove the URL query param."""
-    token = _read_cookie_via_query()
+    """Destroy the server-side session and clear the browser cookie."""
+    token = st.session_state.pop("_auth_token", None) or _read_token()
     if token:
         _delete_session_token(token)
-    _remove_cookie_query()
-    # Also clear the cookie via JS in an iframe.
-    components.html(
-        f"""<script>
-(function() {{
-    document.cookie = "{_COOKIE_NAME}=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; SameSite=Lax";
-    var url = new URL(window.location.href);
-    url.searchParams.delete("{_COOKIE_NAME}");
-    window.history.replaceState({{}}, "", url);
-}})();
-</script>""",
-        height=0,
-        width=0,
-    )
+    _clear_browser_cookie()
 
 
 # ---------------------------------------------------------------------------
@@ -208,27 +280,6 @@ def require_auth() -> None:
 
     Must be called from ``web/app.py`` **after** ``st.set_page_config()``.
     """
-    # On every page load, try to read the session cookie and copy it into the
-    # URL query param so the Streamlit server can read it.
-    # Uses components.html (iframe) because st.markdown strips <script> tags.
-    components.html(
-        f"""<script>
-(function() {{
-    var name = "{_COOKIE_NAME}";
-    var match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
-    if (match) {{
-        var url = new URL(window.location.href);
-        if (!url.searchParams.has(name)) {{
-            url.searchParams.set(name, match[2]);
-            window.location.replace(url.toString());
-        }}
-    }}
-}})();
-</script>""",
-        height=0,
-        width=0,
-    )
-
     mgr = _get_manager()
 
     # Handle deferred logout: clear everything and rerun.
@@ -238,7 +289,7 @@ def require_auth() -> None:
         _clear_session()
         st.rerun()
 
-    # Try server-side-session-based restore (on refresh / new tab).
+    # Try cookie/URL-based restore (works on refresh and new tab).
     if _SESSION_USER not in st.session_state:
         _restore_session()
 
@@ -247,6 +298,8 @@ def require_auth() -> None:
     # Authenticated + active → proceed to the app.
     if user and getattr(user, "is_authenticated", False):
         if user.status == "active":
+            # Persist cookie on the main document so new tabs restore login.
+            _ensure_session_cookie()
             return
         if user.status == "pending":
             _render_pending_page(user)
@@ -341,12 +394,117 @@ def render_logout_button() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _render_admin_model_config() -> None:
+    """Admin-only form to set the model config that all users will use.
+
+    Persisted to disk — survives server restart.
+    """
+    st.markdown("##### 模型配置（全局）")
+    admin_config = load_model_config()
+
+    provider_keys = [
+        "minimax", "deepseek", "qwen", "glm", "openai",
+        "anthropic", "google", "xai", "openrouter", "ollama",
+    ]
+    provider_labels = {
+        "minimax": "MiniMax（推荐·国内直连）",
+        "deepseek": "DeepSeek",
+        "qwen": "通义千问 Qwen",
+        "glm": "智谱 GLM",
+        "openai": "OpenAI",
+        "anthropic": "Anthropic",
+        "google": "Google Gemini",
+        "xai": "xAI Grok",
+        "openrouter": "OpenRouter（聚合）",
+        "ollama": "Ollama（本地）",
+    }
+
+    current_provider = admin_config.get("llm_provider", "deepseek")
+    prov_idx = provider_keys.index(current_provider) if current_provider in provider_keys else 0
+
+    with st.form("admin_model_config_form", clear_on_submit=False):
+        selected_provider = st.selectbox(
+            "LLM 供应商",
+            options=provider_keys,
+            index=prov_idx,
+            format_func=lambda k: provider_labels.get(k, k),
+            key="admin_llm_provider",
+        )
+
+        quick_models: list[str] = []
+        deep_models: list[str] = []
+        if selected_provider in MODEL_OPTIONS:
+            quick_models = [v for _, v in MODEL_OPTIONS[selected_provider]["quick"]]
+            deep_models = [v for _, v in MODEL_OPTIONS[selected_provider]["deep"]]
+
+        current_quick = admin_config.get("quick_think_llm", "deepseek-chat")
+        current_deep = admin_config.get("deep_think_llm", "deepseek-chat")
+        quick_idx = quick_models.index(current_quick) if current_quick in quick_models else 0
+        deep_idx = deep_models.index(current_deep) if current_deep in deep_models else 0
+
+        if quick_models:
+            quick_val = st.selectbox(
+                "快速思考模型",
+                options=quick_models,
+                index=quick_idx,
+                key="admin_quick_model",
+            )
+        else:
+            quick_val = st.text_input("快速思考模型 ID", value=current_quick, key="admin_quick_model")
+
+        if deep_models:
+            deep_val = st.selectbox(
+                "深度思考模型",
+                options=deep_models,
+                index=deep_idx,
+                key="admin_deep_model",
+            )
+        else:
+            deep_val = st.text_input("深度思考模型 ID", value=current_deep, key="admin_deep_model")
+
+        backend_val = st.text_input(
+            "API Base URL（可选）",
+            value=admin_config.get("backend_url") or "",
+            key="admin_llm_base_url",
+            placeholder="例: https://your-proxy.com/v1",
+        )
+
+        if st.form_submit_button("保存模型配置", type="primary", use_container_width=True):
+            save_model_config(
+                llm_provider=selected_provider,
+                deep_think_llm=deep_val,
+                quick_think_llm=quick_val,
+                backend_url=backend_val.strip() or None,
+            )
+            st.success("模型配置已保存，全体用户立即生效")
+            st.rerun()
+
+
+def render_model_config_info() -> None:
+    """Show non-admin users the inherited model config (read-only)."""
+    cfg = load_model_config()
+    provider_labels = {
+        "minimax": "MiniMax", "deepseek": "DeepSeek", "qwen": "Qwen",
+        "glm": "GLM", "openai": "OpenAI", "anthropic": "Anthropic",
+        "google": "Gemini", "xai": "Grok", "openrouter": "OpenRouter",
+        "ollama": "Ollama",
+    }
+    st.caption(
+        f"🤖 模型：{provider_labels.get(cfg['llm_provider'], cfg['llm_provider'])}"
+        f"（快速 {cfg['quick_think_llm']} · 深度 {cfg['deep_think_llm']}）"
+    )
+
+
 def render_admin_panel() -> None:
     user = get_current_user()
     if not user or user.role != "admin":
         return
 
     mgr = _get_manager()
+
+    # ── Model config section (above user management) ─────────────────
+    _render_admin_model_config()
+    st.markdown("---")
 
     with st.expander(
         "🔐 用户管理（管理员）",
