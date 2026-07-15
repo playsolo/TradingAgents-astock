@@ -227,6 +227,40 @@ ssh solo@m.wcc.io "cd /home/solo/TradingAgents-astock && .venv/bin/tradingagents
 > 前提：admin 已在 Web 里保存过模型配置（`~/.tradingagents/model_config.json`），
 > worker 无 Streamlit session，模型来源只认该文件（缺失时回退到 `.env`）。
 
+## 美股 GUI（侧栏选「美股」）
+
+侧栏选美股后，分析走 `web/us_bridge`：本进程只做进度桥接，真正跑原版
+[TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents)
+子进程（Yahoo Finance 数据），与 A 股代码仓隔离。
+
+| 项 | 内容 |
+|---|---|
+| 代码目录 | `/home/solo/TradingAgents` |
+| 环境变量 | `US_TRADINGAGENTS_ROOT`、`US_TRADINGAGENTS_PYTHON`（写在两个 systemd 单元里） |
+| API Key | 由 A 股仓 `.env` / 继承的进程环境注入子进程（子进程也会读 US 仓自己的 `.env`，`override=False`） |
+
+**首次安装美股桥接：**
+
+```bash
+ssh solo@m.wcc.io
+git clone https://github.com/TauricResearch/TradingAgents.git /home/solo/TradingAgents
+cd /home/solo/TradingAgents
+python3 -m venv .venv
+.venv/bin/pip install -U pip
+.venv/bin/pip install -e .
+# 可选：把常用 LLM key 同步一份到 US 仓（子进程也会继承 A 股 .env）
+# cp /home/solo/TradingAgents-astock/.env /home/solo/TradingAgents/.env
+
+cd /home/solo/TradingAgents-astock
+sudo cp deploy/tradingagents-astock.service /etc/systemd/system/
+sudo cp deploy/tradingagents-analyze.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl restart tradingagents-astock.service tradingagents-analyze.service
+```
+
+本地开发默认 `US_TRADINGAGENTS_ROOT=/Users/solo/workspace/tradingAgents`；
+也可用 `.env` 覆盖（见 `.env.example`）。
+
 ## 工作流总结
 
 ```

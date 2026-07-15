@@ -4,6 +4,7 @@ services:
     env_file:
       - .env
     volumes:
+      - ./reports:/home/appuser/app/reports
       - tradingagents_data:/home/appuser/.tradingagents
     tty: true
     stdin_open: true
@@ -22,6 +23,7 @@ services:
     environment:
       - LLM_PROVIDER=ollama
     volumes:
+      - ./reports:/home/appuser/app/reports
       - tradingagents_data:/home/appuser/.tradingagents
     depends_on:
       - ollama

@@ -16,6 +16,9 @@ Environment="ARROW_DEFAULT_MEMORY_POOL=system"
 # 只入队，交后台 worker 执行
 Environment="TRADINGAGENTS_ANALYSIS_EXECUTOR=worker"
 Environment="TRADINGAGENTS_MAX_PARALLEL=3"
+# 美股 GUI：原版 TradingAgents checkout（与 A 股仓隔离）
+Environment="US_TRADINGAGENTS_ROOT=/home/solo/TradingAgents"
+Environment="US_TRADINGAGENTS_PYTHON=/home/solo/TradingAgents/.venv/bin/python"
 ExecStart=/home/solo/TradingAgents-astock/.venv/bin/streamlit run web/app.py --server.port 8501 --server.headless true --server.address 127.0.0.1
 Restart=always
 RestartSec=5

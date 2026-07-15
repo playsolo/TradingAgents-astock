@@ -165,6 +165,11 @@ class TradingAgentsGraph:
             if effort:
                 kwargs["effort"] = effort
 
+        # Configurable LLM retry budget forwarded to every provider.
+        max_retries = self.config.get("llm_max_retries")
+        if max_retries is not None:
+            kwargs["max_retries"] = max_retries
+
         return kwargs
 
     def _create_tool_nodes(self) -> Dict[str, ToolNode]:

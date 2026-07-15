@@ -23,6 +23,9 @@ Environment="PATH=/home/solo/TradingAgents-astock/.venv/bin"
 Environment="ARROW_DEFAULT_MEMORY_POOL=system"
 # 并发上限（与 Web 侧文案一致，默认 3）
 Environment="TRADINGAGENTS_MAX_PARALLEL=3"
+# 美股 GUI：分析 worker 消费 US 队列时同样需要桥接路径
+Environment="US_TRADINGAGENTS_ROOT=/home/solo/TradingAgents"
+Environment="US_TRADINGAGENTS_PYTHON=/home/solo/TradingAgents/.venv/bin/python"
 ExecStart=/home/solo/TradingAgents-astock/.venv/bin/tradingagents-analyze
 Restart=always
 RestartSec=5

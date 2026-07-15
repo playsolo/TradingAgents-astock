@@ -4,6 +4,10 @@ from dateutil.relativedelta import relativedelta
 import pandas as pd
 import yfinance as yf
 import os
+from ._nan_close_fallback import (
+    estimate_close_from_typical_price,
+    fill_nan_close_from_web,
+)
 from .stockstats_utils import StockstatsUtils, _clean_dataframe, yf_retry, load_ohlcv, filter_financials_by_date
 
 def get_YFin_data_online(
@@ -30,6 +34,23 @@ def get_YFin_data_online(
     # Remove timezone info from index for cleaner output
     if data.index.tz is not None:
         data.index = data.index.tz_localize(None)
+
+    # When the latest row has a NaN Close but valid Open/High/Low/Volume —
+    # a known yfinance issue for symbols with a recent dividend (#1093) —
+    # try to fill the Close from the Yahoo Finance quote page.  If the web
+    # scrape fails too, fall back to estimating Close from the typical price
+    # (Open+High+Low)/3, which is empirically within ~2.5% of the real value.
+    data = fill_nan_close_from_web(data, symbol)
+    nan_close = data["Close"].isna() if "Close" in data.columns else pd.Series(False, index=data.index)
+    if nan_close.any():
+        ohlc_ok = (
+            data["Open"].notna() & data["High"].notna() & data["Low"].notna()
+        )
+        fill_mask = nan_close & ohlc_ok
+        if fill_mask.any():
+            data.loc[fill_mask, "Close"] = (
+                data.loc[fill_mask, ["Open", "High", "Low"]].sum(axis=1) / 3
+            )
 
     # Round numerical values to 2 decimal places for cleaner display
     numeric_columns = ["Open", "High", "Low", "Close", "Adj Close"]
