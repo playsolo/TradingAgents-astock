@@ -20,6 +20,18 @@ logger = logging.getLogger(__name__)
 _STALE_REFRESH_FAIL_KIND = "stale_refresh"
 
 
+def _mirror_alerts_to_inbox(ticker: str, alerts: list[Alert]) -> None:
+    """Best-effort：把观察告警镜像到站内事件中心，失败不影响观察本身。"""
+    if not alerts:
+        return
+    try:
+        from tradingagents import inbox
+
+        inbox.emit_watch_alerts(ticker, alerts)
+    except Exception:  # noqa: BLE001 - inbox 是非关键旁路
+        logger.warning("mirror watch alerts to inbox failed for %s", ticker, exc_info=True)
+
+
 def observe_item(
     item: WatchItem,
     *,
@@ -95,17 +107,14 @@ def _full_refresh_observe(
         )
     except Exception as exc:
         logger.exception("full refresh failed for %s; falling back to light observe", ticker)
-        store.append_alerts(
-            ticker,
-            [
-                Alert(
-                    kind=_STALE_REFRESH_FAIL_KIND,
-                    title="完整再分析失败",
-                    detail=f"已回退轻量观察：{exc}",
-                    observed_at=observed_at,
-                )
-            ],
+        fail_alert = Alert(
+            kind=_STALE_REFRESH_FAIL_KIND,
+            title="完整再分析失败",
+            detail=f"已回退轻量观察：{exc}",
+            observed_at=observed_at,
         )
+        store.append_alerts(ticker, [fail_alert])
+        _mirror_alerts_to_inbox(ticker, [fail_alert])
         # 不写入 slot_key，便于同窗或下一窗重试完整升级
         return _light_observe(
             item,
@@ -183,6 +192,7 @@ def _light_observe(
 
     if alerts:
         store.append_alerts(ticker, alerts)
+        _mirror_alerts_to_inbox(ticker, alerts)
     store.mark_observed(
         ticker,
         observed_at,

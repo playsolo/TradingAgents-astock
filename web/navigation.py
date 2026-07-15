@@ -57,7 +57,7 @@ def parse_view_params(params: dict[str, Any] | Any) -> dict[str, str | None]:
         return s or None
 
     view = (_get("view") or "home").lower()
-    if view not in {"home", "watch", "history"}:
+    if view not in {"home", "watch", "history", "inbox"}:
         view = "home"
     return {
         "view": view,
@@ -71,7 +71,14 @@ def apply_query_to_session() -> None:
     parsed = parse_view_params(st.query_params)
     view = parsed["view"]
 
+    if view == "inbox":
+        st.session_state["viewing_inbox"] = True
+        st.session_state["viewing_watchlist"] = False
+        st.session_state["viewing_history"] = None
+        return
+
     if view == "watch":
+        st.session_state["viewing_inbox"] = False
         st.session_state["viewing_watchlist"] = True
         st.session_state["viewing_history"] = None
         return
@@ -79,11 +86,13 @@ def apply_query_to_session() -> None:
     if view == "history" and parsed["ticker"] and parsed["date"]:
         path = history_path_for(str(parsed["ticker"]), str(parsed["date"]))
         if path:
+            st.session_state["viewing_inbox"] = False
             st.session_state["viewing_history"] = path
             st.session_state["viewing_watchlist"] = False
             return
 
     # home（或缺省）：离开观察/历史列表视图；进行中的分析靠 tracker 显示
+    st.session_state["viewing_inbox"] = False
     st.session_state["viewing_watchlist"] = False
     # 若 URL 无 history，清掉历史视图（避免刷新后粘住）
     if view == "home":
@@ -98,12 +107,20 @@ def navigate(
     path: str | None = None,
 ) -> None:
     """更新 session + URL 并 rerun。"""
-    if view == "watch":
+    if view == "inbox":
+        st.session_state["viewing_inbox"] = True
+        st.session_state["viewing_watchlist"] = False
+        st.session_state["viewing_history"] = None
+        st.session_state["start_analysis"] = None
+        params = view_query("inbox")
+    elif view == "watch":
+        st.session_state["viewing_inbox"] = False
         st.session_state["viewing_watchlist"] = True
         st.session_state["viewing_history"] = None
         st.session_state["start_analysis"] = None
         params = view_query("watch")
     elif view == "history":
+        st.session_state["viewing_inbox"] = False
         st.session_state["viewing_watchlist"] = False
         st.session_state["start_analysis"] = None
         resolved = path or (
@@ -117,6 +134,7 @@ def navigate(
             date = p.stem.replace("full_states_log_", "")
         params = view_query("history", ticker=ticker, date=date)
     else:
+        st.session_state["viewing_inbox"] = False
         st.session_state["viewing_watchlist"] = False
         st.session_state["viewing_history"] = None
         params = view_query("home")

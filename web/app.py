@@ -46,6 +46,7 @@ from web.components.progress_panel import (  # noqa: E402
     render_multi_progress,
     render_running_progress,
 )
+from web.components.inbox_page import render_inbox_page  # noqa: E402
 from web.components.report_viewer import render_report  # noqa: E402
 from web.components.sidebar import render_sidebar, request_clear_ticker_input  # noqa: E402
 from web.components.watch_page import render_watch_page  # noqa: E402
@@ -385,6 +386,7 @@ def _begin_analysis(start_req: dict) -> ProgressTracker:
     add_tracker(st.session_state, tracker)
     st.session_state["viewing_history"] = None
     st.session_state["viewing_watchlist"] = False
+    st.session_state["viewing_inbox"] = False
     if start_req.get("watchlist_refresh"):
         st.session_state["watchlist_refresh_pending"] = {
             "ticker": start_req["ticker"],
@@ -435,6 +437,7 @@ if start_req:
 # multi-run state machine uses active_runs() directly.
 viewing_history: str | None = st.session_state.get("viewing_history")
 viewing_watchlist: bool = bool(st.session_state.get("viewing_watchlist"))
+viewing_inbox: bool = bool(st.session_state.get("viewing_inbox"))
 
 
 def _consume_watchlist_refresh_pending(active: ProgressTracker) -> None:
@@ -520,8 +523,12 @@ _focus = focused_ticker(st.session_state) or ""
 _all_runs = active_runs(st.session_state)
 _any_running = has_running(st.session_state)
 
+# State 0.4: Inbox (event center)
+if viewing_inbox and not _any_running:
+    render_inbox_page()
+
 # State 0.5: Watchlist observation page
-if viewing_watchlist and not _any_running:
+elif viewing_watchlist and not _any_running:
     render_watch_page()
 
 # State 1: Viewing a historical analysis

@@ -173,6 +173,16 @@ def _run(
         graph.close_graph_run()
 
 
+def _notify_inbox_terminal(tracker: ProgressTracker) -> None:
+    """Best-effort：向站内事件中心发分析终态通知，失败不影响分析本身。"""
+    try:
+        from web.events import notify_tracker_terminal
+
+        notify_tracker_terminal(tracker)
+    except Exception:  # noqa: BLE001 - inbox 是非关键旁路
+        traceback.print_exc()
+
+
 def _run_us(ticker: str, trade_date: str, config: dict, tracker: ProgressTracker) -> None:
     from web.us_bridge.client import run_us_analysis
 
@@ -259,6 +269,10 @@ def run_analysis_in_thread(
                 completed_stages=tracker.completed_stages,
             )
             tracker.mark_error(str(exc))
+
+        # 站内事件中心：在 runner 线程（session 无关）发终态通知，浏览器刷新也不丢。
+        # notify_tracker_terminal 只对 complete/error 发事件，被停止的运行会被跳过。
+        _notify_inbox_terminal(tracker)
 
     t = threading.Thread(target=_target, daemon=True)
     t.start()

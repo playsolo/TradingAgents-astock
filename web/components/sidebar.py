@@ -513,6 +513,19 @@ def render_sidebar() -> None:
         unsafe_allow_html=True,
     )
 
+    from tradingagents import inbox
+
+    unread = inbox.unread_count()
+    inbox_label = f"🔔 最新（{unread}）" if unread else "🔔 最新"
+    if st.button(
+        inbox_label,
+        key="nav_inbox",
+        use_container_width=True,
+        type="primary" if unread else "secondary",
+        help="站内消息：分析完成 / 失败、数据缺失警告、观察池告警",
+    ):
+        navigate("inbox")
+
     st.markdown("---")
     st.markdown("#### 新建分析")
 
