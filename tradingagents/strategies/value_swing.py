@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -61,6 +62,78 @@ _MIN_AMPLITUDE_20D: float = 0.02        # 20日振幅 > 2%
 _MAX_CANDIDATES: int = 15
 _TENCENT_BATCH_SIZE = 800
 _L1B_BATCH_SIZE = 30                    # L1b 验证的候选上限（防耗时过长）
+
+# ── 进度上报 ────────────────────────────────────────────────────────────────
+
+# 每个阶段占整体进度的百分比区间（累进，非磁盘/时间估算，仅供 UI 展示）
+_PCT_L0_START = 2       # L0 刚开始（批量报价前）
+_PCT_L0_DONE = 15       # L0 完成
+_PCT_L1A_DONE = 20      # L1a 完成
+_PCT_L1B_DONE = 55      # L1b 完成
+_PCT_L2_DONE = 100      # L2 完成
+
+_STAGE_LABELS = {
+    "L0": "全市场流动性/ST 筛选",
+    "L1a": "PE/PB 快速估值",
+    "L1b": "财务验证",
+    "L2": "催化剂评分",
+    "done": "完成",
+}
+
+# 进度回调：接收一个进度快照 dict。
+ProgressCb = Callable[[dict[str, Any]], None]
+# 个股级回调：(code, name, index_1based, stage_total)
+ItemCb = Callable[[str, str, int, int], None]
+
+
+class _ScanProgress:
+    """Accumulates funnel counts and forwards progress snapshots to a callback."""
+
+    def __init__(self, cb: ProgressCb | None, total_stocks: int):
+        self._cb = cb
+        self.total_stocks = total_stocks
+        self.l0_passed = 0
+        self.l1a_passed = 0
+        self.l1b_passed = 0
+        self.l2_passed = 0
+
+    def emit(
+        self,
+        stage: str,
+        percent: float,
+        *,
+        code: str = "",
+        name: str = "",
+        stage_index: int = 0,
+        stage_total: int = 0,
+    ) -> None:
+        if self._cb is None:
+            return
+        snapshot = {
+            "stage": stage,
+            "stage_label": _STAGE_LABELS.get(stage, stage),
+            "total_stocks": self.total_stocks,
+            "l0_passed": self.l0_passed,
+            "l1a_passed": self.l1a_passed,
+            "l1b_passed": self.l1b_passed,
+            "l2_passed": self.l2_passed,
+            "current_code": code,
+            "current_name": name,
+            "stage_index": int(stage_index),
+            "stage_total": int(stage_total),
+            "percent": max(0, min(100, int(percent))),
+        }
+        try:
+            self._cb(snapshot)
+        except Exception:  # noqa: BLE001 — progress must never break a scan
+            logger.debug("progress callback failed", exc_info=True)
+
+
+def _interp(lo: float, hi: float, index: int, total: int) -> float:
+    """Linear percent within a stage band [lo, hi]."""
+    if total <= 0:
+        return hi
+    return lo + (hi - lo) * (index / total)
 
 
 # ── 数据结构 ────────────────────────────────────────────────────────────────
@@ -301,14 +374,22 @@ def _calc_amplitude_20d(code: str) -> float | None:
     return None
 
 
-def run_l1b_filter(stocks: list[StockInfo]) -> list[StockInfo]:
+def run_l1b_filter(
+    stocks: list[StockInfo],
+    *,
+    on_item: ItemCb | None = None,
+) -> list[StockInfo]:
     """L1b：财务深度验证（后置，仅对前 N 只候选）。
 
     检查营收增长、负债率、振幅。仅当对应字段为 None 时才发起 HTTP。
+    ``on_item`` 在每只股票验证前回调，用于进度上报。
     """
     passed: list[StockInfo] = []
     sample = stocks[:_L1B_BATCH_SIZE]
-    for info in sample:
+    total = len(sample)
+    for idx, info in enumerate(sample, 1):
+        if on_item is not None:
+            on_item(info.code, info.name, idx, total)
         logger.debug("L1b: %s %s", info.code, info.name)
 
         # 以下为「尽可能」验证，HTTP 超时/失败不会排除
@@ -606,13 +687,19 @@ def _is_stock_code(code: str) -> bool:
     return False
 
 
-def run_l2_filter(stocks: list[StockInfo], max_candidates: int = _MAX_CANDIDATES) -> list[StockInfo]:
+def run_l2_filter(
+    stocks: list[StockInfo],
+    max_candidates: int = _MAX_CANDIDATES,
+    *,
+    on_item: ItemCb | None = None,
+) -> list[StockInfo]:
     """L2 含网络调用。仅对成交量前 80 只 A 股个股执行 HTTP 检测。
 
     包含消息催化剂：
     - 个股新闻检测（东财新闻，近 3 天）
     - 热点题材匹配（同花顺热股）
     - 概念板块活跃度（财联社快讯关键词）
+    ``on_item`` 在每只股票检测前回调，用于进度上报。
     """
     _L2_PROCESS_LIMIT = 80
 
@@ -626,7 +713,10 @@ def run_l2_filter(stocks: list[StockInfo], max_candidates: int = _MAX_CANDIDATES
     global_news = _load_global_news()
 
     # 个股级别检测
-    for info in to_process:
+    total = len(to_process)
+    for idx, info in enumerate(to_process, 1):
+        if on_item is not None:
+            on_item(info.code, info.name, idx, total)
         logger.debug("L2 HTTP: %s %s", info.code, info.name)
 
         info.northbound_net_3d = northbound_val
@@ -647,26 +737,65 @@ def run_l2_filter(stocks: list[StockInfo], max_candidates: int = _MAX_CANDIDATES
 # ── 扫描入口 ──────────────────────────────────────────────────────────────
 
 
-def run_value_swing_scan(max_candidates: int = _MAX_CANDIDATES) -> ScanResult:
-    """执行一轮完整扫描。"""
+def run_value_swing_scan(
+    max_candidates: int = _MAX_CANDIDATES,
+    *,
+    progress_cb: ProgressCb | None = None,
+) -> ScanResult:
+    """执行一轮完整扫描。
+
+    ``progress_cb`` 若提供，会在各阶段切换与个股验证时收到进度快照
+    （stage / 各阶通过数 / 当前个股 / 百分比）。
+    """
     ts = time.time()
     scan_date = datetime.now().strftime("%Y-%m-%d")
     result = ScanResult(scan_date=scan_date)
     logger.info("═══ 价值波段扫描 %s ═══", scan_date)
 
     result.total_stocks = len(_get_all_cn_codes())
+    prog = _ScanProgress(progress_cb, result.total_stocks)
+    prog.emit("L0", _PCT_L0_START)
+
     l0 = run_l0_filter()
     result.l0_passed = len(l0)
+    prog.l0_passed = len(l0)
+    prog.emit("L0", _PCT_L0_DONE)
 
     l1a = run_l1a_filter(l0)
     result.l1a_passed = len(l1a)
+    prog.l1a_passed = len(l1a)
+    prog.emit("L1a", _PCT_L1A_DONE)
 
-    l1b = run_l1b_filter(l1a)
+    def _on_l1b(code: str, name: str, idx: int, total: int) -> None:
+        prog.emit(
+            "L1b",
+            _interp(_PCT_L1A_DONE, _PCT_L1B_DONE, idx, total),
+            code=code,
+            name=name,
+            stage_index=idx,
+            stage_total=total,
+        )
+
+    l1b = run_l1b_filter(l1a, on_item=_on_l1b)
     result.l1b_passed = len(l1b)
+    prog.l1b_passed = len(l1b)
+    prog.emit("L1b", _PCT_L1B_DONE)
 
-    l2 = run_l2_filter(l1b, max_candidates=max_candidates)
+    def _on_l2(code: str, name: str, idx: int, total: int) -> None:
+        prog.emit(
+            "L2",
+            _interp(_PCT_L1B_DONE, _PCT_L2_DONE, idx, total),
+            code=code,
+            name=name,
+            stage_index=idx,
+            stage_total=total,
+        )
+
+    l2 = run_l2_filter(l1b, max_candidates=max_candidates, on_item=_on_l2)
     result.l2_passed = len(l2)
     result.candidates = l2
+    prog.l2_passed = len(l2)
+    prog.emit("done", _PCT_L2_DONE)
 
     result.duration_seconds = time.time() - ts
     logger.info("═══ %d→%d→%d→%d 候选, %.0fs ═══",

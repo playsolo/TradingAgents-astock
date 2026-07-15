@@ -6,12 +6,17 @@
 from __future__ import annotations
 
 import logging
-import threading
+import time
 from datetime import datetime
 
 import streamlit as st
 
 logger = logging.getLogger(__name__)
+
+# 扫描进程启动后到子进程写入 running 状态之间的宽限窗口（秒）。
+_LAUNCH_GRACE_S = 20
+# 运行中面板自动轮询间隔（秒）。
+_POLL_INTERVAL_S = 2
 
 
 def _get_code_to_name():
@@ -19,47 +24,6 @@ def _get_code_to_name():
     from tradingagents.dataflows.a_stock import _build_name_code_map
     _, c2n = _build_name_code_map()
     return c2n
-
-
-def _run_scan(max_candidates: int) -> dict:
-    """在后台线程中运行扫描，返回结果。"""
-    from tradingagents.strategies.value_swing import (
-        ScanResult,
-        run_value_swing_scan,
-    )
-    try:
-        result: ScanResult = run_value_swing_scan(max_candidates=max_candidates)
-        return {
-            "ok": True,
-            "scan_date": result.scan_date,
-            "total_stocks": result.total_stocks,
-            "l0_passed": result.l0_passed,
-            "l1a_passed": result.l1a_passed,
-            "l1b_passed": result.l1b_passed,
-            "l2_passed": result.l2_passed,
-            "candidates": [
-                {
-                    "code": c.code,
-                    "name": c.name,
-                    "price": c.price,
-                    "pe_ttm": c.pe_ttm,
-                    "pb": c.pb,
-                    "signal_score": c.signal_score,
-                    "debt_ratio": round(c.debt_ratio * 100, 1) if c.debt_ratio else None,
-                    "revenue_growth": round(c.revenue_growth * 100, 1) if c.revenue_growth else None,
-                    "above_ma20": c.above_ma20,
-                    "near_ma250": c.near_ma250,
-                    "news_found": c.news_found,
-                    "hot_topic_match": c.hot_topic_match,
-                    "concept_active": c.concept_active,
-                }
-                for c in result.candidates
-            ],
-            "duration_seconds": result.duration_seconds,
-        }
-    except Exception as e:
-        logger.exception("价值波段扫描失败")
-        return {"ok": False, "error": str(e)}
 
 
 
@@ -257,24 +221,102 @@ def render_scan_results(candidates: list[dict]):
         )
 
 
-def _run_scan_in_background(max_candidates: int, result_key: str):
-    """在后台线程中运行扫描，结果存入 st.session_state。"""
-    try:
-        result = _run_scan(max_candidates)
-        st.session_state[result_key] = result
-    except Exception as e:
-        st.session_state[result_key] = {"ok": False, "error": str(e)}
-    finally:
-        st.session_state["_scan_running"] = False
+_STAGE_ORDER = ("L0", "L1a", "L1b", "L2", "done")
+
+
+def _render_progress(progress: dict | None):
+    """渲染运行中进度：阶段 + 各阶通过数 + 百分比 + 当前个股。"""
+    if not progress:
+        st.info("扫描进程已启动，正在初始化全市场种子…")
+        return
+
+    percent = int(progress.get("percent", 0))
+    stage = progress.get("stage", "")
+    label = progress.get("stage_label", stage)
+    stage_pos = (_STAGE_ORDER.index(stage) + 1) if stage in _STAGE_ORDER else 0
+    caption = f"{percent}% · 阶段 {stage_pos}/{len(_STAGE_ORDER)}：{label}"
+    st.progress(min(max(percent, 0), 100) / 100.0, text=caption)
+
+    cols = st.columns(5)
+    funnel = [
+        ("全 A 股", progress.get("total_stocks", 0)),
+        ("L0 通过", progress.get("l0_passed", 0)),
+        ("L1a 通过", progress.get("l1a_passed", 0)),
+        ("L1b 通过", progress.get("l1b_passed", 0)),
+        ("L2 候选", progress.get("l2_passed", 0)),
+    ]
+    for col, (name, value) in zip(cols, funnel):
+        with col:
+            st.metric(label=name, value=value)
+
+    code = progress.get("current_code")
+    if code:
+        name = progress.get("current_name") or ""
+        idx = progress.get("stage_index") or 0
+        total = progress.get("stage_total") or 0
+        pos = f"（{idx}/{total}）" if total else ""
+        st.caption(f"🔎 正在验证：{code} {name} {pos}")
+
+
+def _render_finished_result(record: dict):
+    """渲染最近一次完成扫描的结果（来自持久化存储）。"""
+    from tradingagents.strategies.scan_store import SCAN_STATUS_COMPLETED
+
+    result = record.get("result")
+    if not result:
+        st.info("尚未运行扫描。设置候选上限后点击「开始扫描」。")
+        return
+
+    if record.get("status") == SCAN_STATUS_COMPLETED:
+        finished = record.get("finished_at")
+        if finished:
+            note = f"上次扫描完成于 {finished}"
+            enqueued = record.get("enqueued")
+            if enqueued:
+                note += f" · 已自动入队 {enqueued} 只"
+            st.caption(note)
+    else:
+        st.caption("下方为上一次成功扫描的结果。")
+
+    _render_funnel_stats(result)
+    st.divider()
+    render_scan_results(result.get("candidates", []))
 
 
 def render_value_swing_scanner():
-    """价值波段扫描主面板（非阻塞后台线程版）。"""
+    """价值波段扫描主面板（独立进程 + 持久化，关闭页面/浏览器不影响扫描）。"""
+    from tradingagents.strategies.scan_runner import (
+        is_process_alive,
+        reconcile_stale_running,
+        start_detached_scan,
+    )
+    from tradingagents.strategies.scan_store import (
+        SCAN_STATUS_FAILED,
+        SCAN_STATUS_RUNNING,
+        default_store,
+    )
+
     st.header("📊 价值波段扫描")
     st.caption("三阶漏斗：全市场 → 流动性/估值 → 催化剂评分 → 推荐分级")
 
-    scan_result_key = "_value_swing_scan_result"
-    is_running = st.session_state.get("_scan_running", False)
+    store = default_store()
+    # 若上次运行的进程已死但状态仍为 running，标记失败，避免卡死。
+    reconcile_stale_running(store)
+    record = store.load()
+    status = record.get("status")
+
+    # 「启动中」宽限：仅当刚拉起的子进程仍存活且状态尚未翻到 running 时才成立，
+    # 这样启动瞬间崩溃的扫描会立刻显示失败，而不是卡在「启动中」。
+    launch_pid = st.session_state.get("_scan_launch_pid")
+    launched_at = st.session_state.get("_scan_launch_ts")
+    launching = (
+        launch_pid is not None
+        and launched_at is not None
+        and status != SCAN_STATUS_RUNNING
+        and is_process_alive(launch_pid)
+        and (time.time() - launched_at) < _LAUNCH_GRACE_S
+    )
+    is_running = status == SCAN_STATUS_RUNNING or launching
 
     # 操作栏
     col1, col2, col3 = st.columns([2, 1, 1])
@@ -293,52 +335,46 @@ def render_value_swing_scanner():
             disabled=is_running,
         )
     with col3:
-        if st.button("🔄 重置", use_container_width=True, disabled=is_running):
-            st.session_state.pop(scan_result_key, None)
-            st.session_state.pop("_scan_running", None)
-            st.rerun()
-
-    # 启动后台扫描
-    if run_scan:
-        st.session_state["_scan_running"] = True
-        # 清空旧结果，避免显示过期数据
-        st.session_state.pop(scan_result_key, None)
-        thread = threading.Thread(
-            target=_run_scan_in_background,
-            args=(max_candidates, scan_result_key),
-            daemon=True,
+        auto_enqueue = st.checkbox(
+            "完成后自动入队",
+            value=False,
+            disabled=is_running,
+            help="夜间无人值守：扫描完成后自动把候选排入分析队列",
         )
-        thread.start()
-        st.rerun()
 
-    # 显示运行中状态 + 轮询
+    if run_scan:
+        try:
+            pid = start_detached_scan(
+                max_candidates=int(max_candidates),
+                enqueue_on_success=bool(auto_enqueue),
+            )
+            st.session_state["_scan_launch_pid"] = pid
+            st.session_state["_scan_launch_ts"] = time.time()
+            logger.info("价值波段扫描已在独立进程启动 pid=%s", pid)
+            st.rerun()
+        except RuntimeError as exc:
+            st.warning(str(exc))
+
     if is_running:
-        progress_text = "正在全市场扫描，预计 1~4 分钟..."
-        st.spinner(progress_text)
-        # 使用 st.status 显示实时状态
-        with st.status(progress_text, expanded=True) as status:
-            st.write("• L0: 全量种子 → 腾讯批量报价")
-            st.write("• L1a: PE/PB 快速筛选")
-            st.write("• L1b: 财务验证（前 30 只）")
-            st.write("• L2: 催化剂检测（北向 + 均线 + 消息催化剂）")
-        # 自动轮询 — st.rerun() 会让 Streamlit 重新执行
+        if status == SCAN_STATUS_RUNNING:
+            st.session_state.pop("_scan_launch_pid", None)
+            st.session_state.pop("_scan_launch_ts", None)
+            _render_progress(record.get("progress"))
+        else:
+            st.info("扫描进程正在启动…")
+        st.caption(
+            "扫描在独立进程运行，关闭页面 / 浏览器 / 停掉 Web 都不影响；"
+            "稍后回来可继续查看进度与结果。"
+        )
+        time.sleep(_POLL_INTERVAL_S)
         st.rerun()
-
-    # 显示扫描结果
-    result = st.session_state.get(scan_result_key)
-    if result is None:
-        st.info("尚未运行扫描。设置候选上限后点击「开始扫描」。")
         return
 
-    if not result.get("ok"):
-        st.error(f"扫描失败: {result.get('error', '未知错误')}")
-        return
+    # 非运行态：清除启动标记
+    st.session_state.pop("_scan_launch_pid", None)
+    st.session_state.pop("_scan_launch_ts", None)
 
-    # 漏斗统计
-    _render_funnel_stats(result)
+    if status == SCAN_STATUS_FAILED:
+        st.error(f"上次扫描失败: {record.get('error', '未知错误')}")
 
-    st.divider()
-
-    # 候选列表
-    candidates = result.get("candidates", [])
-    render_scan_results(candidates)
+    _render_finished_result(record)
