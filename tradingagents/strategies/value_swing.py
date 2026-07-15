@@ -22,6 +22,7 @@ from datetime import datetime
 from typing import Any
 
 import pandas as pd
+import requests
 
 from tradingagents.dataflows.a_stock import (
     _build_name_code_map,
@@ -199,20 +200,26 @@ def run_l1a_filter(stocks: list[StockInfo]) -> list[StockInfo]:
 
 # ── L1b: 财务验证（后置，仅对前 N 只候选）────────────────────────────────
 
+_SINA_SESSION: requests.Session | None = None
+def _sina_session() -> requests.Session:
+    global _SINA_SESSION
+    if _SINA_SESSION is None:
+        import requests
+        _SINA_SESSION = requests.Session()
+        _SINA_SESSION.headers.update({"User-Agent": "Mozilla/5.0"})
+    return _SINA_SESSION
+
 
 def _get_sina_financial(code: str, report_type: str) -> pd.DataFrame:
-    """从新浪财经获取财务报表。"""
-    import requests as _requests
-
+    """从新浪财经获取财务报表（复用 Session Keep-Alive）。"""
     paper_code = f"{'sh' if code.startswith('6') else 'sz'}{code}"
     source_map = {"利润表": "lrb", "资产负债表": "fzb"}
     source = source_map.get(report_type, "lrb")
     params = {"paperCode": paper_code, "source": source, "type": "0", "page": "1", "num": "20"}
     try:
-        r = _requests.get(
+        r = _sina_session().get(
             "https://quotes.sina.cn/cn/api/openapi.php/CompanyFinanceService.getFinanceReport2022",
             params=params,
-            headers={"User-Agent": "Mozilla/5.0"},
             timeout=5,
         )
         d = r.json()
@@ -474,10 +481,13 @@ def run_l2_filter(stocks: list[StockInfo], max_candidates: int = _MAX_CANDIDATES
     ranked = sorted(real_stocks, key=lambda s: s.volume_wan, reverse=True)
     to_process = ranked[:_L2_PROCESS_LIMIT]
 
+    # 北向资金是整个市场总量，调用一次共享
+    northbound_val = _safe_call(_check_northbound_3d, "ALL")
+
     for info in to_process:
         logger.debug("L2 HTTP: %s %s", info.code, info.name)
 
-        info.northbound_net_3d = _safe_call(_check_northbound_3d, info.code)
+        info.northbound_net_3d = northbound_val
         info.above_ma20, info.near_ma250 = _safe_call(_check_ma_support, info.code, default=(False, False))
 
         # 以下暂不启用（东财 SSL 代理问题）

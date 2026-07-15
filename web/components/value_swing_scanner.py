@@ -34,7 +34,8 @@ def _run_scan(max_candidates: int) -> dict:
             "scan_date": result.scan_date,
             "total_stocks": result.total_stocks,
             "l0_passed": result.l0_passed,
-            "l1_passed": result.l1_passed,
+            "l1a_passed": result.l1a_passed,
+            "l1b_passed": result.l1b_passed,
             "l2_passed": result.l2_passed,
             "candidates": [
                 {
@@ -43,7 +44,6 @@ def _run_scan(max_candidates: int) -> dict:
                     "price": c.price,
                     "pe_ttm": c.pe_ttm,
                     "pb": c.pb,
-                    "peg": c.peg,
                     "signal_score": c.signal_score,
                     "debt_ratio": round(c.debt_ratio * 100, 1) if c.debt_ratio else None,
                     "revenue_growth": round(c.revenue_growth * 100, 1) if c.revenue_growth else None,
@@ -58,8 +58,6 @@ def _run_scan(max_candidates: int) -> dict:
         logger.exception("价值波段扫描失败")
         return {"ok": False, "error": str(e)}
 
-
-_RUNNING_SCAN = threading.Lock()
 
 
 def _enqueue_candidates(candidates: list[dict]):
@@ -160,7 +158,6 @@ def _render_candidate_card(candidate: dict, index: int):
                 <span style="color: #888; font-size: 0.8rem;">PB {candidate['pb']:.1f}x</span>
                 <span style="color: #888; font-size: 0.8rem;">价 {candidate['price']:.2f}</span>
                 {''.join(f'<span style="color: #ff8c42; font-size: 0.8rem;">{s}</span>' for s in signals[:4])}
-                {f'<span style="color: #4caf50; font-size: 0.8rem;">PEG {candidate["peg"]:.2f}</span>' if candidate.get("peg") else ''}
             </div>
         </div>
         """,
@@ -170,11 +167,12 @@ def _render_candidate_card(candidate: dict, index: int):
 
 def _render_funnel_stats(result: dict):
     """渲染漏斗统计。"""
-    cols = st.columns(5)
+    cols = st.columns(6)
     metrics = [
         ("全 A 股", result["total_stocks"], ""),
         ("L0 通过", result["l0_passed"], "流动性/非ST"),
-        ("L1 通过", result["l1_passed"], "估值/财务"),
+        ("L1a 通过", result["l1a_passed"], "PE/PB快速估值"),
+        ("L1b 通过", result["l1b_passed"], "财务验证"),
         ("L2 候选", result["l2_passed"], "催化剂评分"),
         ("耗时", f"{result['duration_seconds']:.0f}s", ""),
     ]
@@ -251,16 +249,24 @@ def render_scan_results(candidates: list[dict]):
         )
 
 
+def _run_scan_in_background(max_candidates: int, result_key: str):
+    """在后台线程中运行扫描，结果存入 st.session_state。"""
+    try:
+        result = _run_scan(max_candidates)
+        st.session_state[result_key] = result
+    except Exception as e:
+        st.session_state[result_key] = {"ok": False, "error": str(e)}
+    finally:
+        st.session_state["_scan_running"] = False
+
+
 def render_value_swing_scanner():
-    """价值波段扫描主面板。"""
+    """价值波段扫描主面板（非阻塞后台线程版）。"""
     st.header("📊 价值波段扫描")
     st.caption("三阶漏斗：全市场 → 流动性/估值 → 催化剂评分 → 推荐分级")
 
-    # 当前数据日期
-    today = datetime.now().strftime("%Y-%m-%d")
-
-    # 扫描结果存储在 session 中
     scan_result_key = "_value_swing_scan_result"
+    is_running = st.session_state.get("_scan_running", False)
 
     # 操作栏
     col1, col2, col3 = st.columns([2, 1, 1])
@@ -269,34 +275,51 @@ def render_value_swing_scanner():
             "候选上限",
             min_value=5, max_value=50, value=15,
             help="L2 最终输出的候选股票数量上限",
+            disabled=is_running,
         )
     with col2:
         run_scan = st.button(
             "🚀 开始扫描",
             use_container_width=True,
             type="primary",
-            disabled=st.session_state.get("_scan_running", False),
+            disabled=is_running,
         )
     with col3:
-        if st.button("🔄 重置", use_container_width=True):
+        if st.button("🔄 重置", use_container_width=True, disabled=is_running):
             st.session_state.pop(scan_result_key, None)
             st.session_state.pop("_scan_running", None)
             st.rerun()
 
-    # 执行扫描（后台线程）
+    # 启动后台扫描
     if run_scan:
         st.session_state["_scan_running"] = True
-        with st.spinner("正在全市场扫描，预计 1~3 分钟..."):
-            result = _run_scan(max_candidates)
-        st.session_state[scan_result_key] = result
-        st.session_state["_scan_running"] = False
+        # 清空旧结果，避免显示过期数据
+        st.session_state.pop(scan_result_key, None)
+        thread = threading.Thread(
+            target=_run_scan_in_background,
+            args=(max_candidates, scan_result_key),
+            daemon=True,
+        )
+        thread.start()
         st.rerun()
 
-    # 显示上次扫描结果
+    # 显示运行中状态 + 轮询
+    if is_running:
+        progress_text = "正在全市场扫描，预计 1~4 分钟..."
+        st.spinner(progress_text)
+        # 使用 st.status 显示实时状态
+        with st.status(progress_text, expanded=True) as status:
+            st.write("• L0: 全量种子 → 腾讯批量报价")
+            st.write("• L1a: PE/PB 快速筛选")
+            st.write("• L1b: 财务验证（前 30 只）")
+            st.write("• L2: 催化剂检测（北向 + 均线）")
+        # 自动轮询 — st.rerun() 会让 Streamlit 重新执行
+        st.rerun()
+
+    # 显示扫描结果
     result = st.session_state.get(scan_result_key)
     if result is None:
-        if not run_scan:
-            st.info("尚未运行扫描。设置候选上限后点击「开始扫描」。")
+        st.info("尚未运行扫描。设置候选上限后点击「开始扫描」。")
         return
 
     if not result.get("ok"):

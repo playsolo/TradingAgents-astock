@@ -322,6 +322,7 @@ def _tencent_quote(codes: list[str]) -> dict[str, dict]:
     """Batch real-time quotes from Tencent Finance (qt.gtimg.cn).
 
     Returns dict[code] -> {name, price, pe_ttm, pb, mcap_yi, ...}
+    Fields that fail to parse default to 0; individual bad stocks don't kill the batch.
     """
     prefixed = [f"{_get_prefix(c)}{c}" for c in codes]
     url = "https://qt.gtimg.cn/q=" + ",".join(prefixed)
@@ -329,6 +330,13 @@ def _tencent_quote(codes: list[str]) -> dict[str, dict]:
     req.add_header("User-Agent", "Mozilla/5.0")
     resp = urllib.request.urlopen(req, timeout=10)
     raw = resp.read().decode("gbk")
+
+    def _sf(v: str) -> float:
+        """Safe float parse, returns 0.0 on failure."""
+        try:
+            return float(v) if v else 0.0
+        except (ValueError, TypeError):
+            return 0.0
 
     result = {}
     for line in raw.strip().split(";"):
@@ -341,20 +349,20 @@ def _tencent_quote(codes: list[str]) -> dict[str, dict]:
         code = key[2:]  # strip sh/sz/bj prefix
         result[code] = {
             "name": vals[1],
-            "price": float(vals[3]) if vals[3] else 0,
-            "last_close": float(vals[4]) if vals[4] else 0,
-            "open": float(vals[5]) if vals[5] else 0,
-            "change_pct": float(vals[32]) if vals[32] else 0,
-            "high": float(vals[33]) if vals[33] else 0,
-            "low": float(vals[34]) if vals[34] else 0,
-            "turnover_pct": float(vals[38]) if vals[38] else 0,
-            "pe_ttm": float(vals[39]) if vals[39] else 0,
-            "mcap_yi": float(vals[44]) if vals[44] else 0,
-            "float_mcap_yi": float(vals[45]) if vals[45] else 0,
-            "pb": float(vals[46]) if vals[46] else 0,
-            "limit_up": float(vals[47]) if vals[47] else 0,
-            "limit_down": float(vals[48]) if vals[48] else 0,
-            "pe_static": float(vals[52]) if vals[52] else 0,
+            "price": _sf(vals[3]),
+            "last_close": _sf(vals[4]),
+            "open": _sf(vals[5]),
+            "change_pct": _sf(vals[32]),
+            "high": _sf(vals[33]),
+            "low": _sf(vals[34]),
+            "turnover_pct": _sf(vals[38]),
+            "pe_ttm": _sf(vals[39]),
+            "mcap_yi": _sf(vals[44]),
+            "float_mcap_yi": _sf(vals[45]),
+            "pb": _sf(vals[46]),
+            "limit_up": _sf(vals[47]),
+            "limit_down": _sf(vals[48]),
+            "pe_static": _sf(vals[52]),
         }
     return result
 
