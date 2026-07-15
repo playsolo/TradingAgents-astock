@@ -263,25 +263,30 @@ def test_execute_tool_calls_without_langgraph_runtime(monkeypatch):
 
 
 def test_scrub_soft_missing_markers_removes_false_positives():
-    from web.report_repair import has_missing_data, scrub_soft_missing_markers
+    from web.report_repair import has_hard_missing_data, has_missing_data, scrub_soft_missing_markers
 
     raw = (
         "正文\n"
         "[数据缺失：未检索到明确增减持记录]\n"
         "[数据缺失: 近20日主力资金历史日度数据——SSLError]\n"
         "[数据缺失: 行业对比查询失败——HTTP 502]\n"
+        "[数据缺失: 无分析师覆盖]\n"
+        "[数据缺失：股权质押比例]\n"
         "[数据缺失]\n"
         "[数据缺失: 资产负债表明细]\n"
     )
     cleaned = scrub_soft_missing_markers(raw)
     assert "[数据缺失：未检索到" not in cleaned
     assert "近20日" not in cleaned or "[数据缺失" not in cleaned.split("近20日")[0][-20:]
+    assert "无分析师覆盖" not in cleaned or "[数据缺失" not in cleaned
     assert "资产负债表明细" in cleaned  # hard missing kept
     assert has_missing_data(cleaned) is True
+    assert has_hard_missing_data(cleaned) is True
     soft_only = scrub_soft_missing_markers(
-        "[数据缺失：未检索到明确增减持记录]\n[数据缺失: 近20日主力资金历史]"
+        "[数据缺失：未检索到明确增减持记录]\n[数据缺失: 近20日主力资金历史]\n"
+        "[数据缺失: 无分析师覆盖]"
     )
-    assert has_missing_data(soft_only) is False
+    assert has_hard_missing_data(soft_only) is False
 
 
 def test_extract_signal_reads_chinese_sell():

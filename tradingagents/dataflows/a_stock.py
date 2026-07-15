@@ -6,9 +6,10 @@ or mootdx TCP.
 Data sources:
 - mootdx (TCP 7709): OHLCV K-lines, financial snapshots, F10 text
 - Tencent Finance (HTTP GBK): PE/PB/market cap/turnover
-- 东方财富 push2 / datacenter-web (direct HTTP): stock info, dragon-tiger, lockup
-- 新浪财经 (direct HTTP): K-line fallback, financial statements
-- 同花顺 (direct HTTP): consensus EPS, hot stocks, northbound capital flow
+- 东方财富 push2 / push2delay / datacenter-web (direct HTTP): stock info,
+  industry boards, consensus EPS (RPT_WEB_RESPREDICT), dragon-tiger, lockup
+- 新浪财经 (direct HTTP): K-line fallback, financial statements, fund-flow history
+- 同花顺 (direct HTTP): consensus EPS fallback, hot stocks, northbound capital flow
 - 财联社 (direct HTTP): global news wire
 """
 
@@ -18,6 +19,7 @@ from typing import Annotated
 from contextlib import contextmanager
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
+from io import StringIO
 import json as _json
 import os
 import logging
@@ -455,8 +457,56 @@ def _eastmoney_datacenter(
 
 
 # ---------------------------------------------------------------------------
-# 同花顺 EPS forecast helper (direct HTTP, no akshare)
+# Consensus EPS helpers (东财 primary, 同花顺 fallback)
 # ---------------------------------------------------------------------------
+
+
+def _em_eps_forecast(code: str) -> tuple[list[dict], int]:
+    """Fetch consensus EPS from Eastmoney RPT_WEB_RESPREDICT.
+
+    Returns (rows, org_count) where each row is
+    ``{"year": str, "eps": float, "analysts": int}``.
+    """
+    try:
+        data = _eastmoney_datacenter(
+            report_name="RPT_WEB_RESPREDICT",
+            columns="WEB_RESPREDICT",
+            filter_str=f'(SECURITY_CODE="{code}")',
+            page_size=5,
+            sort_columns="RATING_ORG_NUM",
+            sort_types="-1",
+        )
+    except Exception as exc:
+        logger.warning("Eastmoney EPS forecast failed for %s: %s", code, exc)
+        return [], 0
+
+    if not data:
+        return [], 0
+
+    row = data[0]
+    try:
+        org_count = int(row.get("RATING_ORG_NUM") or 0)
+    except (TypeError, ValueError):
+        org_count = 0
+
+    records: list[dict] = []
+    for idx in range(1, 5):
+        year_raw = row.get(f"YEAR{idx}")
+        eps_raw = row.get(f"EPS{idx}")
+        if year_raw is None or eps_raw is None:
+            continue
+        try:
+            year = str(int(year_raw))
+        except (TypeError, ValueError):
+            year = str(year_raw).strip()
+        try:
+            eps = float(eps_raw)
+        except (TypeError, ValueError):
+            continue
+        if not year:
+            continue
+        records.append({"year": year, "eps": eps, "analysts": org_count})
+    return records, org_count
 
 
 def _ths_eps_forecast(code: str) -> pd.DataFrame:
@@ -477,7 +527,8 @@ def _ths_eps_forecast(code: str) -> pd.DataFrame:
         if not html.strip() or "<table" not in html.lower():
             # Modern F10 pages are JS-rendered SPAs without static tables
             return pd.DataFrame()
-        dfs = pd.read_html(html)
+        # Pass a file-like buffer — pandas treats bare strings as paths.
+        dfs = pd.read_html(StringIO(html))
     except Exception as exc:
         logger.warning("Consensus EPS forecast failed for %s: %s", code, exc)
         return pd.DataFrame()
@@ -487,6 +538,89 @@ def _ths_eps_forecast(code: str) -> pd.DataFrame:
         if any("每股收益" in c or "均值" in c for c in cols):
             return df
     return dfs[0] if dfs else pd.DataFrame()
+
+
+def _ths_eps_records(code: str) -> list[dict]:
+    """Normalize THS EPS DataFrame into ``{year, eps, analysts}`` records."""
+    df = _ths_eps_forecast(code)
+    if df is None or df.empty:
+        return []
+    records: list[dict] = []
+    for _, row in df.iterrows():
+        year = str(row.iloc[0]) if len(row) > 0 else ""
+        count_val = row.iloc[1] if len(row) > 1 else 0
+        mean_eps_val = row.iloc[3] if len(row) > 3 else 0
+        try:
+            count = int(count_val)
+        except (ValueError, TypeError):
+            count = 0
+        try:
+            mean_eps = float(mean_eps_val)
+        except (ValueError, TypeError):
+            mean_eps = 0.0
+        if not year:
+            continue
+        records.append({"year": year, "eps": mean_eps, "analysts": count})
+    return records
+
+
+def _format_eps_forecast_lines(
+    code: str,
+    records: list[dict],
+    source_label: str,
+) -> str:
+    """Render consensus EPS records plus optional forward PE/PEG."""
+    lines = [
+        f"# Consensus EPS Forecast for {code} (A-stock)",
+        f"# Source: {source_label}",
+        f"# Retrieved: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+    ]
+    eps_by_year: dict[str, float] = {}
+    for item in records:
+        year = str(item.get("year") or "")
+        mean_eps = float(item.get("eps") or 0)
+        count = int(item.get("analysts") or 0)
+        lines.append(f"FY{year}: EPS={mean_eps}, analysts={count}")
+        if count and count < 3:
+            lines.append("  Warning: low coverage (<3 analysts)")
+        if year:
+            eps_by_year[year] = mean_eps
+
+    try:
+        tq = _tencent_quote([code])
+        if code in tq:
+            price = tq[code]["price"]
+            pe_ttm = tq[code]["pe_ttm"]
+            lines.append(f"\nCurrent: price={price}, PE(TTM)={pe_ttm}")
+            years_sorted = sorted(eps_by_year.keys())
+            if years_sorted and eps_by_year.get(years_sorted[0], 0) > 0:
+                eps_cur = eps_by_year[years_sorted[0]]
+                fwd_pe = price / eps_cur
+                lines.append(f"Forward PE (FY{years_sorted[0]}): {fwd_pe:.1f}x")
+                if (
+                    len(years_sorted) >= 2
+                    and eps_by_year.get(years_sorted[1], 0) > 0
+                ):
+                    eps_next = eps_by_year[years_sorted[1]]
+                    cagr = eps_next / eps_cur - 1
+                    if cagr > 0:
+                        peg = fwd_pe / (cagr * 100)
+                        lines.append(f"PEG: {peg:.2f} (CAGR={cagr * 100:.0f}%)")
+                        if fwd_pe > 30:
+                            digest = math.log(fwd_pe / 30) / math.log(1 + cagr)
+                            lines.append(
+                                f"PE Digestion to 30x: {digest:.1f} years"
+                            )
+                    else:
+                        lines.append(
+                            f"EPS declining ({cagr * 100:.0f}%), "
+                            f"PEG not applicable"
+                        )
+    except Exception as e:
+        logger.warning("Forward PE calc failed for %s: %s", code, e)
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -935,75 +1069,33 @@ def get_fundamentals(
         except Exception as e:
             logger.warning("eastmoney push2 stock info failed for %s: %s", code, e)
 
-        # --- 同花顺 direct HTTP: consensus EPS forecast ---
+        # --- Consensus EPS: 东财 primary, 同花顺 fallback (+ forward PE/PEG) ---
         try:
-            forecast_df = _ths_eps_forecast(code)
-            if forecast_df is not None and not forecast_df.empty:
-                lines.append("\n--- Consensus EPS Forecast (同花顺) ---")
-                eps_by_year = {}
-                for _, row in forecast_df.iterrows():
-                    year = str(row.iloc[0]) if len(row) > 0 else ""
-                    mean_eps_val = row.iloc[3] if len(row) > 3 else 0
-                    count_val = row.iloc[1] if len(row) > 1 else 0
-                    min_eps_val = row.iloc[2] if len(row) > 2 else "N/A"
-                    max_eps_val = row.iloc[4] if len(row) > 4 else "N/A"
-                    try:
-                        mean_eps = float(mean_eps_val)
-                    except (ValueError, TypeError):
-                        mean_eps = 0
-                    try:
-                        count = int(count_val)
-                    except (ValueError, TypeError):
-                        count = 0
-                    lines.append(
-                        f"FY{year}: EPS={mean_eps} "
-                        f"(range {min_eps_val}~{max_eps_val}, {count} analysts)"
+            em_records, _org = _em_eps_forecast(code)
+            if em_records:
+                block = _format_eps_forecast_lines(
+                    code,
+                    em_records,
+                    "东财 RPT_WEB_RESPREDICT (Eastmoney datacenter)",
+                )
+                lines.append("\n--- Consensus EPS Forecast (东财) ---")
+                lines.extend(block.splitlines()[4:])  # skip standalone title/meta
+            else:
+                ths_records = _ths_eps_records(code)
+                if ths_records:
+                    block = _format_eps_forecast_lines(
+                        code,
+                        ths_records,
+                        "同花顺 analyst consensus (fallback)",
                     )
-                    if count < 3:
-                        lines.append("  Warning: low coverage (<3 analysts)")
-                    eps_by_year[year] = mean_eps
-
-                # Forward PE / PEG / PE digestion
-                try:
-                    tq = _tencent_quote([code])
-                    if code in tq:
-                        price = tq[code]["price"]
-                        years_sorted = sorted(eps_by_year.keys())
-                        if years_sorted and eps_by_year.get(years_sorted[0], 0) > 0:
-                            eps_cur = eps_by_year[years_sorted[0]]
-                            fwd_pe = price / eps_cur
-                            lines.append(
-                                f"\nForward PE (FY{years_sorted[0]}): "
-                                f"{fwd_pe:.1f}x (price={price}, EPS={eps_cur})"
-                            )
-                            if (
-                                len(years_sorted) >= 2
-                                and eps_by_year.get(years_sorted[1], 0) > 0
-                            ):
-                                eps_next = eps_by_year[years_sorted[1]]
-                                cagr = eps_next / eps_cur - 1
-                                if cagr > 0:
-                                    peg = fwd_pe / (cagr * 100)
-                                    lines.append(
-                                        f"PEG: {peg:.2f} "
-                                        f"(EPS CAGR={cagr * 100:.0f}%)"
-                                    )
-                                    if fwd_pe > 30:
-                                        digest = math.log(fwd_pe / 30) / math.log(
-                                            1 + cagr
-                                        )
-                                        lines.append(
-                                            f"PE Digestion to 30x: {digest:.1f} years"
-                                        )
-                                    else:
-                                        lines.append("PE already below 30x target")
-                                else:
-                                    lines.append(
-                                        f"EPS declining ({cagr * 100:.0f}%), "
-                                        f"PEG not applicable"
-                                    )
-                except Exception as e:
-                    logger.warning("Forward PE calc failed for %s: %s", code, e)
+                    lines.append("\n--- Consensus EPS Forecast (同花顺 fallback) ---")
+                    lines.extend(block.splitlines()[4:])
+                else:
+                    lines.append(
+                        "\n--- Consensus EPS Forecast ---\n"
+                        "No analyst coverage found (东财+同花顺均无数据；"
+                        "请表述为「无公开一致预期覆盖」，勿标 [数据缺失])"
+                    )
         except Exception as e:
             logger.warning("Consensus EPS forecast failed for %s: %s", code, e)
 
@@ -1687,87 +1779,34 @@ def get_profit_forecast(
     ticker: Annotated[str, "A-stock code"],
     curr_date: Annotated[str, "current date (unused, for interface compat)"] = None,
 ) -> str:
-    """Get consensus EPS forecasts with forward valuation (同花顺 direct HTTP)."""
+    """Get consensus EPS forecasts with forward valuation.
+
+    Primary: Eastmoney ``RPT_WEB_RESPREDICT``. Fallback: 同花顺 F10.
+    Empty coverage is a valid EmptyOK result (not a hard tool failure).
+    """
     code = _normalize_ticker(ticker)
 
     try:
-        df = _ths_eps_forecast(code)
-
-        if df is None or df.empty:
-            return f"No analyst coverage found for A-stock '{code}'"
-
-        lines = [
-            f"# Consensus EPS Forecast for {code} (A-stock)",
-            f"# Source: 同花顺 analyst consensus (direct HTTP)",
-            f"# Retrieved: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            "",
-        ]
-
-        eps_by_year = {}
-        for _, row in df.iterrows():
-            year = str(row.iloc[0]) if len(row) > 0 else ""
-            count_val = row.iloc[1] if len(row) > 1 else 0
-            mean_eps_val = row.iloc[3] if len(row) > 3 else 0
-            min_eps_val = row.iloc[2] if len(row) > 2 else "N/A"
-            max_eps_val = row.iloc[4] if len(row) > 4 else "N/A"
-            try:
-                count = int(count_val)
-            except (ValueError, TypeError):
-                count = 0
-            try:
-                mean_eps = float(mean_eps_val)
-            except (ValueError, TypeError):
-                mean_eps = 0
-            lines.append(
-                f"FY{year}: EPS={mean_eps} (range {min_eps_val}~{max_eps_val}), "
-                f"analysts={count}"
+        em_records, _org = _em_eps_forecast(code)
+        if em_records:
+            return _format_eps_forecast_lines(
+                code,
+                em_records,
+                "东财 RPT_WEB_RESPREDICT (Eastmoney datacenter)",
             )
-            if count < 3:
-                lines.append("  Warning: low coverage (<3 analysts)")
-            eps_by_year[year] = mean_eps
 
-        # Forward valuation
-        try:
-            tq = _tencent_quote([code])
-            if code in tq:
-                price = tq[code]["price"]
-                pe_ttm = tq[code]["pe_ttm"]
-                lines.append(f"\nCurrent: price={price}, PE(TTM)={pe_ttm}")
+        ths_records = _ths_eps_records(code)
+        if ths_records:
+            return _format_eps_forecast_lines(
+                code,
+                ths_records,
+                "同花顺 analyst consensus (fallback)",
+            )
 
-                years_sorted = sorted(eps_by_year.keys())
-                if years_sorted and eps_by_year.get(years_sorted[0], 0) > 0:
-                    eps_cur = eps_by_year[years_sorted[0]]
-                    fwd_pe = price / eps_cur
-                    lines.append(
-                        f"Forward PE (FY{years_sorted[0]}): {fwd_pe:.1f}x"
-                    )
-                    if (
-                        len(years_sorted) >= 2
-                        and eps_by_year.get(years_sorted[1], 0) > 0
-                    ):
-                        eps_next = eps_by_year[years_sorted[1]]
-                        cagr = eps_next / eps_cur - 1
-                        if cagr > 0:
-                            peg = fwd_pe / (cagr * 100)
-                            lines.append(
-                                f"PEG: {peg:.2f} (CAGR={cagr * 100:.0f}%)"
-                            )
-                            if fwd_pe > 30:
-                                digest = math.log(fwd_pe / 30) / math.log(
-                                    1 + cagr
-                                )
-                                lines.append(
-                                    f"PE Digestion to 30x: {digest:.1f} years"
-                                )
-                        else:
-                            lines.append(
-                                f"EPS declining ({cagr * 100:.0f}%), "
-                                f"PEG not applicable"
-                            )
-        except Exception as e:
-            logger.warning("Forward PE calc failed for %s: %s", code, e)
-
-        return "\n".join(lines)
+        return (
+            f"No analyst coverage found for A-stock '{code}' "
+            "(东财+同花顺均无一致预期；请写「无公开一致预期覆盖」，勿标 [数据缺失])"
+        )
 
     except Exception as e:
         return f"Error retrieving profit forecast for {code}: {str(e)}"
@@ -2168,6 +2207,55 @@ def get_concept_blocks(
 # ---- 14. get_fund_flow ----
 
 
+def _sina_fund_flow_history(code: str, days: int = 20) -> list[dict]:
+    """Daily fund-flow history from Sina MoneyFlow (heterogeneous EM backup).
+
+    Each item: ``{"date", "main_net", "net_amount"}`` in yuan.
+    ``main_net`` maps to Sina ``r0_net`` (largest-order net); ``net_amount`` is
+    overall net inflow. Caliber differs from Eastmoney 超大单 — callers must
+    label the source.
+    """
+    url = (
+        "https://vip.stock.finance.sina.com.cn/quotes_service/api/"
+        "json_v2.php/MoneyFlow.ssl_qsfx_zjlrqs"
+    )
+    params = {
+        "page": 1,
+        "num": max(1, int(days)),
+        "sort": "opendate",
+        "asc": 0,
+        "daima": _sina_stock_code(code),
+    }
+    headers = {
+        "User-Agent": _UA,
+        "Referer": "https://vip.stock.finance.sina.com.cn/",
+    }
+    r = _requests.get(url, params=params, headers=headers, timeout=12)
+    r.raise_for_status()
+    payload = r.json()
+    if not isinstance(payload, list):
+        return []
+    rows: list[dict] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        date = str(item.get("opendate") or "").strip()
+        if not date:
+            continue
+        try:
+            main_net = float(item.get("r0_net") or 0)
+        except (TypeError, ValueError):
+            main_net = 0.0
+        try:
+            net_amount = float(item.get("netamount") or 0)
+        except (TypeError, ValueError):
+            net_amount = 0.0
+        rows.append(
+            {"date": date, "main_net": main_net, "net_amount": net_amount}
+        )
+    return rows
+
+
 def get_realtime_main_net_inflow(
     ticker: Annotated[str, "A-stock code"],
 ) -> float | None:
@@ -2204,13 +2292,15 @@ def get_fund_flow(
     """Get individual stock fund flow from 东财 push2.
 
     Realtime: minute-level main/large/medium/small/super order net inflow.
-    History: daily net inflow for 20 trading days (push2his).
+    History: Eastmoney push2his daykline; on SSL/empty, fall back to Sina
+    MoneyFlow daily series (heterogeneous caliber — labeled in output).
 
     V0.2.7: replaced 百度 PAE (fundflow/fundsortlist, offline since 2026-05)
     with 东财 push2 fund flow API.
     """
     code = _normalize_ticker(ticker)
     secid = f"1.{code}" if code.startswith("6") else f"0.{code}"
+    sources = ["东财 push2 realtime"]
     lines = [
         f"# Fund Flow for {code} (A-stock)",
         f"# Source: 东财 push2 (Eastmoney)",
@@ -2269,6 +2359,7 @@ def get_fund_flow(
         # Historical daily fund flow (push2his) — isolated so SSL flakes
         # do not discard an otherwise successful realtime section.
         if include_history:
+            hist_done = False
             try:
                 url_hist = (
                     "https://push2his.eastmoney.com"
@@ -2284,9 +2375,10 @@ def get_fund_flow(
                 hist_klines = dh.get("data", {}).get("klines", [])
 
                 if hist_klines:
+                    sources.append("东财 push2his history")
                     lines.append(
                         f"\n## Historical Daily Fund Flow "
-                        f"(last {len(hist_klines)} trading days)"
+                        f"(last {len(hist_klines)} trading days | 东财 push2his)"
                     )
                     lines.append(
                         "Date | 主力净流入(万) | 大单(万) "
@@ -2303,20 +2395,52 @@ def get_fund_flow(
                                 f"| small={float(parts[2])/1e4:.0f} "
                                 f"| super={float(parts[5])/1e4:.0f}"
                             )
-                else:
-                    lines.append(
-                        "\n## Historical Daily Fund Flow\n"
-                        "No historical fund-flow series returned."
-                    )
+                    hist_done = True
             except Exception as hist_exc:
                 logger.warning(
                     "fund flow history failed for %s: %s", code, hist_exc
                 )
+
+            if not hist_done:
+                try:
+                    sina_rows = _sina_fund_flow_history(code, days=20)
+                except Exception as sina_exc:
+                    logger.warning(
+                        "sina fund flow history failed for %s: %s",
+                        code,
+                        sina_exc,
+                    )
+                    sina_rows = []
+                if sina_rows:
+                    sources.append("新浪 MoneyFlow history")
+                    lines.append(
+                        f"\n## Historical Daily Fund Flow "
+                        f"(last {len(sina_rows)} trading days | "
+                        f"新浪 MoneyFlow fallback)"
+                    )
+                    lines.append(
+                        "Date | 最大单净流入r0_net(万) | 整体净流入(万) "
+                        "| 口径备注"
+                    )
+                    for row in sina_rows:
+                        lines.append(
+                            f"  {row['date']} "
+                            f"| main≈{row['main_net']/1e4:.0f} "
+                            f"| net={row['net_amount']/1e4:.0f} "
+                            f"| sina caliber ≠ 东财超大单"
+                        )
+                    hist_done = True
+
+            if not hist_done:
                 lines.append(
                     "\n## Historical Daily Fund Flow\n"
-                    f"(历史日度暂不可用: {type(hist_exc).__name__} — "
+                    "(历史日度暂不可用: 东财 push2his + 新浪 fallback 均失败 — "
                     "盘中分时资金流仍可用，勿因此标注报告级数据缺失)"
                 )
+
+        # Reflect heterogeneous history in the document header.
+        if len(sources) > 1:
+            lines[1] = f"# Source: {' + '.join(sources)}"
 
         return "\n".join(lines)
 
@@ -2537,6 +2661,13 @@ def get_lockup_expiry(
 # 17. Industry Comparison (行业横向对比)
 # ---------------------------------------------------------------------------
 
+# Industry board clist hosts: primary then delay mirror (same schema).
+_EM_INDUSTRY_CLIST_HOSTS = (
+    "https://push2.eastmoney.com",
+    "https://push2delay.eastmoney.com",
+)
+
+
 def get_industry_comparison(
     ticker: str,
     trade_date: str,
@@ -2556,53 +2687,65 @@ def get_industry_comparison(
     code = safe_ticker_component(ticker)
     lines = [f"# 行业横向对比 | {code} | {trade_date}"]
 
-    # 东财 push2 行业板块排名 (direct HTTP, replaces 同花顺 which has 401)
-    try:
-        url = "https://push2.eastmoney.com/api/qt/clist/get"
-        params = {
-            "pn": "1",
-            "pz": "100",
-            "po": "1",
-            "np": "1",
-            "fltt": "2",
-            "invt": "2",
-            "fs": "m:90+t:2",
-            "fields": "f2,f3,f4,f12,f13,f14,f104,f105,f128,f136,f140,f141,f207",
-        }
-        r = _em_get(url, params=params, timeout=15)
-        # Empty / HTML 502 bodies raise JSONDecodeError → fallback below
-        if not (r.text or "").strip() or (r.text or "").lstrip().startswith("<"):
-            raise ValueError(f"empty or non-JSON industry payload (HTTP {r.status_code})")
-        d = r.json()
-        items = d.get("data", {}).get("diff", [])
+    params = {
+        "pn": "1",
+        "pz": "100",
+        "po": "1",
+        "np": "1",
+        "fltt": "2",
+        "invt": "2",
+        "fs": "m:90+t:2",
+        "fields": "f2,f3,f4,f12,f13,f14,f104,f105,f128,f136,f140,f141,f207",
+    }
+    items: list = []
+    last_err: Exception | None = None
+    used_host = ""
 
-        if items:
-            lines.append(
-                f"\n## 全行业表现 (东财 {len(items)} 个行业)"
-            )
-            lines.append(
-                "排名 | 行业 | 涨跌幅 | 上涨 | 下跌 | 领涨股"
-            )
-            for i, item in enumerate(items):
-                name = item.get("f14", "")
-                change_pct = item.get("f3", 0)
-                up_count = item.get("f104", 0)
-                down_count = item.get("f105", 0)
-                leader = item.get("f140", "")
-                lines.append(
-                    f"  {i+1}. {name} "
-                    f"| {change_pct}% "
-                    f"| {up_count} "
-                    f"| {down_count} "
-                    f"| {leader}"
+    for host in _EM_INDUSTRY_CLIST_HOSTS:
+        url = f"{host}/api/qt/clist/get"
+        try:
+            r = _em_get(url, params=params, timeout=15)
+            # Empty / HTML 502 bodies → try next host
+            if not (r.text or "").strip() or (r.text or "").lstrip().startswith("<"):
+                raise ValueError(
+                    f"empty or non-JSON industry payload (HTTP {r.status_code})"
                 )
-                if i >= top_n * 2 - 1:
-                    lines.append(f"  ... (showing top/bottom {top_n})")
-                    break
-        else:
-            lines.append("行业数据获取为空。")
-    except Exception as e:
-        lines.append(f"行业对比查询失败: {e}")
+            d = r.json()
+            items = d.get("data", {}).get("diff", []) or []
+            if items:
+                used_host = host
+                break
+            last_err = ValueError(f"{host}: empty industry diff")
+        except Exception as e:
+            last_err = e
+            logger.warning("industry clist failed via %s: %s", host, e)
+
+    if items:
+        host_tag = "push2delay" if "push2delay" in used_host else "push2"
+        lines.append(
+            f"\n## 全行业表现 (东财 {host_tag} {len(items)} 个行业)"
+        )
+        lines.append(
+            "排名 | 行业 | 涨跌幅 | 上涨 | 下跌 | 领涨股"
+        )
+        for i, item in enumerate(items):
+            name = item.get("f14", "")
+            change_pct = item.get("f3", 0)
+            up_count = item.get("f104", 0)
+            down_count = item.get("f105", 0)
+            leader = item.get("f140", "")
+            lines.append(
+                f"  {i+1}. {name} "
+                f"| {change_pct}% "
+                f"| {up_count} "
+                f"| {down_count} "
+                f"| {leader}"
+            )
+            if i >= top_n * 2 - 1:
+                lines.append(f"  ... (showing top/bottom {top_n})")
+                break
+    else:
+        lines.append(f"行业对比查询失败: {last_err or 'empty'}")
         try:
             concept = _em_concept_blocks(code)
             if concept:

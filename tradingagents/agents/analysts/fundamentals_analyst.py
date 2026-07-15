@@ -43,14 +43,19 @@ def create_fundamentals_analyst(llm):
             "\n- `get_income_statement`：利润表详细数据"
             "\n- `get_industry_comparison(ticker, curr_date)`：获取全行业横向对比（90个行业涨跌幅/成交额/净流入排名，用于估值对标和行业定位）"
             "\n\n撰写详尽的基本面研究报告，给出具体数据支撑的分析结论（仅供研究参考，不构成投资建议）。报告末尾附 Markdown 表格汇总关键财务指标和估值水平。"
-            "\n\n📋 必采清单 — 以下数据点必须出现在报告中，无法获取时标注 [数据缺失: xxx]："
+            "\n\n📋 必采清单 — 以下数据点必须出现在报告中；工具返回 "
+            "「No analyst coverage / 无公开一致预期覆盖」是有效结论，"
+            "请写「无公开一致预期覆盖」，**禁止**写成 `[数据缺失: …]`。"
+            "股权质押、关联交易、商誉精确拆分等若工具未返回，用自然语言说明"
+            "「公开数据未提供」即可，同样禁止 `[数据缺失]`。"
+            "仅当工具调用失败、超时或返回 Error 时才标注 [数据缺失: xxx]："
             "\n1. PE（TTM）、PB、总市值"
             "\n2. 营收同比增长率"
             "\n3. 归母净利润及同比增长率"
             "\n4. ROE"
             "\n5. 资产负债率"
             "\n6. 经营性现金流与净利润比值"
-            "\n7. 机构一致预期 EPS（调用 get_profit_forecast 获取）"
+            "\n7. 机构一致预期 EPS（调用 get_profit_forecast；无覆盖写 EmptyOK 表述）"
             + get_language_instruction()
         )
 

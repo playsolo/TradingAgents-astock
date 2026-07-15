@@ -9,7 +9,7 @@ import streamlit as st
 
 from web.pdf_export import generate_markdown, generate_pdf
 from web.report_repair import (
-    has_missing_data,
+    has_hard_missing_data,
     list_repairable_missing_sections,
     probe_section_data,
     regenerate_section,
@@ -195,8 +195,8 @@ def _render_section_repair(
     llm_config: dict[str, Any] | None,
     on_state_updated: Callable[[dict[str, Any]], None] | None,
 ) -> None:
-    """Show retry / regenerate controls when a section contains [数据缺失]."""
-    if not has_missing_data(content):
+    """Show retry / regenerate controls when a section contains hard [数据缺失]."""
+    if not has_hard_missing_data(content):
         return
     if not section_supports_repair(section_key):
         st.info(
@@ -386,7 +386,7 @@ def render_report(
         content = final_state.get(key, "")
         if not content:
             continue
-        with st.expander(title, expanded=has_missing_data(content)):
+        with st.expander(title, expanded=has_hard_missing_data(content)):
             _render_section_repair(
                 section_key=key,
                 title=title,

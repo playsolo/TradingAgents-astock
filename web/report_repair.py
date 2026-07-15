@@ -18,13 +18,31 @@ MISSING_DATA_MARKER = "[数据缺失"
 MAX_ANALYST_TOOL_ROUNDS = 8
 
 # LLM often copies soft/partial tool gaps as report-level [数据缺失], which keeps the
-# repair banner up even after probes succeed. Scrub these when the underlying tools OK'd.
+# repair banner up even after probes succeed. Scrub these when classifying hard gaps
+# and after a successful probe regen.
 _SOFT_MISSING_PATTERNS = (
-    re.compile(r"\[数据缺失[：:][^\]]*(?:未检索到|无公开|暂无|无记录|无变动|无明显)[^\]]*\]"),
+    re.compile(
+        r"\[数据缺失[：:][^\]]*(?:未检索到|未发现|未获取到|未披露|未返回|"
+        r"无公开|暂无|无记录|无变动|无明显)[^\]]*\]"
+    ),
+    re.compile(
+        r"\[数据缺失[：:][^\]]*(?:无分析师|无机构覆盖|无覆盖|一致预期|"
+        r"profit_forecast|No analyst)[^\]]*\]"
+    ),
+    re.compile(
+        r"\[数据缺失[：:][^\]]*(?:股权质押|关联交易|商誉|各高管|持股数|"
+        r"工具未提供|不在工具)[^\]]*\]"
+    ),
     re.compile(r"\[数据缺失[：:][^\]]*(?:近20日|历史日度|主力资金历史)[^\]]*\]"),
-    re.compile(r"\[数据缺失[：:][^\]]*(?:行业对比|HTTP\s*502|全市场.{0,8}行业)[^\]]*\]"),
+    re.compile(
+        r"\[数据缺失[：:][^\]]*(?:行业对比|行业横向|HTTP\s*502|全市场.{0,8}行业)[^\]]*\]"
+    ),
+    re.compile(r"\[数据缺失[：:][^\]]*(?:具体涨跌幅|龙虎榜明细)[^\]]*\]"),
     re.compile(r"\[数据缺失\](?!\s*[:：])"),  # bare marker with no detail
+    # Malformed markers without the usual ": " separator still trip substring checks.
+    re.compile(r"\[数据缺失(?![：:\]])[^\]]*\]"),
 )
+
 
 SECTION_TO_ANALYST = {
     "market_report": "market",
@@ -62,6 +80,11 @@ def scrub_soft_missing_markers(text: str) -> str:
     for pattern in _SOFT_MISSING_PATTERNS:
         cleaned = pattern.sub("（该项无硬性数据缺口，已按可得信息表述）", cleaned)
     return cleaned
+
+
+def has_hard_missing_data(text: str | None) -> bool:
+    """True when remaining markers look like real tool/field failures after scrub."""
+    return has_missing_data(scrub_soft_missing_markers(text))
 
 
 def _tool_payload_ok(text: str) -> bool:
@@ -194,14 +217,18 @@ def section_supports_repair(section_key: str) -> bool:
 
 
 def list_repairable_missing_sections(state: dict[str, Any]) -> list[str]:
-    """Return repairable report keys that currently contain [数据缺失]."""
+    """Return repairable report keys that currently contain hard [数据缺失].
+
+    Soft / EmptyOK markers (无覆盖、无增减持、行业 502 等) are scrubbed first so
+    the UI banner only appears for likely tool failures.
+    """
     keys: list[str] = []
     for section_key in (
         "fundamentals_report",
         "hot_money_report",
         "lockup_report",
     ):
-        if has_missing_data(str(state.get(section_key) or "")):
+        if has_hard_missing_data(str(state.get(section_key) or "")):
             keys.append(section_key)
     return keys
 

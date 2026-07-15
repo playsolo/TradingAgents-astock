@@ -28,6 +28,9 @@ def test_get_fund_flow_keeps_realtime_when_history_ssl_fails(monkeypatch):
         return _RtResp()
 
     monkeypatch.setattr(a_stock, "_em_get", fake_em_get)
+    monkeypatch.setattr(
+        a_stock, "_sina_fund_flow_history", lambda *a, **k: []
+    )
 
     text = a_stock.get_fund_flow("002648", "2026-07-14", include_history=True)
 

@@ -154,6 +154,9 @@ def test_fund_flow_realtime_prints_mid_and_small(monkeypatch):
         return _Rt()
 
     monkeypatch.setattr(a_stock, "_em_get", fake_em)
+    monkeypatch.setattr(
+        a_stock, "_sina_fund_flow_history", lambda *a, **k: []
+    )
     text = a_stock.get_fund_flow("688401", "2026-07-14", include_history=True)
     assert "中单=" in text
     assert "小单=" in text
