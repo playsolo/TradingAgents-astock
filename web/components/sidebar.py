@@ -6,6 +6,7 @@ import os
 
 import streamlit as st
 
+from tradingagents.auth.model_config import load_model_config, model_config_exists
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.checkpointer import clear_checkpoint
 from tradingagents.llm_clients.model_catalog import MODEL_OPTIONS
@@ -38,7 +39,7 @@ from web.parallel_runs import (
 )
 from web.stock_display import format_list_ticker_label, signal_text_tag
 
-from web.auth_page import render_logout_button, render_admin_panel
+from web.auth_page import render_logout_button, render_admin_panel, render_model_config_info
 
 # Provider display names in recommended order
 _PROVIDERS: list[tuple[str, str]] = [
@@ -61,10 +62,13 @@ _PROVIDER_KEYS = [key for _, key in _PROVIDERS]
 def _default_provider_index() -> int:
     """默认选中的供应商下标。
 
-    刷新页面（新会话）后 session_state 会清空，下拉框退回第一项。设置环境变量
-    DEFAULT_LLM_PROVIDER（如 deepseek）即可把默认项固定，免去每次手动重选。
-    非法/未设置时回退到列表第一项（保持上游默认 MiniMax）。
+    优先级：管理员的持久化配置（仅当文件存在时）> 环境变量 DEFAULT_LLM_PROVIDER > 列表第一项。
     """
+    if model_config_exists():
+        admin_cfg = load_model_config()
+        admin_provider = admin_cfg.get("llm_provider", "")
+        if admin_provider in _PROVIDER_KEYS:
+            return _PROVIDER_KEYS.index(admin_provider)
     pref = os.getenv("DEFAULT_LLM_PROVIDER", "").strip().lower()
     if pref in _PROVIDER_KEYS:
         return _PROVIDER_KEYS.index(pref)
@@ -252,7 +256,7 @@ def max_jobs_configured() -> int:
     return max_runs()
 
 
-def _render_history_page(entries: list[dict], page_size: int = 20) -> None:
+def _render_history_page(entries: list[dict], page_size: int = 20, tab_key: str = "") -> None:
     """Render a paginated list of history entries with signal badges."""
     if not entries:
         st.caption("无匹配记录")
@@ -261,7 +265,7 @@ def _render_history_page(entries: list[dict], page_size: int = 20) -> None:
     # 分页
     total = len(entries)
     total_pages = (total + page_size - 1) // page_size
-    page_key = "_hist_page"
+    page_key = f"_hist_page_{tab_key}" if tab_key else "_hist_page"
     page = st.session_state.get(page_key, 0)
     if page >= total_pages:
         page = 0
@@ -279,7 +283,7 @@ def _render_history_page(entries: list[dict], page_size: int = 20) -> None:
         display = f"{sig_label} {label}" if sig_label else label
         if st.button(
             display,
-            key=f"hist_{t}_{d}_{start}",
+            key=f"{tab_key}_hist_{t}_{d}_{start}",
             use_container_width=True,
         ):
             navigate("history", ticker=t, date=d, path=entry["path"])
@@ -467,14 +471,20 @@ def render_sidebar() -> None:
         key="input_date",
     )
 
-    with st.expander("⚙️ 模型配置", expanded=False):
-        _render_llm_config()
-        if market == "US":
-            st.caption(
-                "美股模式会把此处模型配置转发到本机 TradingAgents；"
-                "API Key 仍读对应项目的 `.env`。"
-                "路径可用环境变量 US_TRADINGAGENTS_ROOT / US_TRADINGAGENTS_PYTHON 覆盖。"
-            )
+    # 模型配置：仅 admin 可修改，其他用户只读
+    user = st.session_state.get("auth_user")
+    is_admin = bool(user and getattr(user, "role", None) == "admin")
+    if is_admin:
+        with st.expander("⚙️ 模型配置", expanded=False):
+            _render_llm_config()
+            if market == "US":
+                st.caption(
+                    "美股模式会把此处模型配置转发到本机 TradingAgents；"
+                    "API Key 仍读对应项目的 `.env`。"
+                    "路径可用环境变量 US_TRADINGAGENTS_ROOT / US_TRADINGAGENTS_PYTHON 覆盖。"
+                )
+    else:
+        render_model_config_info()
 
     any_stopping = any(
         t.stop_requested for t in active_runs(st.session_state)
@@ -583,13 +593,13 @@ def render_sidebar() -> None:
 
     page_size = 20
     with tab_all:
-        _render_history_page(history, page_size)
+        _render_history_page(history, page_size, tab_key="all")
     with tab_buy:
-        _render_history_page(groups["Buy"], page_size)
+        _render_history_page(groups["Buy"], page_size, tab_key="buy")
     with tab_sell:
-        _render_history_page(groups["Sell"], page_size)
+        _render_history_page(groups["Sell"], page_size, tab_key="sell")
     with tab_hold:
-        _render_history_page(groups["Hold"], page_size)
+        _render_history_page(groups["Hold"], page_size, tab_key="hold")
 
     st.markdown("---")
     st.caption("⚠️ 仅供学习研究，不构成投资建议")

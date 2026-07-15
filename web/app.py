@@ -31,6 +31,7 @@ warm_arrow_for_worker_threads()
 import streamlit as st  # noqa: E402
 
 from tradingagents.default_config import DEFAULT_CONFIG  # noqa: E402
+from tradingagents.auth.model_config import load_model_config, model_config_exists  # noqa: E402
 
 from web.analysis_queue import (  # noqa: E402
     AnalysisJob,
@@ -160,11 +161,12 @@ if _active_incomplete and _started is None:
 # 默认可由独立守护 tradingagents-watch 负责到点观察（不开 Web 也跑）。
 # 若要改回「仅 Web 存活时调度」，启动前设 WATCHLIST_SCHEDULER=1。
 if os.getenv("WATCHLIST_SCHEDULER", "0").strip() not in {"0", "false", "off"}:
+    _watchlist_cfg = load_model_config()
     start_watchlist_scheduler(config_provider=lambda: {
-        "llm_provider": st.session_state.get("llm_provider", "deepseek"),
-        "quick_think_llm": st.session_state.get("quick_think_llm", "deepseek-chat"),
-        "deep_think_llm": st.session_state.get("deep_think_llm", "deepseek-chat"),
-        "backend_url": (st.session_state.get("llm_base_url") or os.getenv("BACKEND_URL") or None),
+        "llm_provider": _watchlist_cfg.get("llm_provider", "deepseek"),
+        "quick_think_llm": _watchlist_cfg.get("quick_think_llm", "deepseek-chat"),
+        "deep_think_llm": _watchlist_cfg.get("deep_think_llm", "deepseek-chat"),
+        "backend_url": (_watchlist_cfg.get("backend_url") or os.getenv("BACKEND_URL") or None),
     })
 
 # ── Custom CSS ───────────────────────────────────────────────────────────────
@@ -305,13 +307,29 @@ st.markdown(
 # ── Build config ─────────────────────────────────────────────────────────────
 
 def _build_config() -> dict:
+    """Build runtime config from the system model source of truth.
+
+    When auth is on, the admin's persisted model config is used for all users.
+    If auth is disabled (dev mode) or no model_config.json exists yet, fall
+    back to session_state (which the sidebar populates).
+    """
     config = DEFAULT_CONFIG.copy()
-    config["llm_provider"] = st.session_state.get("llm_provider", "minimax")
-    config["deep_think_llm"] = st.session_state.get("deep_think_llm", "MiniMax-M2.7")
-    config["quick_think_llm"] = st.session_state.get("quick_think_llm", "MiniMax-M2.7-highspeed")
-    # Optional third-party / proxy endpoint. Sidebar input wins, else .env BACKEND_URL.
-    backend_url = (st.session_state.get("llm_base_url") or os.getenv("BACKEND_URL") or "").strip()
-    config["backend_url"] = backend_url or None
+
+    # Persisted config is the source of truth: admin set it for everyone.
+    if model_config_exists():
+        persisted = load_model_config()
+        config["llm_provider"] = persisted["llm_provider"]
+        config["deep_think_llm"] = persisted["deep_think_llm"]
+        config["quick_think_llm"] = persisted["quick_think_llm"]
+        backend_url = (persisted.get("backend_url") or os.getenv("BACKEND_URL") or "").strip()
+        config["backend_url"] = backend_url or None
+    else:
+        config["llm_provider"] = st.session_state.get("llm_provider", "minimax")
+        config["deep_think_llm"] = st.session_state.get("deep_think_llm", "MiniMax-M2.7")
+        config["quick_think_llm"] = st.session_state.get("quick_think_llm", "MiniMax-M2.7-highspeed")
+        # Optional third-party / proxy endpoint. Sidebar input wins, else .env BACKEND_URL.
+        backend_url = (st.session_state.get("llm_base_url") or os.getenv("BACKEND_URL") or "").strip()
+        config["backend_url"] = backend_url or None
     config["data_vendors"] = {
         "core_stock_apis": "a_stock",
         "technical_indicators": "a_stock",
