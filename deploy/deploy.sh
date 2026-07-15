@@ -114,12 +114,16 @@ echo "[远程] 当前目录: \$(pwd)"
 echo "[远程] Pull ${REMOTE_BRANCH} ..."
 git pull origin "${REMOTE_BRANCH}"
 
-# 导入预检：模拟 app.py 的顶级 import 路径，提前捕获 ModuleNotFoundError
+# 导入预检：模拟 app.py 的顶级 import 路径，提前捕获 ModuleNotFoundError。
+# 必须用服务的 venv python（streamlit 等运行时依赖只装在 venv 里），
+# 系统 python3 会误报 ModuleNotFoundError: streamlit。
 echo "[远程] 导入预检 ..."
-python3 -c "
+PYBIN="${REMOTE_DIR}/.venv/bin/python"
+[ -x "\$PYBIN" ] || PYBIN=python3
+"\$PYBIN" -c "
 import sys
 sys.path.insert(0, '.')
-# 模拟 app.py 的顶级 import（排除 streamlit 等运行时依赖）
+# 模拟 app.py 的顶级 import
 from tradingagents.auth.model_config import load_model_config
 print('  ✓ tradingagents.auth.model_config')
 from web.components.sidebar import render_sidebar, request_clear_ticker_input
