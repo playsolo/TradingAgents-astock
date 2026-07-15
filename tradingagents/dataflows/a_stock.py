@@ -2456,7 +2456,11 @@ def _sina_fund_flow_history(code: str, days: int = 20) -> list[dict]:
 def get_realtime_main_net_inflow(
     ticker: Annotated[str, "A-stock code"],
 ) -> float | None:
-    """Return the latest realtime 主力净流入 in yuan, or None if unavailable."""
+    """Return the latest 主力净流入 in yuan, or None if unavailable.
+
+    Prefer东财 push2 minute series; on disconnect/empty, fall back to the
+    newest Sina MoneyFlow daily ``r0_net`` (heterogeneous caliber).
+    """
     code = _normalize_ticker(ticker)
     secid = f"1.{code}" if code.startswith("6") else f"0.{code}"
     try:
@@ -2469,14 +2473,54 @@ def get_realtime_main_net_inflow(
         }
         r = _em_get(url_rt, params=params_rt, timeout=10)
         klines = r.json().get("data", {}).get("klines", []) or []
-        if not klines:
-            return None
-        parts = str(klines[-1]).split(",")
-        if len(parts) < 2:
-            return None
-        return float(parts[1])
-    except Exception:
+        if klines:
+            parts = str(klines[-1]).split(",")
+            if len(parts) >= 2:
+                return float(parts[1])
+    except Exception as em_exc:
+        logger.warning(
+            "realtime fund flow failed for %s: %s", code, em_exc
+        )
+
+    try:
+        sina_rows = _sina_fund_flow_history(code, days=5)
+    except Exception as sina_exc:
+        logger.warning(
+            "sina fund flow fallback failed for %s: %s", code, sina_exc
+        )
         return None
+    if not sina_rows:
+        return None
+    return float(sina_rows[0]["main_net"])
+
+
+def _append_sina_fund_flow_close(
+    lines: list[str],
+    row: dict,
+    *,
+    as_primary: bool,
+) -> None:
+    """Append Close/Signal lines from one Sina daily row."""
+    main_net = float(row["main_net"])
+    date = str(row.get("date") or "")
+    if as_primary:
+        lines.append(
+            "## Daily Fund Flow "
+            f"(新浪 MoneyFlow | 东财分时不可用时的日度兜底 | {date})"
+        )
+        lines.append(
+            f"  最大单净流入 r0_net≈{main_net / 1e4:.0f}万 "
+            f"| 整体净流入≈{float(row['net_amount']) / 1e4:.0f}万"
+        )
+        lines.append(
+            "(sina caliber ≠ 东财超大单；可用作个股主力净流入，"
+            "勿写报告级数据缺失标记)"
+        )
+    lines.append(f"\nClose: 主力净流入≈{main_net / 1e4:.0f}万元 ({date} 新浪日度)")
+    if main_net > 0:
+        lines.append("Signal: Net main force INFLOW (bullish)")
+    elif main_net < 0:
+        lines.append("Signal: Net main force OUTFLOW (bearish)")
 
 
 def get_fund_flow(
@@ -2486,18 +2530,19 @@ def get_fund_flow(
         bool, "Include historical daily fund flow (last 20 days)"
     ] = True,
 ) -> str:
-    """Get individual stock fund flow from 东财 push2.
+    """Get individual stock fund flow from 东财 push2 (+ 新浪兜底).
 
     Realtime: minute-level main/large/medium/small/super order net inflow.
-    History: Eastmoney push2his daykline; on SSL/empty, fall back to Sina
-    MoneyFlow daily series (heterogeneous caliber — labeled in output).
+    If push2 disconnects/errors, fall back to Sina MoneyFlow daily series for
+    a usable Close 主力净流入 (labeled; do not treat as report-level gap).
+    History: Eastmoney push2his daykline; on SSL/empty, fall back to Sina.
 
     V0.2.7: replaced 百度 PAE (fundflow/fundsortlist, offline since 2026-05)
     with 东财 push2 fund flow API.
     """
     code = _normalize_ticker(ticker)
     secid = f"1.{code}" if code.startswith("6") else f"0.{code}"
-    sources = ["东财 push2 realtime"]
+    sources: list[str] = []
     lines = [
         f"# Fund Flow for {code} (A-stock)",
         f"# Source: 东财 push2 (Eastmoney)",
@@ -2505,19 +2550,43 @@ def get_fund_flow(
         "",
     ]
 
+    sina_cache: list[dict] | None = None
+    sina_resolved = False  # True only after a non-exception Sina response
+
+    def _sina_rows(days: int = 20) -> list[dict]:
+        nonlocal sina_cache, sina_resolved
+        if sina_resolved:
+            return sina_cache or []
+        try:
+            sina_cache = _sina_fund_flow_history(code, days=days)
+            sina_resolved = True
+            return sina_cache
+        except Exception as sina_exc:
+            logger.warning(
+                "sina fund flow history failed for %s: %s",
+                code,
+                sina_exc,
+            )
+            # Do not cache the exception — history block may retry.
+            return []
+
+    em_rt_present = False
+    rt_err: str | None = None
     try:
-        # Realtime minute-level fund flow
         url_rt = "https://push2.eastmoney.com/api/qt/stock/fflow/kline/get"
         params_rt = {
-            "secid": secid, "klt": 1,
+            "secid": secid,
+            "klt": 1,
             "fields1": "f1,f2,f3,f7",
             "fields2": "f51,f52,f53,f54,f55,f56,f57",
         }
         r = _em_get(url_rt, params=params_rt, timeout=10)
         d = r.json()
-        klines = d.get("data", {}).get("klines", [])
+        klines = d.get("data", {}).get("klines", []) or []
 
         if klines:
+            em_rt_present = True
+            sources.append("东财 push2 realtime")
             lines.append(
                 "## Realtime Minute Flow "
                 "(主力/小单/中单/大单/超大单 净流入, 元)"
@@ -2548,101 +2617,159 @@ def get_fund_flow(
                     lines.append(
                         "Signal: Net main force OUTFLOW (bearish)"
                     )
+    except Exception as em_exc:
+        rt_err = f"{type(em_exc).__name__}: {em_exc}"
+        logger.warning("fund flow realtime failed for %s: %s", code, em_exc)
+
+    if not em_rt_present:
+        sina_rows = _sina_rows()
+        if sina_rows:
+            sources.append("新浪 MoneyFlow (分时兜底)")
+            if rt_err:
+                lines.append(
+                    f"(东财分时资金流不可用: {rt_err} — "
+                    "已用新浪日度主力净流入兜底，勿写报告级数据缺失标记)"
+                )
+            else:
+                lines.append(
+                    "(东财分时空数据/非交易时段 — "
+                    "已用新浪日度主力净流入兜底，勿写报告级数据缺失标记)"
+                )
+            _append_sina_fund_flow_close(
+                lines, sina_rows[0], as_primary=True
+            )
+
+    # Historical daily fund flow (push2his) — isolated so SSL flakes
+    # do not discard an otherwise successful realtime / Sina section.
+    if include_history:
+        hist_done = False
+        try:
+            url_hist = (
+                "https://push2his.eastmoney.com"
+                "/api/qt/stock/fflow/daykline/get"
+            )
+            params_hist = {
+                "secid": secid,
+                "lmt": 20,
+                "klt": 101,
+                "fields1": "f1,f2,f3,f7",
+                "fields2": "f51,f52,f53,f54,f55,f56,f57",
+            }
+            rh = _em_get(url_hist, params=params_hist, timeout=10)
+            dh = rh.json()
+            hist_klines = dh.get("data", {}).get("klines", [])
+
+            if hist_klines:
+                sources.append("东财 push2his history")
+                lines.append(
+                    f"\n## Historical Daily Fund Flow "
+                    f"(last {len(hist_klines)} trading days | 东财 push2his)"
+                )
+                lines.append(
+                    "Date | 主力净流入(万) | 大单(万) "
+                    "| 中单(万) | 小单(万) | 超大单(万)"
+                )
+                for line in hist_klines:
+                    parts = line.split(",")
+                    if len(parts) >= 6:
+                        lines.append(
+                            f"  {parts[0]} "
+                            f"| main={float(parts[1])/1e4:.0f} "
+                            f"| large={float(parts[4])/1e4:.0f} "
+                            f"| mid={float(parts[3])/1e4:.0f} "
+                            f"| small={float(parts[2])/1e4:.0f} "
+                            f"| super={float(parts[5])/1e4:.0f}"
+                        )
+                hist_done = True
+        except Exception as hist_exc:
+            logger.warning(
+                "fund flow history failed for %s: %s", code, hist_exc
+            )
+
+        if not hist_done:
+            sina_rows = _sina_rows()
+            if sina_rows:
+                if not any("新浪 MoneyFlow" in s for s in sources):
+                    sources.append("新浪 MoneyFlow history")
+                lines.append(
+                    f"\n## Historical Daily Fund Flow "
+                    f"(last {len(sina_rows)} trading days | "
+                    f"新浪 MoneyFlow fallback)"
+                )
+                lines.append(
+                    "Date | 最大单净流入r0_net(万) | 整体净流入(万) "
+                    "| 口径备注"
+                )
+                for row in sina_rows:
+                    lines.append(
+                        f"  {row['date']} "
+                        f"| main≈{row['main_net']/1e4:.0f} "
+                        f"| net={row['net_amount']/1e4:.0f} "
+                        f"| sina caliber ≠ 东财超大单"
+                    )
+                hist_done = True
+
+        if not hist_done:
+            if em_rt_present:
+                hist_note = (
+                    "盘中分时资金流仍可用，勿因此标注报告级数据缺失"
+                )
+            else:
+                hist_note = (
+                    "分时与日度均不可用时才可标数据缺口；"
+                    "单源失败勿写报告级数据缺失标记"
+                )
+            lines.append(
+                "\n## Historical Daily Fund Flow\n"
+                "(历史日度暂不可用: 东财 push2his + 新浪 fallback 均失败 — "
+                f"{hist_note})"
+            )
+
+    # Sina may succeed only on a history retry; attach Close then so we
+    # never claim 新浪兜底失败 while history already has usable rows.
+    has_close = any("Close: 主力净流入" in ln for ln in lines)
+    if not em_rt_present and not has_close:
+        sina_rows = _sina_rows()
+        if sina_rows:
+            if not any("新浪 MoneyFlow (分时兜底)" in s for s in sources):
+                sources.append("新浪 MoneyFlow (分时兜底)")
+            if rt_err:
+                lines.append(
+                    f"(东财分时资金流不可用: {rt_err} — "
+                    "已用新浪日度主力净流入兜底，勿写报告级数据缺失标记)"
+                )
+            else:
+                lines.append(
+                    "(东财分时空数据/非交易时段 — "
+                    "已用新浪日度主力净流入兜底，勿写报告级数据缺失标记)"
+                )
+            _append_sina_fund_flow_close(
+                lines, sina_rows[0], as_primary=True
+            )
+        elif rt_err:
+            lines.append(
+                f"No realtime fund flow (东财不可用: {rt_err}；新浪兜底也失败)"
+            )
         else:
             lines.append(
                 "No realtime fund flow (non-trading hours or holiday)"
             )
 
-        # Historical daily fund flow (push2his) — isolated so SSL flakes
-        # do not discard an otherwise successful realtime section.
-        if include_history:
-            hist_done = False
-            try:
-                url_hist = (
-                    "https://push2his.eastmoney.com"
-                    "/api/qt/stock/fflow/daykline/get"
-                )
-                params_hist = {
-                    "secid": secid, "lmt": 20, "klt": 101,
-                    "fields1": "f1,f2,f3,f7",
-                    "fields2": "f51,f52,f53,f54,f55,f56,f57",
-                }
-                rh = _em_get(url_hist, params=params_hist, timeout=10)
-                dh = rh.json()
-                hist_klines = dh.get("data", {}).get("klines", [])
+    if sources:
+        lines[1] = f"# Source: {' + '.join(sources)}"
 
-                if hist_klines:
-                    sources.append("东财 push2his history")
-                    lines.append(
-                        f"\n## Historical Daily Fund Flow "
-                        f"(last {len(hist_klines)} trading days | 东财 push2his)"
-                    )
-                    lines.append(
-                        "Date | 主力净流入(万) | 大单(万) "
-                        "| 中单(万) | 小单(万) | 超大单(万)"
-                    )
-                    for line in hist_klines:
-                        parts = line.split(",")
-                        if len(parts) >= 6:
-                            lines.append(
-                                f"  {parts[0]} "
-                                f"| main={float(parts[1])/1e4:.0f} "
-                                f"| large={float(parts[4])/1e4:.0f} "
-                                f"| mid={float(parts[3])/1e4:.0f} "
-                                f"| small={float(parts[2])/1e4:.0f} "
-                                f"| super={float(parts[5])/1e4:.0f}"
-                            )
-                    hist_done = True
-            except Exception as hist_exc:
-                logger.warning(
-                    "fund flow history failed for %s: %s", code, hist_exc
-                )
-
-            if not hist_done:
-                try:
-                    sina_rows = _sina_fund_flow_history(code, days=20)
-                except Exception as sina_exc:
-                    logger.warning(
-                        "sina fund flow history failed for %s: %s",
-                        code,
-                        sina_exc,
-                    )
-                    sina_rows = []
-                if sina_rows:
-                    sources.append("新浪 MoneyFlow history")
-                    lines.append(
-                        f"\n## Historical Daily Fund Flow "
-                        f"(last {len(sina_rows)} trading days | "
-                        f"新浪 MoneyFlow fallback)"
-                    )
-                    lines.append(
-                        "Date | 最大单净流入r0_net(万) | 整体净流入(万) "
-                        "| 口径备注"
-                    )
-                    for row in sina_rows:
-                        lines.append(
-                            f"  {row['date']} "
-                            f"| main≈{row['main_net']/1e4:.0f} "
-                            f"| net={row['net_amount']/1e4:.0f} "
-                            f"| sina caliber ≠ 东财超大单"
-                        )
-                    hist_done = True
-
-            if not hist_done:
-                lines.append(
-                    "\n## Historical Daily Fund Flow\n"
-                    "(历史日度暂不可用: 东财 push2his + 新浪 fallback 均失败 — "
-                    "盘中分时资金流仍可用，勿因此标注报告级数据缺失)"
-                )
-
-        # Reflect heterogeneous history in the document header.
-        if len(sources) > 1:
-            lines[1] = f"# Source: {' + '.join(sources)}"
-
-        return "\n".join(lines)
-
-    except Exception as e:
-        return f"Error fetching fund flow for {code}: {str(e)}"
+    body = "\n".join(lines)
+    # Soft partial (notes only) still beats a hard Error — probes treat
+    # ``Error`` as failure while markdown soft-gaps remain regenerable.
+    if (
+        "主力净流入" not in body
+        and "Realtime Minute Flow" not in body
+        and "Daily Fund Flow" not in body
+        and "Historical Daily Fund Flow" not in body
+    ):
+        detail = rt_err or "no fund-flow source available"
+        return f"Error fetching fund flow for {code}: {detail}"
+    return body
 
 
 # ---------------------------------------------------------------------------
