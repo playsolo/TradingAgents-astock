@@ -435,8 +435,8 @@ def _render_admin_model_config() -> None:
     """Admin-only form to set the model config that all users will use.
 
     Persisted to disk — survives server restart.
+    Call inside an expander; the expander label provides the section title.
     """
-    st.markdown("##### 模型配置（全局）")
     admin_config = load_model_config()
 
     provider_keys = [
@@ -539,10 +539,6 @@ def render_admin_panel() -> None:
 
     mgr = _get_manager()
 
-    # ── Model config section (above user management) ─────────────────
-    _render_admin_model_config()
-    st.markdown("---")
-
     with st.expander(
         "🔐 用户管理（管理员）",
         expanded=bool(mgr.list_pending_users()),
@@ -609,6 +605,10 @@ def render_admin_panel() -> None:
                     st.rerun()
                 except ValueError as exc:
                     st.error(str(exc))
+
+    # ── Model config (below user management, same collapsible style) ─
+    with st.expander("⚙️ 模型配置（全局）", expanded=False):
+        _render_admin_model_config()
 
 
 def _force_change_password(mgr: UserManager, username: str, new_password: str) -> None:
