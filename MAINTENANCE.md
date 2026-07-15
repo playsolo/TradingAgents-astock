@@ -14,9 +14,11 @@
 | 地址 | `m.wcc.io` |
 | 用户 | `solo`（sudo 免密） |
 | 代码目录 | `/home/solo/TradingAgents-astock` |
-| Service | `tradingagents-astock.service` |
+| Service | `tradingagents-astock.service`（**直接跑 `web/app.py`，不要跑 `web/launch.py`**） |
 | Web | Nginx → Streamlit (`127.0.0.1:8501`) |
 | 访问 | **https://m.wcc.io** |
+
+> 注意：`web/launch.py` 是 CLI 入口（内部再起一个 streamlit）。systemd 必须跑 `streamlit run web/app.py`，否则浏览器每次加载会卡在 Running 黑屏，并不断派生新进程。
 
 ## 分支策略
 
