@@ -485,7 +485,6 @@ def render_sidebar() -> None:
             use_container_width=True,
             help="全市场 → 流动性/估值筛选 → 催化剂评分 → 推荐分级",
         ):
-            from web.navigation import navigate
             navigate("home")  # 回到主页（在扫描 tab 中展示）
 
         st.markdown("#### 观察")
