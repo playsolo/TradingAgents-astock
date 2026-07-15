@@ -24,10 +24,18 @@ from web.history import (
     clear_incomplete_task,
     get_history,
     get_incomplete_history,
+    group_history_by_signal,
     record_incomplete_task,
+    signal_count_label,
 )
 from web.navigation import navigate
-from web.stock_display import format_list_ticker_label
+from web.parallel_runs import (
+    active_runs,
+    has_running,
+    running_count,
+    slots_available,
+)
+from web.stock_display import format_list_ticker_label, signal_text_tag
 
 from web.auth_page import render_logout_button, render_admin_panel
 
@@ -149,13 +157,14 @@ def _submit_analysis_jobs(raw_tickers: str, market: str, trade_date: str) -> Non
         st.error("❌ 没有可分析的有效代码")
         return
 
-    tracker = st.session_state.get("tracker")
-    is_busy = tracker is not None and tracker.is_running
+    running = running_count(st.session_state)
+    is_busy = running > 0 or has_running(st.session_state)
     if is_busy:
-        exclude = None
-        if tracker.ticker and tracker.trade_date:
-            market_now = getattr(tracker, "market", None) or market
-            exclude = {(market_now, tracker.ticker, tracker.trade_date)}
+        # Exclude any currently-running jobs from being re-queued.
+        exclude: set[tuple[str, str, str]] = set()
+        for t in active_runs(st.session_state):
+            if t.ticker and t.trade_date:
+                exclude.add((getattr(t, "market", market), t.ticker, t.trade_date))
         added = append_jobs(st.session_state, jobs, exclude=exclude)
         st.session_state["queue_advance_notice"] = (
             f"✅ 已加入分析队列 {added} 只（当前队列 {len(queue_snapshot(st.session_state))}）"
@@ -206,21 +215,21 @@ def _render_analysis_queue() -> None:
     if not jobs:
         return
     st.markdown("#### 分析队列")
+    slots = slots_available(st.session_state)
     st.caption(
-        "串行执行，与观察池无关；完成后自动开始下一只。"
+        f"最多 3 只并行，当前空闲 {slots} 个槽位。"
         "刷新后会从本地恢复，空闲时自动开跑。"
     )
     for idx, job in enumerate(jobs, start=1):
         st.caption(format_queue_job_caption(job, idx))
 
-    tracker = st.session_state.get("tracker")
-    is_busy = tracker is not None and tracker.is_running
+    is_busy = slots_available(st.session_state) < max_jobs_configured()
     cont_col, clear_col = st.columns(2)
     if cont_col.button(
         "继续队列",
         key="resume_analysis_queue",
         use_container_width=True,
-        disabled=is_busy,
+        disabled=is_busy and not jobs,
         type="primary",
     ):
         head = advance_queue(st.session_state)
@@ -237,88 +246,104 @@ def _render_analysis_queue() -> None:
         st.rerun()
 
 
+def max_jobs_configured() -> int:
+    from web.parallel_runs import max_runs
+    return max_runs()
+
+
+def _render_history_page(entries: list[dict], page_size: int = 20) -> None:
+    """Render a paginated list of history entries with signal badges."""
+    if not entries:
+        st.caption("无匹配记录")
+        return
+
+    # 分页
+    total = len(entries)
+    total_pages = (total + page_size - 1) // page_size
+    page_key = "_hist_page"
+    page = st.session_state.get(page_key, 0)
+    if page >= total_pages:
+        page = 0
+        st.session_state[page_key] = 0
+
+    start = page * page_size
+    end = min(start + page_size, total)
+    page_entries = entries[start:end]
+
+    for entry in page_entries:
+        t, d = entry["ticker"], entry["date"]
+        signal = entry.get("signal", "N/A")
+        sig_label = signal_text_tag(signal)
+        label = format_list_ticker_label(t, d)
+        display = f"{sig_label} {label}" if sig_label else label
+        if st.button(
+            display,
+            key=f"hist_{t}_{d}_{start}",
+            use_container_width=True,
+        ):
+            navigate("history", ticker=t, date=d, path=entry["path"])
+
+    # 翻页控制
+    if total_pages > 1:
+        cols = st.columns([1, 2, 1])
+        with cols[0]:
+            if st.button("◀ 上一页", key="hist_prev", use_container_width=True, disabled=page == 0):
+                st.session_state[page_key] = page - 1
+                st.rerun()
+        with cols[1]:
+            st.caption(f"{page + 1}/{total_pages}")
+        with cols[2]:
+            if st.button("下一页 ▶", key="hist_next", use_container_width=True, disabled=page >= total_pages - 1):
+                st.session_state[page_key] = page + 1
+                st.rerun()
+
+
 def _render_analysis_controls(raw_tickers: str, trade_date_value: date) -> None:
-    tracker = st.session_state.get("tracker")
-    is_running = tracker is not None and tracker.is_running
+    is_busy = has_running(st.session_state)
+    runs = active_runs(st.session_state)
     trade_date = trade_date_value.strftime("%Y-%m-%d")
 
     pause_col, resume_col, stop_col = st.columns(3)
 
-    pause_disabled = not is_running or tracker.is_paused or tracker.stop_requested
+    any_not_paused = any(t.is_running and not t.is_paused and not t.stop_requested for t in runs)
+    any_paused = any(t.is_paused for t in runs)
+
     if pause_col.button(
-        "暂停",
+        "全部暂停",
         key="sidebar_pause_analysis",
         use_container_width=True,
-        disabled=pause_disabled,
+        disabled=not any_not_paused,
     ):
-        if tracker.pause():
-            record_incomplete_task(
-                tracker.ticker,
-                tracker.trade_date,
-                status="paused",
-                completed_stages=tracker.completed_stages,
-            )
+        from web.parallel_runs import pause_all_runs
+        pause_all_runs(st.session_state)
         st.rerun()
 
-    resume_disabled = not is_running or not tracker.is_paused or tracker.stop_requested
     if resume_col.button(
-        "恢复",
+        "全部恢复",
         key="sidebar_resume_analysis",
         use_container_width=True,
-        disabled=resume_disabled,
+        disabled=not any_paused,
     ):
-        if tracker.resume():
-            record_incomplete_task(
-                tracker.ticker,
-                tracker.trade_date,
-                status="running",
-                completed_stages=tracker.completed_stages,
-            )
+        for t in runs:
+            if t.is_paused:
+                t.resume()
         st.rerun()
 
     can_stop = (
-        tracker is not None
+        bool(runs)
         or bool(raw_tickers.strip())
         or bool(queue_snapshot(st.session_state))
     )
     if stop_col.button(
-        "停止",
+        "清空队列并停止",
         key="sidebar_stop_analysis",
         use_container_width=True,
         disabled=not can_stop,
     ):
         clear_queue(st.session_state)
-        target_ticker = tracker.ticker if tracker is not None and tracker.ticker else ""
-        target_date = (
-            tracker.trade_date
-            if tracker is not None and tracker.trade_date
-            else trade_date
-        )
-
-        if not target_ticker:
-            market = st.session_state.get("analysis_market", "CN")
-            target_ticker, err = _resolve_user_input_for_market(
-                _first_raw_ticker(raw_tickers), market
-            )
-            if err:
-                st.error(f"❌ {err}")
-                return
-
-        if tracker is not None and tracker.is_running:
-            tracker.request_stop()
-            clear_incomplete_task(target_ticker, target_date)
-        else:
-            if tracker is not None:
-                tracker.mark_stopped()
-                st.session_state["tracker"] = None
-            _clear_analysis_artifacts(target_ticker, target_date)
-
-        st.session_state["viewing_history"] = None
-        st.success("已停止当前分析并清除队列；下一次开始会从头生成。")
+        from web.parallel_runs import stop_all_runs
+        stop_all_runs(st.session_state)
         st.rerun()
-
-    if tracker is not None and tracker.stop_requested:
-        st.caption("正在停止并清空，收尾完成后可重新开始。")
 
 
 def _render_llm_config() -> None:
@@ -391,8 +416,8 @@ def render_sidebar() -> None:
     render_admin_panel()
 
     st.markdown(
-        """
-        <div style="text-align:center; margin-bottom:1.5rem;">
+        f"""
+        <a href="/?view=home" style="text-decoration:none; display:block; text-align:center; margin-bottom:1.5rem;">
             <span style="font-size:2rem; font-weight:800; color:#ff5a1f;">Trading</span><span style="font-size:2rem; font-weight:800; color:#f5f1eb;">Agents</span><span style="font-size:2rem; font-weight:800; color:#f5f1eb;">-</span><span style="font-size:2rem; font-weight:800; color:#ff5a1f;">Astock</span>
             <div style="font-size:0.85rem; color:#888; margin-top:0.2rem;">
                 A股多Agent投研系统
@@ -400,7 +425,7 @@ def render_sidebar() -> None:
             <div style="font-size:0.7rem; color:#555; margin-top:0.3rem;">
                 by <a href="https://github.com/playsolo" style="color:#ff5a1f; text-decoration:none;">playsolo</a>
             </div>
-        </div>
+        </a>
         """,
         unsafe_allow_html=True,
     )
@@ -450,13 +475,13 @@ def render_sidebar() -> None:
                 "路径可用环境变量 US_TRADINGAGENTS_ROOT / US_TRADINGAGENTS_PYTHON 覆盖。"
             )
 
-    tracker = st.session_state.get("tracker")
-    is_busy = tracker is not None and tracker.is_running
-    is_stopping = is_busy and tracker.stop_requested
+    any_stopping = any(
+        t.stop_requested for t in active_runs(st.session_state)
+    )
     has_input = bool(parse_ticker_inputs(ticker_input or ""))
-    if is_stopping:
+    if any_stopping:
         start_label = "停止中..."
-    elif is_busy:
+    elif has_running(st.session_state):
         start_label = "加入分析队列"
     else:
         start_label = "开始分析"
@@ -464,7 +489,7 @@ def render_sidebar() -> None:
     if st.button(
         start_label,
         use_container_width=True,
-        disabled=(is_stopping or not has_input),
+        disabled=(any_stopping or not has_input),
         type="primary",
     ):
         _submit_analysis_jobs(
@@ -542,11 +567,26 @@ def render_sidebar() -> None:
         st.caption("暂无历史记录")
         return
 
-    for entry in history[:20]:
-        t, d = entry["ticker"], entry["date"]
-        label = format_list_ticker_label(t, d)
-        if st.button(label, key=f"hist_{t}_{d}", use_container_width=True):
-            navigate("history", ticker=t, date=d, path=entry["path"])
+    # 按信号分组
+    groups = group_history_by_signal(history)
+    total = len(history)
+    st.caption(signal_count_label(groups, total))
+
+    # 分类 tab
+    tab_all, tab_buy, tab_sell, tab_hold = st.tabs(
+        ["全部", f"买入({len(groups['Buy'])})",
+         f"卖出({len(groups['Sell'])})", f"持有({len(groups['Hold'])})"]
+    )
+
+    page_size = 20
+    with tab_all:
+        _render_history_page(history, page_size)
+    with tab_buy:
+        _render_history_page(groups["Buy"], page_size)
+    with tab_sell:
+        _render_history_page(groups["Sell"], page_size)
+    with tab_hold:
+        _render_history_page(groups["Hold"], page_size)
 
     st.markdown("---")
     st.caption("⚠️ 仅供学习研究，不构成投资建议")
