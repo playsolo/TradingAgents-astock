@@ -63,6 +63,99 @@ _MAX_CANDIDATES: int = 15
 _TENCENT_BATCH_SIZE = 800
 _L1B_BATCH_SIZE = 30                    # L1b 验证的候选上限（防耗时过长）
 
+# L2 因子口径：active=当前生产路径会采集并计入；dormant=逻辑仍评分但暂未拉数。
+# （UI / 快照用公开结构；改名时同步 tests/test_value_swing_explain.py）
+L2_FACTOR_SPECS: tuple[tuple[str, str, bool], ...] = (
+    ("northbound", "北向3日净流入>0", True),
+    ("fund_flow", "主力资金3日>0", False),
+    ("dragon_tiger", "龙虎榜机构净买≥100万", False),
+    ("above_ma20", "站上MA20", True),
+    ("near_ma250", "接近年线", True),
+    ("news_found", "近3日个股新闻", True),
+    ("hot_topic_match", "热点题材", True),
+    ("concept_active", "概念活跃", True),
+)
+
+
+def l2_score_max(*, only_active: bool = True) -> int:
+    """L2 展示满分：默认只计当前生效(active)因子。"""
+    return sum(1 for _, _, active in L2_FACTOR_SPECS if active or not only_active)
+
+
+def selection_rules_snapshot() -> dict[str, Any]:
+    """当前生效的选股规则摘要（供 UI / 扫描结果落盘）。"""
+    active = [label for _, label, on in L2_FACTOR_SPECS if on]
+    dormant = [label for _, label, on in L2_FACTOR_SPECS if not on]
+    return {
+        "l0": [
+            f"剔除 ST/退市标识",
+            f"成交额 ≥ {_MIN_VOLUME_WAN:g} 万元",
+            f"PE(TTM) > 0",
+            f"排除北交所 8xxx",
+            f"上市 ≥ {_MIN_LISTED_MONTHS} 个月",
+        ],
+        "l1a": [
+            f"{_PE_MIN:g} ≤ PE(TTM) ≤ {_PE_TTM_MAX:g}",
+            f"PB ≤ {_PB_MAX:g}",
+        ],
+        "l1b": [
+            f"营收同比 ≥ {_MIN_REVENUE_GROWTH:g}%",
+            f"资产负债率 ≤ {_MAX_DEBT_RATIO * 100:g}%（科创板 ≤ {_MAX_DEBT_RATIO_STAR * 100:g}%）",
+            f"20 日振幅 ≥ {_MIN_AMPLITUDE_20D * 100:g}%",
+            f"深度校验上限 {_L1B_BATCH_SIZE} 只",
+        ],
+        "l2": {
+            "score_max": l2_score_max(),
+            "active": active,
+            "dormant": dormant,
+            "top_n": _MAX_CANDIDATES,
+            "note": "每命中一项 +1；取信号分最高的 top N",
+        },
+    }
+
+
+def _cand_get(candidate: StockInfo | dict[str, Any], key: str, default: Any = None) -> Any:
+    if isinstance(candidate, dict):
+        return candidate.get(key, default)
+    return getattr(candidate, key, default)
+
+
+def _l2_factor_hit(key: str, candidate: StockInfo | dict[str, Any]) -> bool:
+    if key == "northbound":
+        v = _cand_get(candidate, "northbound_net_3d")
+        return v is not None and float(v) > 0
+    if key == "fund_flow":
+        v = _cand_get(candidate, "fund_flow_main_3d")
+        return v is not None and float(v) > 0
+    if key == "dragon_tiger":
+        v = _cand_get(candidate, "dragon_tiger_inst_net")
+        return v is not None and float(v) >= 100
+    return bool(_cand_get(candidate, key, False))
+
+
+def l2_factor_hits(candidate: StockInfo | dict[str, Any]) -> list[dict[str, Any]]:
+    """返回全部 L2 因子命中表（含休眠项，供入选原因 checklist）。"""
+    return [
+        {
+            "key": key,
+            "label": label,
+            "active": active,
+            "hit": _l2_factor_hit(key, candidate),
+        }
+        for key, label, active in L2_FACTOR_SPECS
+    ]
+
+
+def why_selected_line(candidate: StockInfo | dict[str, Any]) -> str:
+    """入选原因一行：仅列出当前生效且命中的因子。"""
+    hits = [
+        h["label"]
+        for h in l2_factor_hits(candidate)
+        if h["active"] and h["hit"]
+    ]
+    return " · ".join(hits) if hits else "无生效催化剂命中（低分进池或仅靠同分排序）"
+
+
 # ── 进度上报 ────────────────────────────────────────────────────────────────
 
 # 每个阶段占整体进度的百分比区间（累进，非磁盘/时间估算，仅供 UI 展示）

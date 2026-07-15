@@ -111,6 +111,62 @@ def get_history() -> list[dict[str, Any]]:
     return [entry for _, entry in entries]
 
 
+def _action_plan_summary_from_state(state: dict[str, Any]) -> dict[str, Any] | None:
+    plan = state.get("action_plan")
+    if not isinstance(plan, dict) or not plan.get("rating"):
+        return None
+    return {
+        "rating": str(plan.get("rating") or "").strip(),
+        "holders_action": str(plan.get("holders_action") or "").strip() or None,
+        "non_holders_action": str(plan.get("non_holders_action") or "").strip() or None,
+        "horizon": str(plan.get("horizon") or "").strip() or None,
+        "summary": str(plan.get("summary") or "").strip() or None,
+    }
+
+
+def lookup_latest_action_plans(
+    tickers: list[str] | tuple[str, ...] | set[str],
+) -> dict[str, dict[str, Any]]:
+    """为给定代码取「最近一次」完成分析的操作建议摘要（按日志 mtime）。
+
+    有 ``action_plan`` 时返回结构化字段；否则至少回填 sidebar ``signal``。
+    Key 为 uppercase ticker。
+    """
+    wanted = {str(t).strip().upper() for t in tickers if str(t).strip()}
+    if not wanted:
+        return {}
+
+    found: dict[str, dict[str, Any]] = {}
+    for entry in get_history():
+        ticker = str(entry.get("ticker") or "").strip().upper()
+        if ticker not in wanted or ticker in found:
+            continue
+        path = entry.get("path") or ""
+        summary: dict[str, Any] = {
+            "rating": None,
+            "holders_action": None,
+            "non_holders_action": None,
+            "horizon": None,
+            "summary": None,
+            "signal": entry.get("signal") or "N/A",
+            "date": entry.get("date"),
+            "path": path,
+        }
+        try:
+            with open(path, encoding="utf-8") as f:
+                state = json.load(f)
+            if isinstance(state, dict):
+                plan = _action_plan_summary_from_state(state)
+                if plan:
+                    summary.update(plan)
+        except (OSError, json.JSONDecodeError, TypeError):
+            pass
+        found[ticker] = summary
+        if len(found) >= len(wanted):
+            break
+    return found
+
+
 def _completed_key(ticker: str, trade_date: str) -> tuple[str, str]:
     return ticker.upper(), trade_date
 

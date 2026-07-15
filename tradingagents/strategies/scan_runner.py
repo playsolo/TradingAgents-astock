@@ -57,6 +57,14 @@ def is_process_alive(pid: int | None) -> bool:
 
 def result_dict_from_scan(result: ScanResult) -> dict[str, Any]:
     """Serialize ScanResult into the Web UI payload shape."""
+    from tradingagents.strategies.value_swing import (
+        l2_factor_hits,
+        l2_score_max,
+        selection_rules_snapshot,
+        why_selected_line,
+    )
+
+    score_max = l2_score_max()
     return {
         "ok": True,
         "scan_date": result.scan_date,
@@ -65,6 +73,8 @@ def result_dict_from_scan(result: ScanResult) -> dict[str, Any]:
         "l1a_passed": result.l1a_passed,
         "l1b_passed": result.l1b_passed,
         "l2_passed": result.l2_passed,
+        "rules": selection_rules_snapshot(),
+        "score_max": score_max,
         "candidates": [
             {
                 "code": c.code,
@@ -73,15 +83,19 @@ def result_dict_from_scan(result: ScanResult) -> dict[str, Any]:
                 "pe_ttm": c.pe_ttm,
                 "pb": c.pb,
                 "signal_score": c.signal_score,
+                "score_max": score_max,
                 "debt_ratio": round(c.debt_ratio * 100, 1) if c.debt_ratio else None,
                 "revenue_growth": (
                     round(c.revenue_growth * 100, 1) if c.revenue_growth else None
                 ),
+                "northbound_net_3d": c.northbound_net_3d,
                 "above_ma20": c.above_ma20,
                 "near_ma250": c.near_ma250,
                 "news_found": c.news_found,
                 "hot_topic_match": c.hot_topic_match,
                 "concept_active": c.concept_active,
+                "factor_hits": l2_factor_hits(c),
+                "why": why_selected_line(c),
             }
             for c in result.candidates
         ],
