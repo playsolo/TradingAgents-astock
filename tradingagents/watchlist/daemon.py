@@ -93,9 +93,8 @@ def run_slot_once(
     stores = [store] if store is not None else list(iter_user_stores())
     observed: dict[str, Any] = {}
     for s in stores:
-        observed.update(
-            observe_all(s, llm=llm, slot_key=key, analysis_config=cfg or None)
-        )
+        batch = observe_all(s, llm=llm, slot_key=key, analysis_config=cfg or None)
+        observed.update(batch.alerts)
     return {"slot_key": key, "observed": observed}
 
 

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -17,6 +18,35 @@ from tradingagents.watchlist.snapshot import fetch_snapshot
 from tradingagents.watchlist.store import WatchlistStore
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ObserveBatchResult:
+    """``observe_all`` 批处理结果：成功 / 过期跳过 / 失败分开计。"""
+
+    alerts: dict[str, list[Alert]] = field(default_factory=dict)
+    observed: list[str] = field(default_factory=list)
+    skipped_expired: list[str] = field(default_factory=list)
+    failed: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def alert_count(self) -> int:
+        return sum(len(a) for a in self.alerts.values())
+
+
+def format_observe_batch_summary(result: ObserveBatchResult) -> str:
+    """观察全部结束后给 UI / 日志用的一行摘要。"""
+    parts = [f"已观察 {len(result.observed)} 只"]
+    if result.alert_count:
+        parts.append(f"新告警 {result.alert_count} 条")
+    else:
+        parts.append("无新告警")
+    if result.skipped_expired:
+        parts.append(f"跳过过期 {len(result.skipped_expired)} 只")
+    if result.failed:
+        failed_list = "、".join(result.failed)
+        parts.append(f"失败 {len(result.failed)} 只：{failed_list}")
+    return "；".join(parts)
 
 
 def _mirror_alerts_to_inbox(ticker: str, alerts: list[Alert]) -> None:
@@ -138,21 +168,34 @@ def observe_all(
     llm: Any = None,
     slot_key: str | None = None,
     analysis_config: dict[str, Any] | None = None,
-) -> dict[str, list[Alert]]:
-    """跑一遍全部 enabled 且未过期的标的。"""
-    results: dict[str, list[Alert]] = {}
+    now: datetime | None = None,
+) -> ObserveBatchResult:
+    """串行跑一遍全部 enabled 且未过期的标的；单票失败跳过继续。
+
+    手动「观察全部」请传入新的 ``slot_key``（如 ``manual-batch-…``）以强制重跑。
+    """
+    dt = now or datetime.now()
+    out = ObserveBatchResult()
     for item in store.list_items():
         if not item.enabled:
             continue
+        ticker = item.baseline.ticker
+        if is_action_validity_expired(item.baseline, dt):
+            out.skipped_expired.append(ticker)
+            continue
         try:
-            results[item.baseline.ticker] = observe_item(
+            alerts = observe_item(
                 item,
                 store=store,
                 llm=llm,
                 slot_key=slot_key,
+                now=dt,
                 analysis_config=analysis_config,
             )
+            out.alerts[ticker] = alerts
+            out.observed.append(ticker)
         except Exception as e:
-            logger.exception("observe failed for %s: %s", item.baseline.ticker, e)
-            results[item.baseline.ticker] = []
-    return results
+            logger.exception("observe failed for %s: %s", ticker, e)
+            out.failed[ticker] = str(e)
+            out.alerts[ticker] = []
+    return out

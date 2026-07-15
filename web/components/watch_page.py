@@ -54,11 +54,55 @@ def render_watch_page() -> None:
     )
     st.warning("港股 / 美股尚未支持。本功能仅供研究，不构成投资建议。")
 
+    batch_msg = st.session_state.pop("watch_batch_summary", None)
+    batch_has_fail = bool(st.session_state.pop("watch_batch_has_fail", None))
+    if batch_msg:
+        if batch_has_fail:
+            st.warning(batch_msg)
+        else:
+            st.success(batch_msg)
+
     store = current_watch_store()
     items = store.list_items()
     if not items:
         st.info("暂无观察标的。完成分析后在报告页点击「加入观察池」。")
         return
+
+    eligible = [
+        i for i in items if i.enabled and not is_action_validity_expired(i.baseline)
+    ]
+    if eligible:
+        if st.button(
+            f"观察全部（{len(eligible)}）",
+            key="watch_observe_all",
+            use_container_width=True,
+            help="对启用且未过期的标的串行轻量观察；过期票请逐只「完整再分析」。",
+        ):
+            with st.spinner(f"正在观察全部（{len(eligible)} 只）…"):
+                from tradingagents.watchlist.observe import (
+                    format_observe_batch_summary,
+                    observe_all,
+                )
+                from tradingagents.watchlist.scheduler import build_quick_llm
+
+                cfg = {
+                    "llm_provider": st.session_state.get("llm_provider", "deepseek"),
+                    "quick_think_llm": st.session_state.get(
+                        "quick_think_llm", "deepseek-chat"
+                    ),
+                    "backend_url": st.session_state.get("llm_base_url") or None,
+                }
+                slot = f"manual-batch-{datetime.now().isoformat(timespec='seconds')}"
+                result = observe_all(
+                    store,
+                    llm=build_quick_llm(cfg),
+                    slot_key=slot,
+                )
+                st.session_state["watch_batch_summary"] = format_observe_batch_summary(
+                    result
+                )
+                st.session_state["watch_batch_has_fail"] = bool(result.failed)
+            st.rerun()
 
     for item in items:
         b = item.baseline
