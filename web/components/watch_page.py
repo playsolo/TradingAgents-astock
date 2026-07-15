@@ -23,6 +23,23 @@ _SCENARIO_UI = (
 )
 
 
+def _fmt_observed_at(raw: str | None) -> str:
+    """格式化观察时间戳。
+
+    当天的时间显示为「今日 HH:MM:SS」，非当天显示原格式。
+    """
+    if raw is None:
+        return "尚未执行"
+    try:
+        dt = datetime.fromisoformat(raw)
+        today = date.today()
+        if dt.date() == today:
+            return f"今日 {dt.strftime('%H:%M:%S')}"
+        return raw
+    except (ValueError, TypeError):
+        return raw
+
+
 def render_watch_page() -> None:
     st.markdown("### 📡 观察池")
     st.caption(
@@ -56,7 +73,7 @@ def render_watch_page() -> None:
             c1, c2, c3 = st.columns(3)
             c1.metric("基准价", f"{b.baseline_price:g}" if b.baseline_price else "—")
             c2.metric("分析日", b.trade_date)
-            c3.metric("上次观察", item.last_observed_at or "尚未执行")
+            c3.metric("上次观察", _fmt_observed_at(item.last_observed_at))
 
             _render_observation_block(item)
 
