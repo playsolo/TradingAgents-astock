@@ -186,19 +186,9 @@ def main() -> int:
             merged = graph.graph.invoke(init_state, **args)
 
         final_state = _serialize(merged)
-        signal = graph.process_signal(merged.get("final_trade_decision") or "")
-        # Persist via upstream helpers when available (best-effort).
-        try:
-            graph.curr_state = merged
-            graph._log_state(trade_date, merged)  # noqa: SLF001 — intentional mirror of propagate
-            graph.memory_log.store_decision(
-                ticker=ticker,
-                trade_date=trade_date,
-                final_trade_decision=merged.get("final_trade_decision") or "",
-            )
-        except Exception:
-            pass
-        _emit("complete", signal=signal, state=final_state)
+        # Same post-analysis action_plan extract + disk log as the CN path.
+        signal = graph.finalize_graph_run(ticker, trade_date, merged)
+        _emit("complete", signal=signal, state=_serialize(merged))
         return 0
     except Exception as exc:
         _emit("error", message=f"{exc}\n{traceback.format_exc()[-1500:]}")

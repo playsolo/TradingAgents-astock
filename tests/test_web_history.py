@@ -9,6 +9,47 @@ import threading
 from web import history
 
 
+def test_extract_signal_prefers_labeled_underweight_over_body_buy():
+    """Sidebar must follow 最终评级, not debate prose mentioning 买入.
+
+    Regression: markdown ``**最终评级**：**减持**`` failed the colon regex,
+    then the first whole-text ``买入`` (bull case) was shown as Buy while
+    the report body recommended Underweight / 减持.
+    """
+    state = {
+        "final_trade_decision": (
+            "**投资决策备忘录**\n\n"
+            "**最终评级**：**减持（Underweight）**\n\n"
+            "牛方主张买入。熊方主张卖出。\n"
+            "**执行方向**：不买入\n"
+        ),
+    }
+    assert history.extract_signal(state) == "Sell"
+
+
+def test_extract_signal_reads_plain_jianchi_label():
+    assert (
+        history.extract_signal({"final_trade_decision": "最终评级：减持\n降低仓位"})
+        == "Sell"
+    )
+
+
+def test_extract_signal_hold_label_not_fooled_by_jianchi_prose():
+    assert (
+        history.extract_signal(
+            {"final_trade_decision": "最终评级：持有（无减持计划）\n继续观察"}
+        )
+        == "Hold"
+    )
+
+
+def test_extract_signal_reads_prefixed_jianchi_label():
+    assert (
+        history.extract_signal({"final_trade_decision": "最终评级：建议减持\n降低敞口"})
+        == "Sell"
+    )
+
+
 def test_get_history_sorted_by_completion_mtime_desc(tmp_path, monkeypatch):
     """Sidebar history should list analyses by finish time, not trade date."""
     logs = tmp_path / "logs"

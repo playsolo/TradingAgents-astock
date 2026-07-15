@@ -63,6 +63,11 @@ _FONT_CANDIDATES = [
         "/usr/share/fonts/truetype/noto/NotoSansSC-Regular.ttf",
         "/usr/share/fonts/truetype/noto/NotoSansSC-Bold.ttf",
     ),
+    # Rocky Linux / Fedora / RHEL — Noto CJK Variable Font
+    (
+        "/usr/share/fonts/google-noto-sans-cjk-vf-fonts/NotoSansCJK-VF.ttc",
+        "/usr/share/fonts/google-noto-sans-cjk-vf-fonts/NotoSansCJK-VF.ttc",
+    ),
     (
         "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
         "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
@@ -108,6 +113,8 @@ _FONT_FILE_PATTERNS = (
     "SourceHanSansSC-Regular.otf",
     "SourceHanSansSC-Bold.otf",
     "DroidSansFallbackFull.ttf",
+    "NotoSansCJK-VF.ttc",
+    "NotoSerifCJK-VF.ttc",
 )
 
 _CJK_FONT_MARKERS = (
@@ -129,12 +136,18 @@ _TTC_SC_FACE_INDEXES = {
     "NotoSansCJK-Bold.ttc": 2,
     "NotoSerifCJK-Regular.ttc": 2,
     "NotoSerifCJK-Bold.ttc": 2,
+    # Variable Font (VF) — Rocky Linux / Fedora
+    "NotoSansCJK-VF.ttc": 2,
+    "NotoSerifCJK-VF.ttc": 2,
 }
 
 _SINGLE_FACE_BOLD_FALLBACKS = {
     "wqy-microhei.ttc",
     "wqy-zenhei.ttc",
     "DroidSansFallbackFull.ttf",
+    # VF fonts use the same file for all weights
+    "NotoSansCJK-VF.ttc",
+    "NotoSerifCJK-VF.ttc",
 }
 
 
@@ -247,6 +260,9 @@ def _discover_cjk_fonts() -> tuple[Path, Path] | None:
         or discovered.get("NotoSansSC-Regular.ttf")
         or discovered.get("SourceHanSansSC-Regular.otf")
         or discovered.get("DroidSansFallbackFull.ttf")
+        # VF fonts (Rocky Linux / Fedora / RHEL)
+        or discovered.get("NotoSansCJK-VF.ttc")
+        or discovered.get("NotoSerifCJK-VF.ttc")
     )
     if regular and regular.name in _SINGLE_FACE_BOLD_FALLBACKS:
         return regular, regular

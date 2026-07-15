@@ -271,6 +271,7 @@ _PERSIST_KEYS = (
     "risk_debate_state",
     "investment_plan",
     "final_trade_decision",
+    "action_plan",
 )
 
 

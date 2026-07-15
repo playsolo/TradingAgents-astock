@@ -277,15 +277,50 @@ def load_analysis(path: str) -> dict[str, Any]:
         return json.load(f)
 
 
+def _map_rating_label(
+    label: str,
+    cn_map: dict[str, str],
+    rating_map: dict[str, str],
+) -> str | None:
+    """Map a rating label fragment (Chinese and/or English) to Buy/Sell/Hold.
+
+    Prefers an English tier token (e.g. Underweight). For Chinese, uses the
+    earliest rating word in the label so ``持有（无减持计划）`` stays Hold while
+    ``建议减持`` still maps to Sell.
+    """
+    up = label.upper()
+    for key, en in rating_map.items():
+        if re.search(rf"\b{key}\b", up):
+            return en
+
+    best: tuple[int, str] | None = None
+    for cn, en in cn_map.items():
+        idx = label.find(cn)
+        if idx >= 0 and (best is None or idx < best[0]):
+            best = (idx, en)
+    return best[1] if best else None
+
+
 def extract_signal(state: dict[str, Any]) -> str:
-    """Extract the short signal (Buy/Sell/Hold) from a final state dict."""
-    import re
+    """Extract the short signal (Buy/Sell/Hold) from a final state dict.
+
+    Prefers post-analysis ``action_plan.rating`` when present, then explicit
+    rating labels (``Rating:`` / ``最终评级``). Whole-text Chinese keyword
+    scans are limited to short snippets so debate prose like 「主张买入」
+    cannot override a labeled 「减持」.
+    """
+    plan = state.get("action_plan")
+    if isinstance(plan, dict) and plan.get("rating"):
+        from tradingagents.agents.utils.action_plan import rating_to_sidebar_signal
+
+        return rating_to_sidebar_signal(str(plan["rating"]))
 
     cn_map = {
         "买入": "Buy",
         "加仓": "Buy",
         "增持": "Buy",
         "卖出": "Sell",
+        "减持": "Sell",
         "减仓": "Sell",
         "清仓": "Sell",
         "持有": "Hold",
@@ -298,6 +333,12 @@ def extract_signal(state: dict[str, Any]) -> str:
         "UNDERWEIGHT": "Sell",
         "SELL": "Sell",
     }
+    # Long PM memos often recount bull/bear arguments; only scan bare keywords
+    # on short decision lines (e.g. saved "HOLD" / "最终评级：卖出").
+    # Exclude 减持 from unordered body scan — it appears in risk prose
+    # ("无减持计划") far more often than as a standalone decision word.
+    _body_cn_map = {k: v for k, v in cn_map.items() if k != "减持"}
+    _short_snippet_max = 120
 
     for field in (
         "final_trade_decision",
@@ -312,7 +353,7 @@ def extract_signal(state: dict[str, Any]) -> str:
 
         # Structured English rating line first
         m = re.search(
-            r"\*\*Rating\*\*\s*:\s*\*?\*?([A-Za-z]+)",
+            r"(?:\*\*)?Rating(?:\*\*)?\s*:\s*\*?\*?([A-Za-z]+)",
             cleaned,
             flags=re.IGNORECASE,
         )
@@ -321,22 +362,20 @@ def extract_signal(state: dict[str, Any]) -> str:
             if mapped:
                 return mapped
 
-        m = re.search(r"最终评级[：:]\s*\*?\*?\s*([^\n*]+)", cleaned)
+        # Allow markdown between label and value:
+        # **最终评级**：**减持（Underweight）**
+        m = re.search(r"最终评级[\s\*]*[：:][\s\*]*([^\n*]+)", cleaned)
         if m:
-            label = m.group(1).strip()
-            for cn, en in cn_map.items():
-                if cn in label:
-                    return en
-            up = label.upper()
-            for key, en in rating_map.items():
-                if key in up:
+            mapped = _map_rating_label(m.group(1).strip(), cn_map, rating_map)
+            if mapped:
+                return mapped
+
+        if len(cleaned) <= _short_snippet_max:
+            for cn, en in _body_cn_map.items():
+                if cn in cleaned:
                     return en
 
-        for cn, en in cn_map.items():
-            if cn in cleaned:
-                return en
-
-        for keyword in ("BUY", "SELL", "HOLD"):
-            if keyword in cleaned.upper():
-                return keyword.capitalize()
+            for keyword in ("BUY", "SELL", "HOLD"):
+                if keyword in cleaned.upper():
+                    return keyword.capitalize()
     return "N/A"

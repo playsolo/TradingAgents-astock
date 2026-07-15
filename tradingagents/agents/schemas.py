@@ -226,3 +226,74 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
     if decision.time_horizon:
         parts.extend(["", f"**Time Horizon**: {decision.time_horizon}"])
     return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Post-analysis action plan (second-pass extract from final PM prose)
+# ---------------------------------------------------------------------------
+
+
+class ActionPlanLevels(BaseModel):
+    """Price levels cited in the final plan. Missing numbers must stay null."""
+
+    reduce_low: Optional[float] = Field(
+        default=None,
+        description="Lower bound of the reduce/sell price zone, if stated.",
+    )
+    reduce_high: Optional[float] = Field(
+        default=None,
+        description="Upper bound of the reduce/sell price zone, if stated.",
+    )
+    stop_loss: Optional[float] = Field(
+        default=None,
+        description="Hard stop / forced-exit level for remaining holdings, if stated.",
+    )
+    watch_support: Optional[float] = Field(
+        default=None,
+        description="Key support / downside trigger to monitor, if stated.",
+    )
+    reentry_low: Optional[float] = Field(
+        default=None,
+        description="Lower bound of a contingent re-entry / buy zone for non-holders.",
+    )
+    reentry_high: Optional[float] = Field(
+        default=None,
+        description="Upper bound of a contingent re-entry / buy zone for non-holders.",
+    )
+
+
+class FinalActionPlan(BaseModel):
+    """Structured action JSON extracted from the final investment-plan section.
+
+    Produced by a dedicated post-analysis LLM pass so the sidebar and downstream
+    consumers no longer guess Buy/Sell from debate prose.
+    """
+
+    rating: PortfolioRating = Field(
+        description=(
+            "Final position rating from the plan header. Exactly one of Buy / "
+            "Overweight / Hold / Underweight / Sell (map 买入/增持/持有/减持/卖出)."
+        ),
+    )
+    holders_action: str = Field(
+        description=(
+            "What existing holders should do, short phrase, e.g. "
+            "'减仓30%-50%' / 'hold' / '清仓'."
+        ),
+    )
+    non_holders_action: str = Field(
+        description=(
+            "What non-holders should do, short phrase, e.g. '观望不买入' / 'wait'."
+        ),
+    )
+    levels: ActionPlanLevels = Field(
+        default_factory=ActionPlanLevels,
+        description="Numeric price levels explicitly stated in the plan; else null.",
+    )
+    horizon: Optional[str] = Field(
+        default=None,
+        description="Stated time horizon, e.g. '1-2w', if present.",
+    )
+    summary: str = Field(
+        description="One or two sentences capturing the core operational conclusion.",
+    )

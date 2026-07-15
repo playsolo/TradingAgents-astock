@@ -378,6 +378,27 @@ class TradingAgentsGraph:
         """Persist a completed run and clear its checkpoint."""
         self.curr_state = final_state
 
+        # Second-pass extract: structured action JSON from the final-plan section
+        # (not debate prose). Failure is non-fatal — heuristic signal still works.
+        plan = None
+        rating_to_sidebar_signal = None
+        try:
+            from tradingagents.agents.utils.action_plan import (
+                extract_action_plan,
+                rating_to_sidebar_signal as _rating_to_sidebar,
+            )
+
+            rating_to_sidebar_signal = _rating_to_sidebar
+            plan = extract_action_plan(
+                self.quick_thinking_llm,
+                str(final_state.get("final_trade_decision") or ""),
+            )
+            if plan:
+                final_state["action_plan"] = plan
+        except Exception:
+            logger.exception("Action plan extract raised; continuing without it")
+            plan = None
+
         # Log state to disk.
         self._log_state(trade_date, final_state)
 
@@ -394,6 +415,8 @@ class TradingAgentsGraph:
                 self.config["data_cache_dir"], company_name, str(trade_date)
             )
 
+        if plan and plan.get("rating") and rating_to_sidebar_signal is not None:
+            return rating_to_sidebar_signal(plan["rating"])
         return self.process_signal(final_state["final_trade_decision"])
 
     def close_graph_run(self) -> None:
@@ -462,6 +485,10 @@ class TradingAgentsGraph:
             "investment_plan": final_state["investment_plan"],
             "final_trade_decision": final_state["final_trade_decision"],
         }
+        if final_state.get("action_plan"):
+            self.log_states_dict[str(trade_date)]["action_plan"] = final_state[
+                "action_plan"
+            ]
 
         # Save to file. Reject ticker values that would escape the
         # results directory when joined as a path component.

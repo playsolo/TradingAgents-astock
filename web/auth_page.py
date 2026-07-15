@@ -60,6 +60,15 @@ def is_authenticated() -> bool:
     return bool(user and getattr(user, "is_authenticated", False))
 
 
+def get_current_username() -> str | None:
+    """Return the current user's username, or None if auth is disabled."""
+    mgr = _get_manager()
+    if mgr.disabled:
+        return None
+    user = get_current_user()
+    return user.username if user else None
+
+
 def get_current_user():
     """Return current User object or None."""
     return st.session_state.get(_SESSION_USER)
