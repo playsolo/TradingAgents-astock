@@ -33,13 +33,18 @@ import streamlit as st  # noqa: E402
 from tradingagents.default_config import DEFAULT_CONFIG  # noqa: E402
 
 from web.analysis_queue import (  # noqa: E402
+    AnalysisJob,
     format_restored_queue_blocked_notice,
     hydrate_queue,
     maybe_autostart_restored_queue,
     prepend_job,
+    set_begin_analysis_hook,
     take_next_job,
 )
-from web.components.progress_panel import render_running_progress  # noqa: E402
+from web.components.progress_panel import (  # noqa: E402
+    render_multi_progress,
+    render_running_progress,
+)
 from web.components.report_viewer import render_report  # noqa: E402
 from web.components.sidebar import render_sidebar, request_clear_ticker_input  # noqa: E402
 from web.components.watch_page import render_watch_page  # noqa: E402
@@ -51,7 +56,27 @@ from web.history import (  # noqa: E402
     load_analysis,
     record_incomplete_task,
 )
+from web.home_mode import (  # noqa: E402
+    HOME_MODE_KEY,
+    HOME_MODE_SCAN,
+    HOME_MODE_SINGLE,
+    resolve_idle_panel,
+    set_home_mode,
+)
 from web.navigation import apply_query_to_session  # noqa: E402
+from web.parallel_runs import (
+    active_runs,
+    add_tracker,
+    focused_ticker,
+    has_running,
+    remove_finished_tracker,
+    running_count,
+    set_focused_ticker,
+    slots_available,
+    stop_run_by_ticker,
+    pause_run_by_ticker,
+    resume_run_by_ticker,
+)
 from web.progress import ProgressTracker  # noqa: E402
 from web.runner import run_analysis_in_thread  # noqa: E402
 from tradingagents.watchlist.scheduler import start_watchlist_scheduler  # noqa: E402
@@ -232,6 +257,23 @@ st.markdown(
         color: #ff5a1f !important;
         border-bottom-color: #ff5a1f !important;
     }
+    /* Home mode switcher (replaces st.tabs which can stack panels on 1.59.x) */
+    div[data-testid="stRadio"] > div {
+        gap: 0.25rem !important;
+    }
+    div[data-testid="stRadio"] label[data-baseweb="radio"] {
+        background: transparent !important;
+        border-bottom: 2px solid transparent !important;
+        padding: 0.4rem 0.9rem !important;
+        color: #888 !important;
+    }
+    div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) {
+        color: #ff5a1f !important;
+        border-bottom-color: #ff5a1f !important;
+    }
+    div[data-testid="stRadio"] label[data-baseweb="radio"] > div:first-child {
+        display: none !important;
+    }
     div[data-testid="stDownloadButton"] button {
         background: #1a1a2e !important;
         border: 1px solid #ff5a1f !important;
@@ -297,7 +339,11 @@ def _infer_market(ticker: str, explicit: str | None = None) -> str:
 
 
 def _begin_analysis(start_req: dict) -> ProgressTracker:
-    """Create tracker + background thread for one analysis request."""
+    """Create tracker + background thread for one analysis request.
+
+    This is the single-start entry point (one job at a time).
+    In parallel mode it also adds the tracker to the active runs pool.
+    """
     market = _infer_market(start_req["ticker"], start_req.get("market"))
     st.session_state["analysis_market"] = market
 
@@ -317,7 +363,8 @@ def _begin_analysis(start_req: dict) -> ProgressTracker:
         trade_date=start_req["trade_date"],
         market=market,
     )
-    st.session_state["tracker"] = tracker
+    # Register into the parallel run pool.
+    add_tracker(st.session_state, tracker)
     st.session_state["viewing_history"] = None
     st.session_state["viewing_watchlist"] = False
     if start_req.get("watchlist_refresh"):
@@ -326,7 +373,6 @@ def _begin_analysis(start_req: dict) -> ProgressTracker:
             "trade_date": start_req["trade_date"],
         }
     else:
-        # 非观察池升级启动时清掉残留 pending，避免误回写基准
         st.session_state["watchlist_refresh_pending"] = None
     run_analysis_in_thread(
         ticker=start_req["ticker"],
@@ -337,6 +383,15 @@ def _begin_analysis(start_req: dict) -> ProgressTracker:
         extra_past_context=str(start_req.get("past_context") or ""),
     )
     return tracker
+
+
+def _begin_analysis_from_job(job: AnalysisJob) -> ProgressTracker:
+    """Start one analysis from an AnalysisJob (for parallel queue dispatch)."""
+    return _begin_analysis(job.to_start_request())
+
+
+# Register the hook so analysis_queue can start jobs without circular import.
+set_begin_analysis_hook(_begin_analysis_from_job)
 
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
@@ -358,7 +413,8 @@ if start_req:
 
 # ── Main area state machine ─────────────────────────────────────────────────
 
-tracker: ProgressTracker | None = st.session_state.get("tracker")
+# Only define a single-tracker ref for the auto-start block above; the
+# multi-run state machine uses active_runs() directly.
 viewing_history: str | None = st.session_state.get("viewing_history")
 viewing_watchlist: bool = bool(st.session_state.get("viewing_watchlist"))
 
@@ -413,37 +469,39 @@ def _consume_watchlist_refresh_pending(active: ProgressTracker) -> None:
         st.warning("完整再分析失败，观察池基准未更新。可修复后从观察池重试。")
 
 
-# Queue auto-advance must run even if the user navigated to 观察池 / 历史
-# while a serial job was finishing; otherwise the queue stalls.
-# Start the next job in-process (no start_analysis round-trip) so sidebar
-# cannot clobber the handoff on the following rerun.
-if tracker and not tracker.is_running and (tracker.is_complete or tracker.error):
-    _consume_watchlist_refresh_pending(tracker)
-    if tracker.is_complete:
-        next_job = take_next_job(st.session_state, finished_ticker=tracker.ticker)
-    else:
-        next_job = take_next_job(
-            st.session_state,
-            finished_ticker=tracker.ticker,
-            error=str(tracker.error),
+# ── Multi-run lifecycle: clean finished trackers, fill empty slots ──────
+if not st.session_state.get("_parallel_lifecycle_ran"):
+    st.session_state["_parallel_lifecycle_ran"] = True
+    need_rerun = False
+    for t in active_runs(st.session_state):
+        if t.is_complete or t.error:
+            need_rerun = True
+            _consume_watchlist_refresh_pending(t)
+            remove_finished_tracker(st.session_state, t.ticker, t.trade_date)
+
+    if need_rerun:
+        from web.parallel_runs import pop_and_start_queued_jobs
+
+        started = pop_and_start_queued_jobs(
+            st.session_state, _begin_analysis_from_job
         )
-    if next_job is not None:
-        try:
-            tracker = _begin_analysis(next_job.to_start_request())
+        if started:
             st.rerun()
-        except Exception as exc:  # noqa: BLE001
-            prepend_job(st.session_state, next_job)
-            st.session_state.pop("queue_advance_notice", None)
-            st.error(f"启动队列下一只失败，已放回队列队首：{exc}")
-    viewing_history = st.session_state.get("viewing_history")
-    viewing_watchlist = bool(st.session_state.get("viewing_watchlist"))
+
+st.session_state["_parallel_lifecycle_ran"] = False
 
 queue_notice = st.session_state.pop("queue_advance_notice", None)
 if queue_notice:
     st.info(queue_notice)
 
+# ── State routing ──────────────────────────────────────────────────────────
+
+_focus = focused_ticker(st.session_state) or ""
+_all_runs = active_runs(st.session_state)
+_any_running = has_running(st.session_state)
+
 # State 0.5: Watchlist observation page
-if viewing_watchlist and not (tracker and tracker.is_running):
+if viewing_watchlist and not _any_running:
     render_watch_page()
 
 # State 1: Viewing a historical analysis
@@ -455,7 +513,6 @@ elif viewing_history:
         trade_date = Path(viewing_history).stem.replace("full_states_log_", "")
 
         def _on_history_state_updated(updated: dict) -> None:
-            # Report JSON already persisted by regenerate_section; keep session coherent.
             st.session_state["viewing_history"] = viewing_history
 
         render_report(
@@ -470,50 +527,72 @@ elif viewing_history:
     except Exception as exc:
         st.error(f"加载失败: {exc}")
 
-# State 2: Analysis running — fragment polls progress; no sleep (keeps sidebar responsive)
-elif tracker and tracker.is_running:
-    render_running_progress()
+# State 2: Multi-run progress (when any run is active)
+elif _any_running:
+    render_multi_progress()
 
-# State 3: Analysis complete
-elif tracker and tracker.is_complete:
-    def _on_live_state_updated(updated: dict) -> None:
-        tracker.final_state = updated
-        st.session_state["tracker"] = tracker
+# State 3: Show a finished report (pick focused or last completed)
+elif _all_runs:
+    target = None
+    for t in _all_runs:
+        if t.ticker == _focus and (t.is_complete or t.error):
+            target = t
+            break
+    if target is None:
+        for t in reversed(_all_runs):
+            if t.is_complete or t.error:
+                target = t
+                break
+    if target is not None:
+        if target.error:
+            st.error(f"{target.ticker} 分析失败: {target.error}")
+            st.caption("已完成阶段保存在本地断点中。")
+        else:
+            def _on_live_state_updated(updated: dict) -> None:
+                target.final_state = updated
 
-    live_config = _build_config()
-    live_log = (
-        Path(live_config["results_dir"])
-        / tracker.ticker.upper()
-        / "TradingAgentsStrategy_logs"
-        / f"full_states_log_{tracker.trade_date}.json"
-    )
-    render_report(
-        tracker.final_state,
-        tracker.ticker,
-        tracker.trade_date,
-        tracker.signal,
-        elapsed=tracker.elapsed,
-        log_path=str(live_log) if live_log.exists() else None,
-        llm_config=live_config,
-        on_state_updated=_on_live_state_updated,
-    )
+            live_config = _build_config()
+            live_log = (
+                Path(live_config["results_dir"])
+                / target.ticker.upper()
+                / "TradingAgentsStrategy_logs"
+                / f"full_states_log_{target.trade_date}.json"
+            )
+            render_report(
+                target.final_state,
+                target.ticker,
+                target.trade_date,
+                target.signal,
+                elapsed=target.elapsed,
+                log_path=str(live_log) if live_log.exists() else None,
+                llm_config=live_config,
+                on_state_updated=_on_live_state_updated,
+            )
+    else:
+        st.info("所有分析任务已完成，无可用报告。")
 
-# State 4: Analysis errored
-elif tracker and tracker.error:
-    st.error(f"分析失败: {tracker.error}")
-    st.caption("已完成阶段会保存在本地断点中；修复模型额度或配置后，可以继续未完成的部分。")
-    if st.button("继续未完成任务", type="primary"):
-        st.session_state["start_analysis"] = {
-            "ticker": tracker.ticker,
-            "trade_date": tracker.trade_date,
-        }
-        st.session_state["viewing_history"] = None
-        st.rerun()
-
-# State 0: Idle — welcome screen with tabs for single-stock and strategy scan
+# State 0: Idle — exclusive single-stock / strategy-scan panels (no st.tabs;
+# Streamlit 1.59.x can stack all tab bodies after switch/widget rerun).
 else:
-    tab_single, tab_scan = st.tabs(["📈 单票分析", "📊 策略扫描"])
-    with tab_single:
+    if HOME_MODE_KEY not in st.session_state:
+        set_home_mode(st.session_state, HOME_MODE_SINGLE)
+
+    selected = st.radio(
+        "主页视图",
+        options=[HOME_MODE_SINGLE, HOME_MODE_SCAN],
+        format_func=lambda m: (
+            "📈 单票分析" if m == HOME_MODE_SINGLE else "📊 策略扫描"
+        ),
+        horizontal=True,
+        key=HOME_MODE_KEY,
+        label_visibility="collapsed",
+    )
+
+    if resolve_idle_panel(selected) == "scan":
+        from web.components.value_swing_scanner import render_value_swing_scanner
+
+        render_value_swing_scanner()
+    else:
         st.markdown(
             """
             <div style="
@@ -562,7 +641,3 @@ else:
             """,
             unsafe_allow_html=True,
         )
-
-    with tab_scan:
-        from web.components.value_swing_scanner import render_value_swing_scanner
-        render_value_swing_scanner()

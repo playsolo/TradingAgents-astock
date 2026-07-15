@@ -392,11 +392,36 @@ def take_next_job(
     error: str | None = None,
     store: AnalysisQueueStore | None = None,
 ) -> Optional[AnalysisJob]:
-    """Pop the next queued job and record a user-facing advance notice, if any.
+    """Legacy single-next-job interface for backward compat.
 
-    When a serial queue session drains (no next job), clear watch/history views so
-    the finished report is visible, and leave a completion notice.
+    In parallel mode this tries to fill empty slots via the registered hook.
+    When the hook is not set (e.g. unit tests), falls back to plain dequeue.
+    Returns the *first* started job (or None).
     """
+    fn = _make_begin_fn(store)
+    if fn is not None:
+        from web.parallel_runs import pop_and_start_queued_jobs
+
+        started = pop_and_start_queued_jobs(session, begin_analysis_fn=fn)
+        if started:
+            remaining = len(queue_snapshot(session))
+            suffix = f"（队列剩余 {remaining}）" if remaining else ""
+            first = started[0]
+            if error:
+                session["queue_advance_notice"] = (
+                    f"{finished_ticker} 失败（{error}），已跳过{'，新启动 ' + ', '.join(t.ticker for t in started) + suffix}"
+                )
+            else:
+                session["queue_advance_notice"] = (
+                    f"{finished_ticker} 已完成，新启动 "
+                    + ', '.join(t.ticker for t in started)
+                    + suffix
+                )
+            session["viewing_history"] = None
+            session["viewing_watchlist"] = False
+            return first
+
+    # Fallback: plain dequeue (works without hook, e.g. unit tests).
     next_job = advance_queue(session, store=store)
     if next_job is None:
         if is_serial_queue_session(session):
@@ -426,3 +451,17 @@ def take_next_job(
     session["viewing_history"] = None
     session["viewing_watchlist"] = False
     return next_job
+
+
+def _make_begin_fn(store: AnalysisQueueStore | None):
+    """Return a callable(AnalysisJob) -> ProgressTracker when the hook is registered."""
+    return _begin_analysis_hook
+
+
+_begin_analysis_hook: Callable[[AnalysisJob], ProgressTracker] | None = None
+
+
+def set_begin_analysis_hook(fn: Callable[[AnalysisJob], ProgressTracker]) -> None:
+    """Set the hook that starts one analysis run (called by ``web.app`` on import)."""
+    global _begin_analysis_hook
+    _begin_analysis_hook = fn

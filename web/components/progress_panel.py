@@ -1,4 +1,7 @@
-"""Real-time progress display for the analysis pipeline."""
+"""Real-time progress display for the analysis pipeline.
+
+Both single-run (legacy) and multi-run (parallel) render functions.
+"""
 
 from __future__ import annotations
 
@@ -30,34 +33,13 @@ def _split_stages(stages: list[dict[str, str]]) -> tuple[list[dict[str, str]], l
     analysts = [s for s in stages if s["id"] in analyst_ids]
     post = [s for s in stages if s["id"] not in analyst_ids]
     if not analysts:
-        # Fallback: first half / second half
         mid = max(1, len(stages) // 2)
         return stages[:mid], stages[mid:]
     return analysts, post
 
 
-@st.fragment(run_every=PROGRESS_POLL_SECONDS)
-def render_running_progress() -> None:
-    """Poll progress without blocking the script runner.
-
-    Unlike ``time.sleep`` + ``st.rerun()``, fragment ticks only re-run this
-    block, so sidebar widget clicks (e.g. 加入分析队列) are handled immediately
-    on a full-app rerun instead of waiting for the poll sleep.
-    """
-    tracker = st.session_state.get("tracker")
-    if tracker is None:
-        return
-    if not tracker.is_running:
-        # Finished / errored during a fragment tick — refresh full app for
-        # report / error / queue advance UI.
-        st.rerun()
-        return
-    render_progress(tracker)
-
-
-def render_progress(tracker: ProgressTracker) -> None:
-    """Render the pipeline progress panel."""
-
+def _render_single_progress(tracker: ProgressTracker) -> None:
+    """Render the pipeline progress panel for one tracker."""
     stages = list(tracker.stages) if tracker.stages else list(PIPELINE_STAGES)
     market_tag = "美股" if getattr(tracker, "market", "CN") == "US" else "A股"
 
@@ -160,3 +142,124 @@ def render_progress(tracker: ProgressTracker) -> None:
             is_latest = (name == completed_reports[-1][0])
             with st.expander(f"{icon} {name}", expanded=is_latest):
                 st.markdown(report[:3000])
+
+
+@st.fragment(run_every=PROGRESS_POLL_SECONDS)
+def render_running_progress() -> None:
+    """Legacy single-tracker fragment — kept for backward compat.
+
+    In parallel mode the new ``render_multi_progress`` fragment is used instead.
+    """
+    tracker = st.session_state.get("tracker")
+    if tracker is None:
+        return
+    if not tracker.is_running:
+        st.rerun()
+        return
+    _render_single_progress(tracker)
+
+
+@st.fragment(run_every=PROGRESS_POLL_SECONDS)
+def render_multi_progress() -> None:
+    """Render progress cards for all active runs.
+
+    Each run shows a compact progress card. The focused run gets expanded detail.
+    """
+    from web.parallel_runs import (
+        active_runs,
+        focused_ticker,
+        set_focused_ticker,
+        take_snapshots,
+    )
+
+    snapshots = take_snapshots(st.session_state)
+    if not snapshots:
+        st.info("无进行中的分析任务。")
+        return
+
+    focus = focused_ticker(st.session_state) or snapshots[0].ticker
+
+    st.markdown(
+        f"""
+        <div style="text-align:center; margin:0.5rem 0;">
+            <span style="font-size:1.4rem; font-weight:700; color:#f5f1eb;">
+                并行分析中
+            </span>
+            <span style="font-size:0.9rem; color:#888; margin-left:0.5rem;">
+                {sum(1 for s in snapshots if s.is_running)} running
+                · {sum(1 for s in snapshots if s.is_complete)} done
+            </span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # ── Compact cards for each run ──────────────────────────────────────
+    for snap in snapshots:
+        is_focused = snap.ticker == focus
+        card_bg = "#1a1a2e" if is_focused else "#161616"
+        border = "1px solid #ff5a1f" if is_focused else "1px solid #2a2a2a"
+        pct = len(snap.completed_stages) / max(snap.total_stages, 1)
+        market_tag = "美股" if snap.market == "US" else "A股"
+
+        status_icon = "🟢" if snap.is_running else "✅" if snap.is_complete else "🔴"
+        signal_preview = f" · {snap.final_signal}" if snap.final_signal else ""
+
+        with st.container():
+            st.markdown(
+                f"""
+                <div style="
+                    background:{card_bg}; border:{border}; border-radius:8px;
+                    padding:0.6rem 1rem; margin:0.3rem 0; cursor:pointer;
+                " onclick="parent.document.querySelector('[data-testid=\\"stMarkdownContainer\\"]').click()">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <span style="font-size:1rem; font-weight:600; color:#f5f1eb;">
+                            {status_icon} {snap.ticker}
+                            <span style="font-size:0.75rem; color:#888; margin-left:0.5rem;">
+                                {market_tag} · {snap.trade_date}
+                                {signal_preview}
+                            </span>
+                        </span>
+                        <span style="font-size:0.8rem; color:#666;">
+                            {_format_time(snap.elapsed)}
+                        </span>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.progress(
+                pct,
+                text=f"{len(snap.completed_stages)}/{snap.total_stages} stages · LLM {snap.llm_calls}",
+            )
+
+            if snap.is_paused:
+                st.caption("已暂停")
+            if snap.error:
+                st.error(snap.error)
+
+            # Focus button
+            if is_focused:
+                col_info = st.columns([1, 1, 1, 1, 1])
+                col_info[0].metric("LLM", snap.llm_calls)
+                col_info[1].metric("Tools", snap.tool_calls)
+                col_info[2].metric("Tok In", f"{snap.tokens_in:,}")
+                col_info[3].metric("Tok Out", f"{snap.tokens_out:,}")
+
+                # Show stage reports if available
+                if snap.stage_reports:
+                    with st.expander("阶段报告", expanded=False):
+                        for stage_id, report in list(snap.stage_reports.items())[-3:]:
+                            st.markdown(f"**{stage_id}**")
+                            st.markdown(report[:1500])
+            else:
+                if st.button(f"聚焦 {snap.ticker}", key=f"focus_{snap.ticker}"):
+                    set_focused_ticker(st.session_state, snap.ticker)
+                    st.rerun()
+
+            st.divider()
+
+    # ── If nothing is running but snapshots remain, rerun to show reports ─
+    if all(not s.is_running for s in snapshots):
+        st.rerun()
+

@@ -21,17 +21,69 @@ def _results_dir() -> Path:
     return Path.home() / ".tradingagents" / "logs"
 
 
-def get_history() -> list[dict[str, str]]:
+def _lazy_signal(path: str) -> str:
+    """Read a small portion of the log file to extract signal without loading full JSON."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            state = json.load(f)
+        return extract_signal(state)
+    except Exception:
+        return "N/A"
+
+
+def _signal_group_key(signal: str) -> int:
+    """Sort key for signal groups: Buy first, then Sell, then Hold, then N/A."""
+    s = signal.upper() if signal else ""
+    if "BUY" in s:
+        return 0
+    if "SELL" in s:
+        return 1
+    if "HOLD" in s:
+        return 2
+    return 3
+
+
+def group_history_by_signal(
+    entries: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Group history entries by signal (Buy / Sell / Hold / N/A)."""
+    groups: dict[str, list[dict[str, Any]]] = {
+        "Buy": [],
+        "Sell": [],
+        "Hold": [],
+        "N/A": [],
+    }
+    for entry in entries:
+        sig = entry.get("signal", "N/A")
+        if sig in groups:
+            groups[sig].append(entry)
+        else:
+            groups["N/A"].append(entry)
+    return groups
+
+
+def signal_count_label(group: dict[str, list[dict[str, Any]]], total: int) -> str:
+    """Build a compact summary line, e.g. '共 42 条 · 买入12 持有18 卖出8'."""
+    parts = [f"共 {total} 条"]
+    for sig, display in [("Buy", "买入"), ("Sell", "卖出"), ("Hold", "持有")]:
+        n = len(group.get(sig, []))
+        if n:
+            parts.append(f"{display}{n}")
+    return "  ·  ".join(parts)
+
+
+def get_history() -> list[dict[str, Any]]:
     """Scan saved analysis logs and return a sorted list (newest first).
 
     Sorted by analysis completion time (log file mtime), not trade date.
-    Each entry: {"ticker": "300750", "date": "2026-05-12", "path": "/abs/path/...json"}
+    Each entry: {"ticker": "300750", "date": "2026-05-12", "path": "/abs/path/...json",
+                  "signal": "Buy" | "Sell" | "Hold" | "N/A"}
     """
     root = _results_dir()
     if not root.exists():
         return []
 
-    entries: list[tuple[float, dict[str, str]]] = []
+    entries: list[tuple[float, dict[str, Any]]] = []
     for log_file in root.rglob("full_states_log_*.json"):
         match = re.search(r"full_states_log_(\d{4}-\d{2}-\d{2})\.json$", log_file.name)
         if not match:
@@ -42,8 +94,17 @@ def get_history() -> list[dict[str, str]]:
             continue
         date = match.group(1)
         ticker = log_file.parent.parent.name
+        signal = _lazy_signal(str(log_file))
         entries.append(
-            (mtime, {"ticker": ticker, "date": date, "path": str(log_file)})
+            (
+                mtime,
+                {
+                    "ticker": ticker,
+                    "date": date,
+                    "path": str(log_file),
+                    "signal": signal,
+                },
+            )
         )
 
     entries.sort(key=lambda item: item[0], reverse=True)

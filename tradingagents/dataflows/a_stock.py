@@ -23,6 +23,7 @@ from io import StringIO
 import json as _json
 import os
 import logging
+import functools
 import math
 import random
 import re as _re
@@ -43,6 +44,26 @@ import requests as _requests
 from .utils import safe_ticker_component
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# TTL-Cached helpers (avoid redundant API calls within process lifetime)
+# ---------------------------------------------------------------------------
+
+_ttl_caches: dict[str, tuple[float, Any]] = {}
+_TTL_SECONDS = 300  # 5 minutes
+
+
+def _ttl_cache(key: str, ttl: int = _TTL_SECONDS) -> Any:
+    """Get cached value by key, or None if expired/missing."""
+    entry = _ttl_caches.get(key)
+    if entry is not None and time.time() - entry[0] < ttl:
+        return entry[1]
+    return None
+
+
+def _ttl_store(key: str, value: Any) -> None:
+    _ttl_caches[key] = (time.time(), value)
 
 
 # ---------------------------------------------------------------------------
@@ -381,13 +402,17 @@ _UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 # 东财系 HTTP 接口（push2 / push2his / datacenter-web / search-api / np-weblist）
 # 有风控：每秒 >5 次 / 单 IP 并发 ≥10 / 1 分钟 ≥200 次 / 5 分钟 ≥300 次 → 临时封 IP。
 # 多 Agent 投研跑批量分析时会高频请求东财，是被封的头号元凶。所有 eastmoney.com
-# 请求一律走 _em_get()：串行限流（最小间隔 + 随机抖动）+ 复用 Keep-Alive 会话 + 默认 UA。
+# 请求一律走 _em_get()：有限并发限流 + 复用 Keep-Alive 会话 + 默认 UA。
 # 注意：仅东财接口走此入口；mootdx(TCP) / 腾讯 / 新浪 / 同花顺 / 财联社 / 百度 等
 # 不限流（实测不封 IP 或风控极弱）。批量任务可调大 EM_MIN_INTERVAL 进一步降速。
 _EM_SESSION = _requests.Session()
 _EM_SESSION.headers.update({"User-Agent": _UA})
 # 两次东财请求最小间隔(秒)；批量多 Agent 场景可设环境变量 EM_MIN_INTERVAL=1.5~2 降速。
 _EM_MIN_INTERVAL = float(os.environ.get("EM_MIN_INTERVAL", "1.0"))
+# 最大并发东财请求数。3 路并行 × 1.0s 间隔 ≈ 3 QPS，仍远低于东财 5 QPS 封禁线。
+# 设环境变量 EM_MAX_CONCURRENT=1 恢复旧串行行为。
+_EM_MAX_CONCURRENT = int(os.environ.get("EM_MAX_CONCURRENT", "3"))
+_em_semaphore = threading.Semaphore(_EM_MAX_CONCURRENT)
 _em_last_call = [0.0]  # 模块级上次东财请求时间戳
 # SSL/连接闪断在东财 push2his 上偶发；短暂重试通常可恢复（如主力资金日 K）。
 _EM_MAX_ATTEMPTS = 3
@@ -404,37 +429,46 @@ def _em_get(url, params=None, headers=None, timeout=15, **kwargs):
     """东财统一请求入口：自动节流 + 复用 session + 默认 UA + 瞬态重试。
 
     所有 eastmoney.com 接口都应通过它请求，避免多 Agent 高频拉数据被封 IP。
-    串行限流：与上次东财请求间隔 < EM_MIN_INTERVAL 时 sleep 补足 + 0.1~0.5s 随机抖动。
+    有限并发限流：最多 _EM_MAX_CONCURRENT 个线程同时请求。
+    每个请求前等待确保距上次请求 ≥ _EM_MIN_INTERVAL + 0.1~0.5s 抖动。
     传入的 headers 会覆盖 session 默认 UA（用于保留各端点自己的 Referer/Origin）。
     SSL/连接/超时类错误最多重试 _EM_MAX_ATTEMPTS 次（指数退避）。
     """
-    last_exc: Exception | None = None
-    for attempt in range(_EM_MAX_ATTEMPTS):
+    acquired = _em_semaphore.acquire(timeout=30)
+    if not acquired:
+        raise TimeoutError("东财请求队列排队超时（30s），请降速或加大 EM_MAX_CONCURRENT。")
+
+    try:
         wait = _EM_MIN_INTERVAL - (time.time() - _em_last_call[0])
         if wait > 0:
             time.sleep(wait + random.uniform(0.1, 0.5))
-        try:
-            return _EM_SESSION.get(
-                url, params=params, headers=headers, timeout=timeout, **kwargs
-            )
-        except _EM_RETRY_EXCEPTIONS as exc:
-            last_exc = exc
-            if attempt + 1 >= _EM_MAX_ATTEMPTS:
-                break
-            delay = _EM_RETRY_BASE_DELAY * (2**attempt) + random.uniform(0.0, 0.2)
-            logger.warning(
-                "eastmoney request failed (%s), retry %d/%d in %.1fs: %s",
-                type(exc).__name__,
-                attempt + 1,
-                _EM_MAX_ATTEMPTS - 1,
-                delay,
-                url,
-            )
-            time.sleep(delay)
-        finally:
-            _em_last_call[0] = time.time()
-    assert last_exc is not None
-    raise last_exc
+
+        last_exc: Exception | None = None
+        for attempt in range(_EM_MAX_ATTEMPTS):
+            try:
+                return _EM_SESSION.get(
+                    url, params=params, headers=headers, timeout=timeout, **kwargs
+                )
+            except _EM_RETRY_EXCEPTIONS as exc:
+                last_exc = exc
+                if attempt + 1 >= _EM_MAX_ATTEMPTS:
+                    break
+                delay = _EM_RETRY_BASE_DELAY * (2**attempt) + random.uniform(0.0, 0.2)
+                logger.warning(
+                    "eastmoney request failed (%s), retry %d/%d in %.1fs: %s",
+                    type(exc).__name__,
+                    attempt + 1,
+                    _EM_MAX_ATTEMPTS - 1,
+                    delay,
+                    url,
+                )
+                time.sleep(delay)
+            finally:
+                _em_last_call[0] = time.time()
+        assert last_exc is not None
+        raise last_exc
+    finally:
+        _em_semaphore.release()
 
 
 def _eastmoney_datacenter(
@@ -1504,6 +1538,11 @@ def get_global_news(
     limit: Annotated[int, "Max articles"] = 10,
 ) -> str:
     """Get China/global financial news via direct HTTP (CLS + Eastmoney)."""
+    # Cache key: same parameters yield same content within TTL.
+    cache_key = f"global_news:{curr_date}:{look_back_days}:{limit}"
+    cached = _ttl_cache(cache_key)
+    if cached is not None:
+        return cached
     start_dt = datetime.strptime(curr_date, "%Y-%m-%d") - relativedelta(
         days=look_back_days
     )
@@ -1588,10 +1627,12 @@ def get_global_news(
             news_str += f"{snippet}\n"
         news_str += "\n"
 
-    return (
+    result = (
         f"## China & Global Market News, from {start_date} to {curr_date}:\n\n"
         + news_str
     )
+    _ttl_store(cache_key, result)
+    return result
 
 
 # ---- 9. get_insider_transactions ----
@@ -1836,6 +1877,11 @@ def get_hot_stocks(
     if not curr_date or curr_date.strip() == "":
         curr_date = datetime.now().strftime("%Y-%m-%d")
 
+    cache_key = f"hot_stocks:{curr_date}"
+    cached = _ttl_cache(cache_key)
+    if cached is not None:
+        return cached
+
     try:
         url = (
             f"http://zx.10jqka.com.cn/event/api/getharden/"
@@ -1896,7 +1942,9 @@ def get_hot_stocks(
             for tag, n in cnt.most_common(15):
                 lines.append(f"  {tag}: {n} stocks")
 
-        return "\n".join(lines)
+        result = "\n".join(lines)
+        _ttl_store(cache_key, result)
+        return result
 
     except Exception as e:
         return f"Error fetching hot stocks for {curr_date}: {str(e)}"

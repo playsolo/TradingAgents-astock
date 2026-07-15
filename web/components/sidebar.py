@@ -28,6 +28,7 @@ from web.history import (
     record_incomplete_task,
     signal_count_label,
 )
+from web.home_mode import HOME_MODE_SCAN, set_home_mode
 from web.navigation import navigate
 from web.parallel_runs import (
     active_runs,
@@ -510,7 +511,8 @@ def render_sidebar() -> None:
             use_container_width=True,
             help="全市场 → 流动性/估值筛选 → 催化剂评分 → 推荐分级",
         ):
-            navigate("home")  # 回到主页（在扫描 tab 中展示）
+            set_home_mode(st.session_state, HOME_MODE_SCAN)
+            navigate("home")
 
         st.markdown("#### 观察")
         from tradingagents.watchlist.store import default_store
