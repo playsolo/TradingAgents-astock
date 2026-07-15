@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import html as html_lib
 import logging
 import time
 from datetime import datetime
@@ -53,6 +54,12 @@ def _enqueue_candidates(candidates: list[dict]):
     return added
 
 
+# 候选磁贴网格：按主栏宽度 auto-fill，最多 3 列。
+_CARD_GRID_MIN_PX = 340
+_CARD_GRID_MAX_COLS = 3
+_CARD_GRID_GAP_PX = 12
+
+
 def _build_recommendation_bar(candidate: dict) -> tuple[str, str, str]:
     """根据 L2 信号分构建中文推荐标签 + 颜色 + 图标。
 
@@ -68,73 +75,102 @@ def _build_recommendation_bar(candidate: dict) -> tuple[str, str, str]:
     return "待观察", "#555555", "🔍"
 
 
-def _render_candidate_card(candidate: dict, index: int):
-    """渲染一张候选股票卡片。"""
-    label, color, icon = _build_recommendation_bar(candidate)
-    code = candidate["code"]
-    name = candidate.get("name") or code
-    score = candidate["signal_score"]
-
-    # 信号标签
-    signals = []
-    if candidate["above_ma20"]:
+def _candidate_signal_labels(candidate: dict) -> list[str]:
+    """提取卡片上展示的短标签（技术 / 催化）。"""
+    signals: list[str] = []
+    if candidate.get("above_ma20"):
         signals.append("站上MA20")
-    if candidate["near_ma250"]:
+    if candidate.get("near_ma250"):
         signals.append("接近年线")
     if candidate.get("revenue_growth") and candidate["revenue_growth"] > 0:
         signals.append(f"营收+{candidate['revenue_growth']:.0f}%")
     if candidate.get("debt_ratio") is not None:
         signals.append(f"负债{candidate['debt_ratio']:.0f}%")
     if candidate.get("news_found"):
-        signals.append("📰有新闻")
+        signals.append("有新闻")
     if candidate.get("hot_topic_match"):
-        signals.append("🔥热点题材")
+        signals.append("热点题材")
     if candidate.get("concept_active"):
-        signals.append("🧠概念活跃")
+        signals.append("概念活跃")
+    return signals
 
-    st.markdown(
-        f"""
-        <div style="
-            background: linear-gradient(135deg, #1a1a1a, #222222);
-            border: 1px solid {color}44;
-            border-radius: 12px;
-            padding: 16px;
-            margin-bottom: 12px;
-        ">
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-                <div>
-                    <span style="font-size: 1.4rem;">{icon}</span>
-                    <span style="
-                        color: {color};
-                        font-weight: 700;
-                        font-size: 0.85rem;
-                        background: {color}22;
-                        padding: 2px 10px;
-                        border-radius: 20px;
-                        margin-left: 8px;
-                    ">{label}</span>
-                    <span style="
-                        color: #ffffff;
-                        font-weight: 700;
-                        font-size: 1.1rem;
-                        margin-left: 10px;
-                    ">{code}</span>
-                    <span style="color: #aaaaaa; font-size: 0.9rem; margin-left: 6px;">{name}</span>
-                </div>
-                <div style="color: {color}; font-weight: 700; font-size: 1.2rem;">
-                    信号 {score}/10
-                </div>
-            </div>
-            <div style="display: flex; gap: 16px; margin-top: 10px; flex-wrap: wrap;">
-                <span style="color: #888; font-size: 0.8rem;">PE {candidate['pe_ttm']:.1f}x</span>
-                <span style="color: #888; font-size: 0.8rem;">PB {candidate['pb']:.1f}x</span>
-                <span style="color: #888; font-size: 0.8rem;">价 {candidate['price']:.2f}</span>
-                {''.join(f'<span style="color: #ff8c42; font-size: 0.8rem;">{s}</span>' for s in signals[:4])}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+
+def _candidate_card_html(candidate: dict) -> str:
+    """生成单张竖排磁贴 HTML（供自适应网格使用）。"""
+    label, color, icon = _build_recommendation_bar(candidate)
+    code = html_lib.escape(str(candidate["code"]))
+    name = html_lib.escape(str(candidate.get("name") or candidate["code"]))
+    score = candidate["signal_score"]
+    signals = _candidate_signal_labels(candidate)[:4]
+    signal_html = "".join(
+        f'<span style="color:#ff8c42;font-size:0.75rem;background:#ff8c4218;'
+        f'padding:2px 8px;border-radius:999px;">{html_lib.escape(s)}</span>'
+        for s in signals
     )
+    return f"""
+    <div style="
+        background:linear-gradient(160deg,#1a1a1a,#222);
+        border:1px solid {color}44;
+        border-radius:12px;
+        padding:14px 16px;
+        height:100%;
+        box-sizing:border-box;
+        display:flex;
+        flex-direction:column;
+        gap:10px;
+    ">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+        <span style="
+            color:{color};font-weight:700;font-size:0.75rem;
+            background:{color}22;padding:2px 8px;border-radius:999px;
+            white-space:nowrap;
+        ">{icon} {html_lib.escape(label)}</span>
+        <span style="color:{color};font-weight:700;font-size:1.05rem;white-space:nowrap;">
+          信号 {score}/10
+        </span>
+      </div>
+      <div>
+        <div style="color:#fff;font-weight:700;font-size:1.15rem;line-height:1.2;">{code}</div>
+        <div style="color:#aaa;font-size:0.85rem;margin-top:2px;
+                    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{name}</div>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:10px 14px;color:#888;font-size:0.8rem;">
+        <span>PE {candidate['pe_ttm']:.1f}x</span>
+        <span>PB {candidate['pb']:.1f}x</span>
+        <span>价 {candidate['price']:.2f}</span>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:auto;">
+        {signal_html}
+      </div>
+    </div>
+    """
+
+
+def _candidate_grid_html(candidates: list[dict]) -> str:
+    """把多张磁贴包进按可视宽度自适应（最多 3 列）的 CSS Grid。"""
+    if not candidates:
+        return ""
+    # max(minPx, 100%/N - gap) 作为 track 下限：窄屏 1 列，加宽后到 2/3，不再超过 3 列。
+    min_track = (
+        f"max({_CARD_GRID_MIN_PX}px, "
+        f"calc(100% / {_CARD_GRID_MAX_COLS} - {_CARD_GRID_GAP_PX}px))"
+    )
+    cards = "".join(_candidate_card_html(c) for c in candidates)
+    return f"""
+    <div style="
+        display:grid;
+        grid-template-columns:repeat(auto-fill, minmax({min_track}, 1fr));
+        gap:{_CARD_GRID_GAP_PX}px;
+        margin-bottom:8px;
+    ">{cards}</div>
+    """
+
+
+def _render_candidate_grid(candidates: list[dict]) -> None:
+    """渲染一组候选股票为自适应多列网格。"""
+    html = _candidate_grid_html(candidates)
+    if html:
+        st.markdown(html, unsafe_allow_html=True)
 
 
 def _render_funnel_stats(result: dict):
@@ -180,29 +216,25 @@ def render_scan_results(candidates: list[dict]):
     # 强烈推荐
     if strong_buy:
         st.subheader("🥇 强烈推荐")
-        for i, c in enumerate(strong_buy):
-            _render_candidate_card(c, i)
+        _render_candidate_grid(strong_buy)
         st.divider()
 
     # 推荐
     if buy:
         st.subheader("🥈 推荐")
-        for i, c in enumerate(buy):
-            _render_candidate_card(c, i)
+        _render_candidate_grid(buy)
         st.divider()
 
     # 关注
     if watch:
         st.subheader("📋 关注")
         with st.expander(f"展开 {len(watch)} 只关注股票", expanded=False):
-            for i, c in enumerate(watch):
-                _render_candidate_card(c, i)
+            _render_candidate_grid(watch)
 
     # 其他
     if other:
         with st.expander(f"待观察 ({len(other)} 只)", expanded=False):
-            for i, c in enumerate(other):
-                _render_candidate_card(c, i)
+            _render_candidate_grid(other)
 
     # 操作按钮
     col1, col2 = st.columns([1, 5])
