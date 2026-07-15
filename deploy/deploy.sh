@@ -113,6 +113,21 @@ cd "${REMOTE_DIR}"
 echo "[远程] 当前目录: \$(pwd)"
 echo "[远程] Pull ${REMOTE_BRANCH} ..."
 git pull origin "${REMOTE_BRANCH}"
+
+# 导入预检：模拟 app.py 的顶级 import 路径，提前捕获 ModuleNotFoundError
+echo "[远程] 导入预检 ..."
+python3 -c "
+import sys
+sys.path.insert(0, '.')
+# 模拟 app.py 的顶级 import（排除 streamlit 等运行时依赖）
+from tradingagents.auth.model_config import load_model_config
+print('  ✓ tradingagents.auth.model_config')
+from web.components.sidebar import render_sidebar, request_clear_ticker_input
+print('  ✓ web.components.sidebar')
+from web.auth_page import render_logout_button, render_admin_panel
+print('  ✓ web.auth_page')
+" 2>&1 || { echo "[远程] 导入预检失败，中止部署"; exit 1; }
+
 echo "[远程] 重启 ${SERVICE_NAME} ..."
 sudo systemctl restart "${SERVICE_NAME}"
 echo "[远程] Service 状态:"
@@ -129,14 +144,27 @@ info "等待 3 秒让服务完成启动 ..."
 sleep 3
 
 run_step "6/6  验证部署"
+
+# 检查 HTTP 状态码 + 页面内容（Streamlit 导入错误会返回 500 或 200 + 错误信息）
 HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 10 --max-time 15 "${VERIFY_URL}")
-if [ "$HTTP_CODE" = "${VERIFY_EXPECTED_CODE}" ]; then
-    ok "验证通过 — ${VERIFY_URL} 返回 ${HTTP_CODE}"
-else
+if [ "$HTTP_CODE" != "${VERIFY_EXPECTED_CODE}" ]; then
     warn "验证结果异常 — ${VERIFY_URL} 返回 ${HTTP_CODE} (期望 ${VERIFY_EXPECTED_CODE})"
     info "查看服务日志:"
     info "  ssh ${REMOTE_USER}@${REMOTE_HOST} sudo journalctl -u ${SERVICE_NAME} -n 50 --no-hostname"
+    exit 1
 fi
+
+# 深层验证：检查 response body 是否包含 Streamlit 的 RuntimeError / ImportError 特征
+# Streamlit 500 页面 body 包含 "Something went wrong" 或 "st.error"
+# 而正常页面 body 包含 "streamlit" 的 app 根元素
+if curl -s --connect-timeout 10 --max-time 15 "${VERIFY_URL}" | head -100 | grep -qiE '(RuntimeError|ModuleNotFoundError|ImportError|Something went wrong|st.error)[^<]'; then
+    warn "验证结果异常 — 页面包含 Python 运行时错误信息"
+    info "查看服务日志:"
+    info "  ssh ${REMOTE_USER}@${REMOTE_HOST} sudo journalctl -u ${SERVICE_NAME} -n 50 --no-hostname"
+    exit 1
+fi
+
+ok "验证通过 — ${VERIFY_URL} 返回 ${HTTP_CODE}，页面内容正常"
 
 echo ""
 echo -e "${GREEN}====== 部署完成 ======${NC}"
