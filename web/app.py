@@ -56,6 +56,8 @@ from web.progress import ProgressTracker  # noqa: E402
 from web.runner import run_analysis_in_thread  # noqa: E402
 from tradingagents.watchlist.scheduler import start_watchlist_scheduler  # noqa: E402
 
+from web.auth_page import require_auth, get_current_user, render_logout_button, render_admin_panel  # noqa: E402
+
 # ── Page config ──────────────────────────────────────────────────────────────
 
 st.set_page_config(
@@ -67,6 +69,10 @@ st.set_page_config(
 
 # URL → session（观察池 / 历史可刷新、可收藏）——须在 set_page_config 之后
 apply_query_to_session()
+
+# ── Authentication gate ────────────────────────────────────────────────────
+# Must be after set_page_config — require_auth calls st.stop() if not logged in.
+require_auth()
 
 # Restore waiting queue after browser refresh (session_state is empty on new session).
 # Auto-start only when idle: no live tracker and no running/paused incomplete task

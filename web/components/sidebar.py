@@ -29,6 +29,8 @@ from web.history import (
 from web.navigation import navigate
 from web.stock_display import format_list_ticker_label
 
+from web.auth_page import render_logout_button, render_admin_panel
+
 # Provider display names in recommended order
 _PROVIDERS: list[tuple[str, str]] = [
     ("MiniMax（推荐·国内直连）", "minimax"),
@@ -383,6 +385,10 @@ def _render_llm_config() -> None:
 
 def render_sidebar() -> None:
     """Render the sidebar with input controls and history."""
+
+    # ── Auth info & logout ──────────────────────────────────────────
+    render_logout_button()
+    render_admin_panel()
 
     st.markdown(
         """
