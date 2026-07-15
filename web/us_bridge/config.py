@@ -26,7 +26,10 @@ def resolve_us_root(root: str | Path | None = None) -> Path:
 def resolve_us_python(us_root: Path) -> Path:
     env_py = (os.getenv("US_TRADINGAGENTS_PYTHON") or "").strip()
     if env_py:
-        path = Path(env_py).expanduser().resolve()
+        # Use absolute() not resolve(): venv's bin/python is usually a symlink
+        # into /usr/bin; following it would drop the venv site-packages when the
+        # subprocess is launched with the resolved system interpreter.
+        path = Path(env_py).expanduser().absolute()
         if not path.is_file():
             raise FileNotFoundError(f"US_TRADINGAGENTS_PYTHON 不存在: {path}")
         return path
@@ -36,9 +39,9 @@ def resolve_us_python(us_root: Path) -> Path:
         us_root / "venv" / "bin" / "python",
     ):
         if candidate.is_file():
-            return candidate.resolve()
+            return candidate.absolute()
 
-    return Path(sys.executable).resolve()
+    return Path(sys.executable).absolute()
 
 
 def build_worker_command(
