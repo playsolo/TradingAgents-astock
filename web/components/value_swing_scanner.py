@@ -415,7 +415,7 @@ def render_scan_results(
     # 操作按钮
     col1, col2 = st.columns([1, 5])
     with col1:
-        if st.button("🧠 全部入分析队列", use_container_width=True, type="primary"):
+        if st.button("🧠 全部入分析队列", key=f"_enq_all_{strategy}", use_container_width=True, type="primary"):
             added = _enqueue_candidates(candidates)
             if added:
                 st.success(f"已加入 {added} 只到分析队列")
@@ -511,7 +511,6 @@ def render_strategy_scanner(strategy: str = "value_swing"):
         SCAN_STATUS_FAILED,
         SCAN_STATUS_RUNNING,
         STRATEGY_GROWTH_ACCEL,
-        STRATEGY_VALUE_SWING,
         default_store,
         resolve_strategy,
     )
@@ -540,48 +539,8 @@ def render_strategy_scanner(strategy: str = "value_swing"):
         and (time.time() - launched_at) < _LAUNCH_GRACE_S
     )
     is_running = status == SCAN_STATUS_RUNNING or launching
-
-    col1, col2, col3 = st.columns([2, 1, 1])
-    with col1:
-        max_candidates = st.number_input(
-            "候选上限",
-            min_value=5,
-            max_value=50,
-            value=15,
-            help="L2 最终输出的候选股票数量上限",
-            disabled=is_running,
-            key=f"max_cand_{strategy}",
-        )
-    with col2:
-        run_scan = st.button(
-            "🚀 开始扫描",
-            use_container_width=True,
-            type="primary",
-            disabled=is_running,
-            key=f"run_scan_{strategy}",
-        )
-    with col3:
-        auto_enqueue = st.checkbox(
-            "完成后自动入队",
-            value=False,
-            disabled=is_running,
-            help="夜间无人值守：扫描完成后自动把候选排入分析队列",
-            key=f"auto_enq_{strategy}",
-        )
-
-    if run_scan:
-        try:
-            pid = start_detached_scan(
-                max_candidates=int(max_candidates),
-                enqueue_on_success=bool(auto_enqueue),
-                strategy=strategy,
-            )
-            st.session_state[pid_key] = pid
-            st.session_state[ts_key] = time.time()
-            logger.info("%s 扫描已在独立进程启动 pid=%s", strategy, pid)
-            st.rerun()
-        except RuntimeError as exc:
-            st.warning(str(exc))
+    # 双池同扫时一侧先结束，另一侧仍在跑：禁止对本侧再点「开始扫描」
+    other_busy = _any_strategy_running() and not is_running
 
     if is_running:
         if status == SCAN_STATUS_RUNNING:
@@ -600,6 +559,48 @@ def render_strategy_scanner(strategy: str = "value_swing"):
 
     st.session_state.pop(pid_key, None)
     st.session_state.pop(ts_key, None)
+
+    if other_busy:
+        st.info("另一策略扫描进行中，请稍候；可用顶部「价值+成长都扫」统一启动。")
+    else:
+        col1, col2, col3 = st.columns([2, 1, 1])
+        with col1:
+            max_candidates = st.number_input(
+                "候选上限（仅本策略）",
+                min_value=5,
+                max_value=50,
+                value=15,
+                help="只重跑本池时生效；双池同扫请用顶部控件",
+                key=f"max_cand_{strategy}",
+            )
+        with col2:
+            run_scan = st.button(
+                "🚀 仅扫本池",
+                use_container_width=True,
+                type="secondary",
+                key=f"run_scan_{strategy}",
+            )
+        with col3:
+            auto_enqueue = st.checkbox(
+                "完成后自动入队",
+                value=False,
+                help="夜间无人值守：扫描完成后自动把候选排入分析队列",
+                key=f"auto_enq_{strategy}",
+            )
+
+        if run_scan:
+            try:
+                pid = start_detached_scan(
+                    max_candidates=int(max_candidates),
+                    enqueue_on_success=bool(auto_enqueue),
+                    strategy=strategy,
+                )
+                st.session_state[pid_key] = pid
+                st.session_state[ts_key] = time.time()
+                logger.info("%s 扫描已在独立进程启动 pid=%s", strategy, pid)
+                st.rerun()
+            except RuntimeError as exc:
+                st.warning(str(exc))
 
     if status == SCAN_STATUS_FAILED:
         st.error(f"上次扫描失败: {record.get('error', '未知错误')}")
@@ -663,6 +664,24 @@ def _render_dual_pool_overview():
             st.info("成长加速暂无结果。")
 
 
+def _session_launch_busy(keys: tuple[str, ...]) -> bool:
+    """刚点击启动、落盘尚未翻到 running 时的宽限窗口。"""
+    from tradingagents.strategies.scan_runner import is_process_alive
+
+    now = time.time()
+    for key in keys:
+        pid = st.session_state.get(f"_scan_launch_pid_{key}")
+        ts = st.session_state.get(f"_scan_launch_ts_{key}")
+        if (
+            pid is not None
+            and ts is not None
+            and is_process_alive(pid)
+            and (now - ts) < _LAUNCH_GRACE_S
+        ):
+            return True
+    return False
+
+
 def _any_strategy_running() -> bool:
     from tradingagents.strategies.scan_runner import (
         is_process_alive,
@@ -675,14 +694,15 @@ def _any_strategy_running() -> bool:
         default_store,
     )
 
-    running = False
+    if _session_launch_busy(("both", STRATEGY_VALUE_SWING, STRATEGY_GROWTH_ACCEL)):
+        return True
     for strategy in (STRATEGY_VALUE_SWING, STRATEGY_GROWTH_ACCEL):
         store = default_store(strategy)
         reconcile_stale_running(store)
         rec = store.load()
         if rec.get("status") == SCAN_STATUS_RUNNING and is_process_alive(rec.get("pid")):
-            running = True
-    return running
+            return True
+    return False
 
 
 def _render_both_scan_controls():
@@ -691,6 +711,10 @@ def _render_both_scan_controls():
     from tradingagents.strategies.scan_store import STRATEGY_BOTH
 
     busy = _any_strategy_running()
+    if busy:
+        st.info("🔄 双池扫描进行中 — 下方切换「价值波段 / 成长加速」查看进度；完成后按钮会恢复。")
+        return True
+
     c1, c2, c3 = st.columns([2, 1, 1])
     with c1:
         max_candidates = st.number_input(
@@ -698,7 +722,6 @@ def _render_both_scan_controls():
             min_value=5,
             max_value=50,
             value=15,
-            disabled=busy,
             key="max_cand_both",
             help="价值波段与成长加速各自输出的 Top N",
         )
@@ -707,14 +730,12 @@ def _render_both_scan_controls():
             "🚀 价值+成长都扫",
             use_container_width=True,
             type="primary",
-            disabled=busy,
             key="run_scan_both",
         )
     with c3:
         auto_enqueue = st.checkbox(
             "完成后自动入队",
             value=False,
-            disabled=busy,
             key="auto_enq_both",
             help="两池候选都会写入分析队列",
         )
@@ -731,9 +752,7 @@ def _render_both_scan_controls():
             st.rerun()
         except RuntimeError as exc:
             st.warning(str(exc))
-    if busy:
-        st.caption("扫描进行中…下方可切换查看各池进度与结果。")
-    return busy
+    return False
 
 
 def render_value_swing_scanner():
@@ -744,7 +763,7 @@ def render_value_swing_scanner():
     )
 
     st.header("📊 策略扫描")
-    st.caption("默认一键扫两池；亦可单独重跑某一侧。价值规则与成长规则互不改写。")
+    st.caption("推荐用顶部一键扫两池；下方可查看进度或单独重跑某一侧。")
     both_busy = _render_both_scan_controls()
     st.divider()
     mode = st.radio(
@@ -760,7 +779,6 @@ def render_value_swing_scanner():
         render_strategy_scanner(STRATEGY_VALUE_SWING)
     else:
         _render_dual_pool_overview()
-        # 双池对照本身不轮询；有扫描在跑时主动刷新
         if both_busy:
             time.sleep(_POLL_INTERVAL_S)
             st.rerun()
