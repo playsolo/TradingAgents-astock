@@ -13,7 +13,7 @@ from tradingagents.watchlist.calendar import (
 )
 from tradingagents.watchlist.models import LEAN_LABELS, WatchItem
 from tradingagents.watchlist.service import prior_context_from_baseline
-from tradingagents.watchlist.store import default_store
+from web.auth_page import current_watch_store
 from web.stock_display import format_list_ticker_label
 
 _SCENARIO_UI = (
@@ -53,7 +53,7 @@ def render_watch_page() -> None:
     )
     st.warning("港股 / 美股尚未支持。本功能仅供研究，不构成投资建议。")
 
-    store = default_store()
+    store = current_watch_store()
     items = store.list_items()
     if not items:
         st.info("暂无观察标的。完成分析后在报告页点击「加入观察池」。")

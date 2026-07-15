@@ -22,7 +22,7 @@ from tradingagents.watchlist.calendar import OBSERVE_SLOTS, slot_key_for
 from tradingagents.watchlist.lockfile import LOCK_PATH, acquire_scheduler_lock
 from tradingagents.watchlist.observe import observe_all
 from tradingagents.watchlist.scheduler import build_quick_llm
-from tradingagents.watchlist.store import WatchlistStore, default_store
+from tradingagents.watchlist.store import WatchlistStore, iter_user_stores
 
 logger = logging.getLogger(__name__)
 
@@ -80,17 +80,22 @@ def run_slot_once(
     config: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """若当前时刻命中观察窗则执行一次；否则 noop。"""
-    store = store or default_store()
+    """若当前时刻命中观察窗则执行一次；否则 noop。
+
+    ``store=None`` 时遍历全部用户观察池（含遗留全局文件）。
+    """
     cfg = config if config is not None else config_from_env()
     dt = now or datetime.now()
     key = slot_key_for(dt)
     if not key:
         return {"slot_key": None, "observed": {}}
     llm = build_quick_llm(cfg)
-    observed = observe_all(
-        store, llm=llm, slot_key=key, analysis_config=cfg or None
-    )
+    stores = [store] if store is not None else list(iter_user_stores())
+    observed: dict[str, Any] = {}
+    for s in stores:
+        observed.update(
+            observe_all(s, llm=llm, slot_key=key, analysis_config=cfg or None)
+        )
     return {"slot_key": key, "observed": observed}
 
 
@@ -100,8 +105,7 @@ def run_forever(
     config: dict[str, Any] | None = None,
     poll_seconds: int = _POLL_SECONDS,
 ) -> None:
-    """常驻轮询（需已持有调度锁）。"""
-    store = store or default_store()
+    """常驻轮询（需已持有调度锁）。``store=None`` 时遍历全部用户观察池。"""
     cfg = config if config is not None else config_from_env()
     last_slot: str | None = None
     stop = threading.Event()
@@ -112,17 +116,26 @@ def run_forever(
             now = datetime.now()
             key = slot_key_for(now)
             if key and key != last_slot:
-                items = [i for i in store.list_items() if i.enabled]
-                if items:
-                    logger.info("slot %s — %d symbols", key, len(items))
+                stores = [store] if store is not None else list(iter_user_stores())
+                llm = build_quick_llm(cfg)
+                total = 0
+                for s in stores:
+                    items = [i for i in s.list_items() if i.enabled]
+                    if not items:
+                        continue
+                    total += len(items)
                     observe_all(
-                        store,
-                        llm=build_quick_llm(cfg),
-                        slot_key=key,
-                        analysis_config=cfg or None,
+                        s, llm=llm, slot_key=key, analysis_config=cfg or None
+                    )
+                if total:
+                    logger.info(
+                        "slot %s — %d symbols across %d watchlists",
+                        key,
+                        total,
+                        len(stores),
                     )
                 else:
-                    logger.info("slot %s — watchlist empty, skip", key)
+                    logger.info("slot %s — watchlists empty, skip", key)
                 last_slot = key
         except Exception:
             logger.exception("daemon tick failed")

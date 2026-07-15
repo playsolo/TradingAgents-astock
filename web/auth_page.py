@@ -65,6 +65,34 @@ def get_current_user():
     return st.session_state.get(_SESSION_USER)
 
 
+def current_username() -> str | None:
+    """Username of the logged-in user, or None when auth is disabled / no session.
+
+    None deliberately maps to the legacy global watchlist store, preserving
+    single-user behaviour for self-hosted installs with auth disabled.
+    """
+    user = get_current_user()
+    return getattr(user, "username", None) if user else None
+
+
+def current_watch_store():
+    """Per-user :class:`WatchlistStore` for the current session.
+
+    On first access by an admin, the pre-multiuser global ``watchlist.json`` is
+    migrated into that admin's store so existing data isn't orphaned.
+    """
+    from tradingagents.watchlist.store import default_store, migrate_legacy_watchlist
+
+    username = current_username()
+    if username is None:
+        return default_store()
+
+    user = get_current_user()
+    if user is not None and getattr(user, "role", None) == "admin":
+        migrate_legacy_watchlist(username)
+    return default_store(username)
+
+
 def _ensure_sessions_dir() -> None:
     _SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 

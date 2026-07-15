@@ -1,7 +1,12 @@
 """A 股轻量观察池：基准结论 + 定时快照 + 变更告警。"""
 
 from tradingagents.watchlist.models import Alert, Baseline, WatchItem
-from tradingagents.watchlist.store import WatchlistStore, default_store
+from tradingagents.watchlist.store import (
+    WatchlistStore,
+    default_store,
+    iter_user_stores,
+    migrate_legacy_watchlist,
+)
 
 __all__ = [
     "Alert",
@@ -9,4 +14,6 @@ __all__ = [
     "WatchItem",
     "WatchlistStore",
     "default_store",
+    "iter_user_stores",
+    "migrate_legacy_watchlist",
 ]

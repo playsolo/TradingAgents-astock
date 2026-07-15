@@ -601,9 +601,9 @@ def render_sidebar() -> None:
             navigate("home")
 
         st.markdown("#### 观察")
-        from tradingagents.watchlist.store import default_store
+        from web.auth_page import current_watch_store
 
-        watch_items = default_store().list_items()
+        watch_items = current_watch_store().list_items()
         watch_n = len(watch_items)
         alert_n = sum(len(i.alerts) for i in watch_items)
         watch_label = f"📡 观察池（{watch_n}）"

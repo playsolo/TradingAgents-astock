@@ -12,7 +12,7 @@ from typing import Any, Callable, TextIO
 
 from tradingagents.watchlist.calendar import slot_key_for
 from tradingagents.watchlist.observe import observe_all
-from tradingagents.watchlist.store import WatchlistStore, default_store
+from tradingagents.watchlist.store import WatchlistStore, iter_user_stores
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ def build_quick_llm(config: dict[str, Any] | None) -> Any:
 
 
 def _loop(
-    store: WatchlistStore,
+    store: WatchlistStore | None,
     config_provider: Callable[[], dict[str, Any] | None],
     stop_event: threading.Event,
 ) -> None:
@@ -52,13 +52,24 @@ def _loop(
             now = datetime.now()
             key = slot_key_for(now)
             if key and key != last_slot:
-                items = [i for i in store.list_items() if i.enabled]
-                if items:
-                    logger.info("watchlist slot %s — observing %d names", key, len(items))
-                    cfg = config_provider() or {}
-                    llm = build_quick_llm(cfg)
+                stores = [store] if store is not None else list(iter_user_stores())
+                cfg = config_provider() or {}
+                llm = build_quick_llm(cfg)
+                total = 0
+                for s in stores:
+                    items = [i for i in s.list_items() if i.enabled]
+                    if not items:
+                        continue
+                    total += len(items)
                     observe_all(
-                        store, llm=llm, slot_key=key, analysis_config=cfg or None
+                        s, llm=llm, slot_key=key, analysis_config=cfg or None
+                    )
+                if total:
+                    logger.info(
+                        "watchlist slot %s — observing %d names across %d watchlists",
+                        key,
+                        total,
+                        len(stores),
                     )
                 last_slot = key
         except Exception:
@@ -95,7 +106,7 @@ def start_watchlist_scheduler(
         stop_event = threading.Event()
         thread = threading.Thread(
             target=_loop,
-            args=(store or default_store(), config_provider or (lambda: None), stop_event),
+            args=(store, config_provider or (lambda: None), stop_event),
             name="watchlist-scheduler",
             daemon=True,
         )

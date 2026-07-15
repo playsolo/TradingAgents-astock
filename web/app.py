@@ -453,13 +453,15 @@ def _consume_watchlist_refresh_pending(active: ProgressTracker) -> None:
         try:
             from datetime import datetime
 
-            from tradingagents.watchlist.store import default_store
+            from web.auth_page import current_watch_store
 
+            watch_store = current_watch_store()
             refreshed = refresh_from_analysis(
                 active.final_state,
                 ticker=active.ticker,
                 trade_date=active.trade_date,
                 log_path=resolve_log_path(active.ticker, active.trade_date),
+                store=watch_store,
             )
             stance = refreshed.baseline.stance
             summary = (
@@ -470,7 +472,7 @@ def _consume_watchlist_refresh_pending(active: ProgressTracker) -> None:
                     else ""
                 )
             )
-            default_store().mark_observed(
+            watch_store.mark_observed(
                 active.ticker,
                 datetime.now().isoformat(timespec="seconds"),
                 summary=summary,

@@ -360,6 +360,7 @@ def render_report(
             )
         elif st.button("📡 加入观察池", use_container_width=True, key=f"add_watch_{ticker}_{trade_date}"):
             from tradingagents.watchlist.service import add_from_analysis, resolve_log_path
+            from web.auth_page import current_watch_store
 
             try:
                 add_from_analysis(
@@ -367,6 +368,7 @@ def render_report(
                     ticker=ticker,
                     trade_date=trade_date,
                     log_path=resolve_log_path(ticker, trade_date),
+                    store=current_watch_store(),
                 )
                 st.success(f"已加入观察池：{ticker}（仅 A 股 · 本机运行时定时复核）")
             except Exception as exc:  # noqa: BLE001
