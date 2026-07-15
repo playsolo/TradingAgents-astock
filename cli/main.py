@@ -1248,5 +1248,53 @@ def analyze(
     run_analysis(checkpoint=checkpoint)
 
 
+@app.command("accuracy")
+def accuracy_cmd(
+    remigrate: bool = typer.Option(
+        False,
+        "--remigrate",
+        help="Force re-scan of memory log + results history into the accuracy ledger.",
+    ),
+    no_sync_memory: bool = typer.Option(
+        False,
+        "--no-sync-memory",
+        help="Do not write auto-settle reflections into trading_memory.md.",
+    ),
+):
+    """Settle direction-hit accuracy for all enrolled analysis signals."""
+    from tradingagents.agents.utils.signal_accuracy import run_accuracy_maintenance
+
+    console.print("[bold]Signal accuracy settle[/bold]")
+    result = run_accuracy_maintenance(
+        DEFAULT_CONFIG,
+        force_remigrate=remigrate,
+        sync_memory=not no_sync_memory,
+    )
+    migrated = result.get("migrated") or {}
+    events = result.get("events") or []
+    summary = result.get("summary") or {}
+    if migrated.get("skipped"):
+        console.print("Backfill: skipped (already migrated)")
+    else:
+        console.print(
+            f"Backfill: memory={migrated.get('from_memory', 0)} "
+            f"logs={migrated.get('from_logs', 0)}"
+        )
+    console.print(f"New settle events: {len(events)}")
+    by_h = summary.get("by_horizon") or {}
+    for h in sorted(by_h.keys(), key=int):
+        cell = by_h[h]
+        rate = cell.get("hit_rate")
+        rate_s = f"{rate * 100:.1f}%" if rate is not None else "n/a"
+        console.print(
+            f"  {h}d hit rate: {rate_s} "
+            f"({cell.get('hits', 0)}/{cell.get('settled', 0)})"
+        )
+    console.print(
+        f"Records: {summary.get('total_records', 0)} · "
+        f"pending horizon slots: {summary.get('pending_horizons', 0)}"
+    )
+
+
 if __name__ == "__main__":
     app()

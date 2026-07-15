@@ -3,6 +3,8 @@
 支持：
   /?view=home
   /?view=watch
+  /?view=inbox
+  /?view=accuracy
   /?view=history&ticker=002648&date=2026-07-14
 """
 
@@ -57,7 +59,7 @@ def parse_view_params(params: dict[str, Any] | Any) -> dict[str, str | None]:
         return s or None
 
     view = (_get("view") or "home").lower()
-    if view not in {"home", "watch", "history", "inbox"}:
+    if view not in {"home", "watch", "history", "inbox", "accuracy"}:
         view = "home"
     return {
         "view": view,
@@ -74,12 +76,21 @@ def apply_query_to_session() -> None:
     if view == "inbox":
         st.session_state["viewing_inbox"] = True
         st.session_state["viewing_watchlist"] = False
+        st.session_state["viewing_accuracy"] = False
         st.session_state["viewing_history"] = None
         return
 
     if view == "watch":
         st.session_state["viewing_inbox"] = False
         st.session_state["viewing_watchlist"] = True
+        st.session_state["viewing_accuracy"] = False
+        st.session_state["viewing_history"] = None
+        return
+
+    if view == "accuracy":
+        st.session_state["viewing_inbox"] = False
+        st.session_state["viewing_watchlist"] = False
+        st.session_state["viewing_accuracy"] = True
         st.session_state["viewing_history"] = None
         return
 
@@ -89,11 +100,13 @@ def apply_query_to_session() -> None:
             st.session_state["viewing_inbox"] = False
             st.session_state["viewing_history"] = path
             st.session_state["viewing_watchlist"] = False
+            st.session_state["viewing_accuracy"] = False
             return
 
     # home（或缺省）：离开观察/历史列表视图；进行中的分析靠 tracker 显示
     st.session_state["viewing_inbox"] = False
     st.session_state["viewing_watchlist"] = False
+    st.session_state["viewing_accuracy"] = False
     # 若 URL 无 history，清掉历史视图（避免刷新后粘住）
     if view == "home":
         st.session_state["viewing_history"] = None
@@ -110,18 +123,28 @@ def navigate(
     if view == "inbox":
         st.session_state["viewing_inbox"] = True
         st.session_state["viewing_watchlist"] = False
+        st.session_state["viewing_accuracy"] = False
         st.session_state["viewing_history"] = None
         st.session_state["start_analysis"] = None
         params = view_query("inbox")
     elif view == "watch":
         st.session_state["viewing_inbox"] = False
         st.session_state["viewing_watchlist"] = True
+        st.session_state["viewing_accuracy"] = False
         st.session_state["viewing_history"] = None
         st.session_state["start_analysis"] = None
         params = view_query("watch")
+    elif view == "accuracy":
+        st.session_state["viewing_inbox"] = False
+        st.session_state["viewing_watchlist"] = False
+        st.session_state["viewing_accuracy"] = True
+        st.session_state["viewing_history"] = None
+        st.session_state["start_analysis"] = None
+        params = view_query("accuracy")
     elif view == "history":
         st.session_state["viewing_inbox"] = False
         st.session_state["viewing_watchlist"] = False
+        st.session_state["viewing_accuracy"] = False
         st.session_state["start_analysis"] = None
         resolved = path or (
             history_path_for(ticker, date) if ticker and date else None
@@ -136,6 +159,7 @@ def navigate(
     else:
         st.session_state["viewing_inbox"] = False
         st.session_state["viewing_watchlist"] = False
+        st.session_state["viewing_accuracy"] = False
         st.session_state["viewing_history"] = None
         params = view_query("home")
 

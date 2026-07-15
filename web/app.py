@@ -49,6 +49,7 @@ from web.components.progress_panel import (  # noqa: E402
     render_running_progress,
 )
 from web.components.inbox_page import render_inbox_page  # noqa: E402
+from web.components.accuracy_page import render_accuracy_page  # noqa: E402
 from web.components.report_viewer import render_report  # noqa: E402
 from web.components.sidebar import render_sidebar, request_clear_ticker_input  # noqa: E402
 from web.components.watch_page import render_watch_page  # noqa: E402
@@ -390,6 +391,7 @@ def _begin_analysis(start_req: dict) -> ProgressTracker:
     st.session_state["viewing_history"] = None
     st.session_state["viewing_watchlist"] = False
     st.session_state["viewing_inbox"] = False
+    st.session_state["viewing_accuracy"] = False
     if start_req.get("watchlist_refresh"):
         st.session_state["watchlist_refresh_pending"] = {
             "ticker": start_req["ticker"],
@@ -426,6 +428,7 @@ def _enqueue_start_request(start_req: dict) -> None:
     st.session_state["viewing_history"] = None
     st.session_state["viewing_watchlist"] = False
     st.session_state["viewing_inbox"] = False
+    st.session_state["viewing_accuracy"] = False
     if added:
         st.session_state["queue_advance_notice"] = (
             f"✅ {job.ticker} 已提交后台分析队列，完成后可在历史查看"
@@ -466,6 +469,7 @@ if start_req:
 viewing_history: str | None = st.session_state.get("viewing_history")
 viewing_watchlist: bool = bool(st.session_state.get("viewing_watchlist"))
 viewing_inbox: bool = bool(st.session_state.get("viewing_inbox"))
+viewing_accuracy: bool = bool(st.session_state.get("viewing_accuracy"))
 
 
 def _consume_watchlist_refresh_pending(active: ProgressTracker) -> None:
@@ -568,6 +572,10 @@ _any_running = has_running(st.session_state)
 # State 0.4: Inbox (event center)
 if viewing_inbox and not _any_running:
     render_inbox_page()
+
+# State 0.45: Signal accuracy tracker
+elif viewing_accuracy and not _any_running:
+    render_accuracy_page()
 
 # State 0.5: Watchlist observation page
 elif viewing_watchlist and not _any_running:

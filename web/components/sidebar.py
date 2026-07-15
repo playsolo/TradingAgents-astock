@@ -164,6 +164,7 @@ def activate_incomplete_task(
 
     session["viewing_history"] = None
     session["viewing_watchlist"] = False
+    session["viewing_accuracy"] = False
 
     if is_worker_mode():
         # Worker mode: never run in-process. Push onto the disk queue.
@@ -317,6 +318,7 @@ def _submit_analysis_jobs(raw_tickers: str, market: str, trade_date: str) -> Non
     st.session_state["start_analysis"] = head.to_start_request()
     st.session_state["viewing_history"] = None
     st.session_state["viewing_watchlist"] = False
+    st.session_state["viewing_accuracy"] = False
     st.query_params.clear()
     st.query_params["view"] = "home"
     # Clear ticker input only after app.py successfully begins analysis.
@@ -359,6 +361,7 @@ def _render_analysis_queue() -> None:
         request_fill_parallel_slots(st.session_state, force=True)
         st.session_state["viewing_history"] = None
         st.session_state["viewing_watchlist"] = False
+        st.session_state["viewing_accuracy"] = False
         st.query_params.clear()
         st.query_params["view"] = "home"
         st.rerun()
@@ -582,6 +585,14 @@ def render_sidebar() -> None:
         help="站内消息：分析完成 / 失败、数据缺失警告、观察池告警",
     ):
         navigate("inbox")
+
+    if st.button(
+        "📊 信号准确率",
+        key="nav_accuracy",
+        use_container_width=True,
+        help="方向命中跟踪：做多/做空/持有后验结算",
+    ):
+        navigate("accuracy")
 
     st.markdown("---")
     st.markdown("#### 新建分析")

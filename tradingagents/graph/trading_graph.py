@@ -18,6 +18,12 @@ from tradingagents.llm_clients import create_llm_client
 from tradingagents.agents import *
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.agents.utils.memory import TradingMemoryLog
+from tradingagents.agents.utils.rating import parse_rating
+from tradingagents.agents.utils.signal_accuracy import (
+    config_fingerprint,
+    get_ledger,
+    run_accuracy_maintenance,
+)
 from tradingagents.dataflows.utils import safe_ticker_component
 from tradingagents.agents.utils.agent_states import (
     AgentState,
@@ -108,6 +114,7 @@ class TradingAgentsGraph:
         self.quick_thinking_llm = quick_client.get_llm()
         
         self.memory_log = TradingMemoryLog(self.config)
+        self.accuracy_ledger = get_ledger(self.config)
 
         # Create tool nodes
         self.tool_nodes = self._create_tool_nodes()
@@ -262,17 +269,31 @@ class TradingAgentsGraph:
             )
             return None, None, None
 
+    def settle_accuracy(self, *, sync_memory: bool = True) -> List[dict]:
+        """Auto-settle due horizons for all enrolled signals (direction hit)."""
+        # Keep in-memory ledger handle fresh after maintenance writes.
+        result = run_accuracy_maintenance(self.config, sync_memory=sync_memory)
+        self.accuracy_ledger = get_ledger(self.config)
+        return list(result.get("events") or [])
+
     def _resolve_pending_entries(self, ticker: str) -> None:
-        """Resolve pending log entries for ticker at the start of a new run.
+        """Settle accuracy for all tickers, then enrich same-ticker memory via LLM.
 
-        Fetches returns for each same-ticker pending entry, generates reflections,
-        then writes all updates in a single atomic batch write to avoid redundant I/O.
-        Skips entries whose price data is not yet available (too recent or delisted).
-
-        Trade-off: only same-ticker entries are resolved per run.  Entries for
-        other tickers accumulate until that ticker is run again.
+        Accuracy ledger settle is the authority for direction-hit tracking and no
+        longer depends on re-running the same ticker.  LLM reflections still run
+        only for this ticker's remaining pending memory entries (if any) so prompt
+        context stays rich without settling the whole book via paid calls.
         """
-        pending = [e for e in self.memory_log.get_pending_entries() if e["ticker"] == ticker]
+        try:
+            self.settle_accuracy(sync_memory=True)
+        except Exception:
+            logger.exception("Accuracy settle failed; continuing with memory resolve")
+
+        pending = [
+            e
+            for e in self.memory_log.get_pending_entries()
+            if str(e["ticker"]).upper() == str(ticker).upper()
+        ]
         if not pending:
             return
 
@@ -280,7 +301,7 @@ class TradingAgentsGraph:
         for entry in pending:
             raw, alpha, days = self._fetch_returns(ticker, entry["date"])
             if raw is None:
-                continue  # price not available yet — try again next run
+                continue
             reflection = self.reflector.reflect_on_final_decision(
                 final_decision=entry.get("decision", ""),
                 raw_return=raw,
@@ -402,12 +423,30 @@ class TradingAgentsGraph:
         # Log state to disk.
         self._log_state(trade_date, final_state)
 
-        # Store decision for deferred reflection on the next same-ticker run.
+        # Store decision for deferred reflection + enroll in accuracy ledger.
+        decision_text = final_state["final_trade_decision"]
         self.memory_log.store_decision(
             ticker=company_name,
             trade_date=trade_date,
-            final_trade_decision=final_state["final_trade_decision"],
+            final_trade_decision=decision_text,
         )
+        rating = None
+        plan = final_state.get("action_plan")
+        if isinstance(plan, dict) and plan.get("rating"):
+            rating = str(plan["rating"])
+        if not rating:
+            rating = parse_rating(str(decision_text or ""))
+        try:
+            self.accuracy_ledger.enroll(
+                ticker=company_name,
+                trade_date=str(trade_date),
+                rating=rating,
+                config_fp=config_fingerprint(self.config),
+                decision=str(decision_text or ""),
+                source="live",
+            )
+        except Exception:
+            logger.exception("Accuracy ledger enroll failed; analysis result still saved")
 
         # Clear checkpoint on successful completion to avoid stale state.
         if self.config.get("checkpoint_enabled"):

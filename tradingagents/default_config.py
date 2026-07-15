@@ -11,6 +11,13 @@ DEFAULT_CONFIG = {
     # the oldest resolved entries are pruned once this limit is exceeded.
     # Pending entries are never pruned. None disables rotation entirely.
     "memory_log_max_entries": None,
+    # Direction-hit accuracy ledger (JSON beside memory log by default).
+    "signal_accuracy_path": os.getenv(
+        "TRADINGAGENTS_SIGNAL_ACCURACY_PATH",
+        os.path.join(_TRADINGAGENTS_HOME, "memory", "signal_accuracy.json"),
+    ),
+    "signal_accuracy_horizons": (1, 5, 20),
+    "signal_accuracy_eps": 0.005,
     # LLM settings
     "llm_provider": "openai",
     "deep_think_llm": "gpt-5.4",

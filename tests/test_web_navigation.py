@@ -18,6 +18,8 @@ def test_view_query_history():
 def test_parse_view_params_defaults_home():
     assert parse_view_params({})["view"] == "home"
     assert parse_view_params({"view": "watch"})["view"] == "watch"
+    assert parse_view_params({"view": "accuracy"})["view"] == "accuracy"
+    assert parse_view_params({"view": "nope"})["view"] == "home"
 
 
 def test_history_path_for_builds_expected_path(tmp_path, monkeypatch):
