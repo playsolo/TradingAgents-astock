@@ -682,10 +682,10 @@ def render_sidebar() -> None:
         st.markdown("---")
         st.markdown("#### 策略")
         if st.button(
-            "📊 价值波段扫描",
+            "📊 策略扫描",
             key="nav_value_swing",
             use_container_width=True,
-            help="全市场 → 流动性/估值筛选 → 催化剂评分 → 推荐分级",
+            help="价值波段 + 成长加速双池：各自 Top15，互不改规则",
         ):
             set_home_mode(st.session_state, HOME_MODE_SCAN)
             navigate("home")

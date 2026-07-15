@@ -40,5 +40,57 @@ def test_skip_non_trading_day_runs_on_weekday(monkeypatch):
         }
 
     monkeypatch.setattr(scan_cli, "run_scan_job", fake_run)
-    monkeypatch.setattr(scan_cli, "default_store", lambda: object())
+    monkeypatch.setattr(scan_cli, "default_store", lambda *_a, **_k: object())
     assert scan_cli.main(["--skip-non-trading-day"]) == 0
+
+
+def test_strategy_growth_accel_flag_forwarded(monkeypatch):
+    monday = datetime(2026, 7, 13, 20, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    monkeypatch.setattr(scan_cli, "datetime", type("D", (), {"now": staticmethod(lambda tz=None: monday)}))
+    seen = {}
+
+    def fake_run(**kwargs):
+        seen.update(kwargs)
+        return {
+            "status": scan_cli.SCAN_STATUS_COMPLETED,
+            "result": {
+                "scan_date": "2026-07-13",
+                "l0_passed": 1,
+                "l1a_passed": 1,
+                "l1b_passed": 1,
+                "l2_passed": 1,
+                "duration_seconds": 1.0,
+            },
+            "enqueued": 0,
+        }
+
+    monkeypatch.setattr(scan_cli, "run_scan_job", fake_run)
+    monkeypatch.setattr(scan_cli, "default_store", lambda *_a, **_k: object())
+    assert scan_cli.main(["--strategy", "growth_accel"]) == 0
+    assert seen.get("strategy") == "growth_accel"
+
+
+def test_default_strategy_runs_both(monkeypatch):
+    monday = datetime(2026, 7, 13, 20, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    monkeypatch.setattr(scan_cli, "datetime", type("D", (), {"now": staticmethod(lambda tz=None: monday)}))
+    strategies: list[str] = []
+
+    def fake_run(**kwargs):
+        strategies.append(kwargs["strategy"])
+        return {
+            "status": scan_cli.SCAN_STATUS_COMPLETED,
+            "result": {
+                "scan_date": "2026-07-13",
+                "l0_passed": 1,
+                "l1a_passed": 1,
+                "l1b_passed": 1,
+                "l2_passed": 1,
+                "duration_seconds": 1.0,
+            },
+            "enqueued": 0,
+        }
+
+    monkeypatch.setattr(scan_cli, "run_scan_job", fake_run)
+    monkeypatch.setattr(scan_cli, "default_store", lambda *_a, **_k: object())
+    assert scan_cli.main([]) == 0
+    assert strategies == ["value_swing", "growth_accel"]

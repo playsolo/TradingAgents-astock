@@ -47,8 +47,8 @@ def test_sidebar_brand_navigates_home():
 
 
 def test_sidebar_value_swing_sets_scan_mode():
-    """侧栏「价值波段扫描」应切到 scan 并 navigate(home)。"""
+    """侧栏「策略扫描」应切到 scan 并 navigate(home)。"""
     src = Path("web/components/sidebar.py").read_text(encoding="utf-8")
-    assert "📊 价值波段扫描" in src
+    assert "📊 策略扫描" in src
     assert "set_home_mode" in src and "HOME_MODE_SCAN" in src
     assert 'navigate("home")' in src

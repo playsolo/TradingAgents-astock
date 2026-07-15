@@ -25,10 +25,46 @@ SCAN_STATUS_RUNNING = "running"
 SCAN_STATUS_COMPLETED = "completed"
 SCAN_STATUS_FAILED = "failed"
 
-_DEFAULT_STATUS_PATH = Path.home() / ".tradingagents" / "value_swing_scan.json"
-_DEFAULT_ARCHIVE_DIR = Path.home() / ".tradingagents" / "value_swing_scans"
+STRATEGY_VALUE_SWING = "value_swing"
+STRATEGY_GROWTH_ACCEL = "growth_accel"
+STRATEGY_BOTH = "both"
+
+_STRATEGY_PATHS: dict[str, tuple[Path, Path, str, str]] = {
+    # status_path, archive_dir, status_env, archive_env
+    STRATEGY_VALUE_SWING: (
+        Path.home() / ".tradingagents" / "value_swing_scan.json",
+        Path.home() / ".tradingagents" / "value_swing_scans",
+        "TRADINGAGENTS_VALUE_SWING_SCAN_PATH",
+        "TRADINGAGENTS_VALUE_SWING_SCANS_DIR",
+    ),
+    STRATEGY_GROWTH_ACCEL: (
+        Path.home() / ".tradingagents" / "growth_accel_scan.json",
+        Path.home() / ".tradingagents" / "growth_accel_scans",
+        "TRADINGAGENTS_GROWTH_ACCEL_SCAN_PATH",
+        "TRADINGAGENTS_GROWTH_ACCEL_SCANS_DIR",
+    ),
+}
+
+_DEFAULT_STATUS_PATH = _STRATEGY_PATHS[STRATEGY_VALUE_SWING][0]
+_DEFAULT_ARCHIVE_DIR = _STRATEGY_PATHS[STRATEGY_VALUE_SWING][1]
 _LOCK = threading.RLock()
 _SCHEMA_VERSION = 1
+
+
+def resolve_strategy(strategy: str | None) -> str:
+    """Resolve a single concrete strategy (not ``both``)."""
+    key = (strategy or STRATEGY_VALUE_SWING).strip()
+    if key not in _STRATEGY_PATHS:
+        raise ValueError(f"unknown scan strategy: {strategy!r}")
+    return key
+
+
+def expand_strategies(strategy: str | None) -> list[str]:
+    """Expand ``both`` → [value_swing, growth_accel]; otherwise one strategy."""
+    key = (strategy or STRATEGY_BOTH).strip()
+    if key == STRATEGY_BOTH:
+        return [STRATEGY_VALUE_SWING, STRATEGY_GROWTH_ACCEL]
+    return [resolve_strategy(key)]
 
 
 def _utc_now_iso() -> str:
@@ -53,26 +89,30 @@ def _empty_record() -> dict[str, Any]:
 
 
 class ValueSwingScanStore:
-    """JSON status + archive for value-swing scans."""
+    """JSON status + archive for strategy scans (value-swing / growth-accel)."""
 
     def __init__(
         self,
         path: Path | None = None,
         archive_dir: Path | None = None,
+        *,
+        strategy: str = STRATEGY_VALUE_SWING,
     ):
+        self.strategy = resolve_strategy(strategy)
+        default_path, default_archive, status_env, archive_env = _STRATEGY_PATHS[
+            self.strategy
+        ]
         if path is not None:
             self.path = Path(path)
         else:
-            override = os.getenv("TRADINGAGENTS_VALUE_SWING_SCAN_PATH", "").strip()
-            self.path = Path(override) if override else _DEFAULT_STATUS_PATH
+            override = os.getenv(status_env, "").strip()
+            self.path = Path(override) if override else default_path
         if archive_dir is not None:
             self.archive_dir = Path(archive_dir)
         else:
-            override_dir = os.getenv(
-                "TRADINGAGENTS_VALUE_SWING_SCANS_DIR", ""
-            ).strip()
+            override_dir = os.getenv(archive_env, "").strip()
             self.archive_dir = (
-                Path(override_dir) if override_dir else _DEFAULT_ARCHIVE_DIR
+                Path(override_dir) if override_dir else default_archive
             )
 
     @contextmanager
@@ -223,5 +263,5 @@ class ValueSwingScanStore:
         tmp.replace(path)
 
 
-def default_store() -> ValueSwingScanStore:
-    return ValueSwingScanStore()
+def default_store(strategy: str = STRATEGY_VALUE_SWING) -> ValueSwingScanStore:
+    return ValueSwingScanStore(strategy=strategy)

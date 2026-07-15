@@ -1334,7 +1334,11 @@ def _sina_report_list_to_df(report_list: dict) -> pd.DataFrame:
 
 
 def _filter_financial_df(
-    df: pd.DataFrame, freq: str, curr_date: str | None,
+    df: pd.DataFrame,
+    freq: str,
+    curr_date: str | None,
+    *,
+    limit: int = 8,
 ) -> pd.DataFrame:
     if df.empty or "报告日" not in df.columns:
         return df
@@ -1350,11 +1354,17 @@ def _filter_financial_df(
     if freq.lower() == "annual":
         df = df[df["报告日"].dt.month == 12]
 
-    return df.sort_values("报告日", ascending=False).head(8).reset_index(drop=True)
+    n = max(1, int(limit))
+    return df.sort_values("报告日", ascending=False).head(n).reset_index(drop=True)
 
 
 def _get_financial_report_sina(
-    code: str, report_type: str, freq: str, curr_date: str = None,
+    code: str,
+    report_type: str,
+    freq: str,
+    curr_date: str = None,
+    *,
+    limit: int = 8,
 ) -> pd.DataFrame:
     """Shared helper: fetch financial report via Sina direct HTTP API.
 
@@ -1390,11 +1400,11 @@ def _get_financial_report_sina(
     items = result.get(source_type, [])
     if isinstance(items, list) and items:
         df = pd.DataFrame(items)
-        return _filter_financial_df(df, freq, curr_date)
+        return _filter_financial_df(df, freq, curr_date, limit=limit)
 
     # Current: nested report_list
     df = _sina_report_list_to_df(result.get("report_list") or {})
-    return _filter_financial_df(df, freq, curr_date)
+    return _filter_financial_df(df, freq, curr_date, limit=limit)
 
 
 def _append_debt_ratio_summary(df: pd.DataFrame) -> str:

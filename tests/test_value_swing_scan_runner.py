@@ -20,7 +20,11 @@ from tradingagents.strategies.scan_store import (
     SCAN_STATUS_COMPLETED,
     SCAN_STATUS_FAILED,
     SCAN_STATUS_RUNNING,
+    STRATEGY_BOTH,
+    STRATEGY_GROWTH_ACCEL,
+    STRATEGY_VALUE_SWING,
     ValueSwingScanStore,
+    default_store,
 )
 from tradingagents.strategies.value_swing import ScanResult, StockInfo
 from web.analysis_queue import AnalysisQueueStore
@@ -279,6 +283,7 @@ def test_start_detached_scan_reserves_running_slot(
         status_path=status_path,
         archive_dir=archive_dir,
         log_path=tmp_path / "scan.log",
+        strategy=STRATEGY_VALUE_SWING,
     )
     store = ValueSwingScanStore(path=status_path, archive_dir=archive_dir)
     record = store.load()
@@ -319,11 +324,21 @@ def test_start_detached_scan_refuses_second_concurrent(
     status_path = tmp_path / "value_swing_scan.json"
     archive_dir = tmp_path / "scans"
     log_path = tmp_path / "scan.log"
-    start_detached_scan(max_candidates=10, status_path=status_path,
-                        archive_dir=archive_dir, log_path=log_path)
+    start_detached_scan(
+        max_candidates=10,
+        status_path=status_path,
+        archive_dir=archive_dir,
+        log_path=log_path,
+        strategy=STRATEGY_VALUE_SWING,
+    )
     with pytest.raises(RuntimeError, match="已有扫描"):
-        start_detached_scan(max_candidates=10, status_path=status_path,
-                            archive_dir=archive_dir, log_path=log_path)
+        start_detached_scan(
+            max_candidates=10,
+            status_path=status_path,
+            archive_dir=archive_dir,
+            log_path=log_path,
+            strategy=STRATEGY_VALUE_SWING,
+        )
 
 
 def test_start_detached_scan_uses_new_session(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -345,6 +360,7 @@ def test_start_detached_scan_uses_new_session(monkeypatch: pytest.MonkeyPatch, t
         enqueue_on_success=True,
         status_path=status_path,
         archive_dir=archive_dir,
+        strategy=STRATEGY_VALUE_SWING,
     )
     assert pid == 5555
     assert calls
@@ -354,3 +370,44 @@ def test_start_detached_scan_uses_new_session(monkeypatch: pytest.MonkeyPatch, t
     assert "--max-candidates" in argv
     assert "12" in argv
     assert "--enqueue" in argv
+    assert STRATEGY_VALUE_SWING in argv
+
+
+def test_start_detached_scan_both_reserves_two_stores(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    class FakePopen:
+        def __init__(self, *args, **kwargs):
+            self.argv = args[0]
+            self.pid = 7777
+
+    monkeypatch.setattr(
+        "tradingagents.strategies.scan_runner.subprocess.Popen",
+        FakePopen,
+    )
+    monkeypatch.setenv(
+        "TRADINGAGENTS_VALUE_SWING_SCAN_PATH",
+        str(tmp_path / "value_swing_scan.json"),
+    )
+    monkeypatch.setenv(
+        "TRADINGAGENTS_VALUE_SWING_SCANS_DIR",
+        str(tmp_path / "value_scans"),
+    )
+    monkeypatch.setenv(
+        "TRADINGAGENTS_GROWTH_ACCEL_SCAN_PATH",
+        str(tmp_path / "growth_accel_scan.json"),
+    )
+    monkeypatch.setenv(
+        "TRADINGAGENTS_GROWTH_ACCEL_SCANS_DIR",
+        str(tmp_path / "growth_scans"),
+    )
+    pid = start_detached_scan(
+        max_candidates=15,
+        log_path=tmp_path / "both.log",
+        strategy=STRATEGY_BOTH,
+    )
+    assert pid == 7777
+    v = default_store(STRATEGY_VALUE_SWING).load()
+    g = default_store(STRATEGY_GROWTH_ACCEL).load()
+    assert v["status"] == SCAN_STATUS_RUNNING and v["pid"] == 7777
+    assert g["status"] == SCAN_STATUS_RUNNING and g["pid"] == 7777

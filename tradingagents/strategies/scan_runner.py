@@ -17,14 +17,19 @@ from typing import Any, Callable
 
 from tradingagents.strategies.scan_store import (
     SCAN_STATUS_RUNNING,
+    STRATEGY_BOTH,
+    STRATEGY_GROWTH_ACCEL,
+    STRATEGY_VALUE_SWING,
     ValueSwingScanStore,
     default_store,
+    expand_strategies,
+    resolve_strategy,
 )
-from tradingagents.strategies.value_swing import ScanResult, run_value_swing_scan
+from tradingagents.strategies.value_swing import run_value_swing_scan
 
 logger = logging.getLogger(__name__)
 
-ScanFn = Callable[..., ScanResult]
+ScanFn = Callable[..., Any]
 
 # 进度落盘节流：同一秒内多次个股回调只写一次盘（阶段切换强制写）。
 _PROGRESS_MIN_INTERVAL_S = 0.5
@@ -55,8 +60,59 @@ def is_process_alive(pid: int | None) -> bool:
     return True
 
 
-def result_dict_from_scan(result: ScanResult) -> dict[str, Any]:
+def result_dict_from_scan(result: Any, *, strategy: str = STRATEGY_VALUE_SWING) -> dict[str, Any]:
     """Serialize ScanResult into the Web UI payload shape."""
+    strategy = resolve_strategy(strategy)
+    if strategy == STRATEGY_GROWTH_ACCEL:
+        from tradingagents.strategies.growth_accel import (
+            l2_factor_hits,
+            l2_score_max,
+            selection_rules_snapshot,
+            why_selected_line,
+        )
+
+        score_max = l2_score_max()
+        return {
+            "ok": True,
+            "strategy": STRATEGY_GROWTH_ACCEL,
+            "scan_date": result.scan_date,
+            "total_stocks": result.total_stocks,
+            "l0_passed": result.l0_passed,
+            "l1a_passed": result.l1a_passed,
+            "l1b_passed": result.l1b_passed,
+            "l2_passed": result.l2_passed,
+            "rules": selection_rules_snapshot(),
+            "score_max": score_max,
+            "candidates": [
+                {
+                    "code": c.code,
+                    "name": c.name,
+                    "price": c.price,
+                    "pe_ttm": c.pe_ttm,
+                    "pb": c.pb,
+                    "signal_score": c.signal_score,
+                    "score_max": score_max,
+                    "track": c.track,
+                    "np_ttm": c.np_ttm,
+                    "np_ttm_yoy": (
+                        round(c.np_ttm_yoy * 100, 1) if c.np_ttm_yoy is not None else None
+                    ),
+                    "rev_ttm_yoy": (
+                        round(c.rev_ttm_yoy * 100, 1) if c.rev_ttm_yoy is not None else None
+                    ),
+                    "turnaround": c.turnaround,
+                    "loss_narrowed": c.loss_narrowed,
+                    "revenue_accel": c.revenue_accel,
+                    "growth_theme": c.growth_theme,
+                    "high_liquidity": c.high_liquidity,
+                    "factor_hits": l2_factor_hits(c),
+                    "why": why_selected_line(c),
+                }
+                for c in result.candidates
+            ],
+            "duration_seconds": result.duration_seconds,
+        }
+
     from tradingagents.strategies.value_swing import (
         l2_factor_hits,
         l2_score_max,
@@ -67,6 +123,7 @@ def result_dict_from_scan(result: ScanResult) -> dict[str, Any]:
     score_max = l2_score_max()
     return {
         "ok": True,
+        "strategy": STRATEGY_VALUE_SWING,
         "scan_date": result.scan_date,
         "total_stocks": result.total_stocks,
         "l0_passed": result.l0_passed,
@@ -101,6 +158,15 @@ def result_dict_from_scan(result: ScanResult) -> dict[str, Any]:
         ],
         "duration_seconds": result.duration_seconds,
     }
+
+
+def _scan_fn_for_strategy(strategy: str) -> ScanFn:
+    strategy = resolve_strategy(strategy)
+    if strategy == STRATEGY_GROWTH_ACCEL:
+        from tradingagents.strategies.growth_accel import run_growth_accel_scan
+
+        return run_growth_accel_scan
+    return run_value_swing_scan
 
 
 def candidates_to_analysis_jobs(
@@ -213,9 +279,11 @@ def run_scan_job(
     queue_store=None,
     scan_fn: ScanFn | None = None,
     pid: int | None = None,
+    strategy: str = STRATEGY_VALUE_SWING,
 ) -> dict[str, Any]:
     """Execute one scan, persist status/result, optionally enqueue candidates."""
-    store = scan_store or default_store()
+    strategy = resolve_strategy(strategy)
+    store = scan_store or default_store(strategy)
     own_pid = pid if pid is not None else os.getpid()
     with store.exclusive():
         _refuse_if_running(store, current_pid=own_pid)
@@ -224,13 +292,13 @@ def run_scan_job(
             enqueue_on_success=enqueue_on_success,
             pid=own_pid,
         )
-    fn = scan_fn or run_value_swing_scan
+    fn = scan_fn or _scan_fn_for_strategy(strategy)
     # Only a failure of the scan itself is a failed run.
     try:
         result = fn(**_scan_kwargs(fn, max_candidates, store))
-        payload = result_dict_from_scan(result)
+        payload = result_dict_from_scan(result, strategy=strategy)
     except Exception as exc:
-        logger.exception("价值波段扫描失败")
+        logger.exception("%s 扫描失败", strategy)
         return store.mark_failed(str(exc))
 
     # The scan succeeded — enqueue is best-effort and must never discard the
@@ -273,37 +341,61 @@ def start_detached_scan(
     status_path: Path | None = None,
     archive_dir: Path | None = None,
     log_path: Path | None = None,
+    strategy: str = STRATEGY_BOTH,
 ) -> int:
-    """Spawn an independent scan process that outlives the Web parent."""
-    store = ValueSwingScanStore(path=status_path, archive_dir=archive_dir)
+    """Spawn an independent scan process that outlives the Web parent.
+
+    ``strategy=both`` (default) runs value_swing then growth_accel in one child
+    process; both status files are reserved with the same pid.
+    """
+    strategies = expand_strategies(strategy)
+    cli_strategy = STRATEGY_BOTH if len(strategies) > 1 else strategies[0]
+
+    stores: list[ValueSwingScanStore]
+    if len(strategies) == 1 and (status_path is not None or archive_dir is not None):
+        stores = [
+            ValueSwingScanStore(
+                path=status_path, archive_dir=archive_dir, strategy=strategies[0]
+            )
+        ]
+    else:
+        stores = [default_store(s) for s in strategies]
 
     env = os.environ.copy()
-    if status_path is not None:
-        env["TRADINGAGENTS_VALUE_SWING_SCAN_PATH"] = str(status_path)
-    if archive_dir is not None:
-        env["TRADINGAGENTS_VALUE_SWING_SCANS_DIR"] = str(archive_dir)
+    default_log = Path.home() / ".tradingagents" / "strategy_scan.log"
+    if cli_strategy == STRATEGY_GROWTH_ACCEL:
+        default_log = Path.home() / ".tradingagents" / "growth_accel_scan.log"
+        if status_path is not None:
+            env["TRADINGAGENTS_GROWTH_ACCEL_SCAN_PATH"] = str(status_path)
+        if archive_dir is not None:
+            env["TRADINGAGENTS_GROWTH_ACCEL_SCANS_DIR"] = str(archive_dir)
+    elif cli_strategy == STRATEGY_VALUE_SWING:
+        default_log = Path.home() / ".tradingagents" / "value_swing_scan.log"
+        if status_path is not None:
+            env["TRADINGAGENTS_VALUE_SWING_SCAN_PATH"] = str(status_path)
+        if archive_dir is not None:
+            env["TRADINGAGENTS_VALUE_SWING_SCANS_DIR"] = str(archive_dir)
 
     argv = [
         sys.executable,
         "-m",
         "tradingagents.strategies.scan_cli",
+        "--strategy",
+        cli_strategy,
         "--max-candidates",
         str(int(max_candidates)),
     ]
     if enqueue_on_success:
         argv.append("--enqueue")
 
-    log_file = log_path or (
-        Path.home() / ".tradingagents" / "value_swing_scan.log"
-    )
+    log_file = log_path or default_log
     log_file.parent.mkdir(parents=True, exist_ok=True)
-    # Atomically refuse-if-running + spawn + reserve so a cron worker and a Web
-    # launch cannot both start a scan. The child re-marks running with the same
-    # pid (skipping self-refusal via current_pid).
-    with store.exclusive():
-        _refuse_if_running(store)
-        # Keep the parent's fd out of the long-lived Web process: the child
-        # inherits its own dup, so close our copy right after spawning.
+
+    # Nested exclusive: always value then growth to avoid lock-order deadlock.
+    # Atomically refuse-if-running + spawn + reserve so cron/Web cannot race.
+    def _spawn_and_reserve() -> int:
+        for store in stores:
+            _refuse_if_running(store)
         with open(log_file, "a", encoding="utf-8") as log_fh:
             proc = subprocess.Popen(
                 argv,
@@ -314,9 +406,17 @@ def start_detached_scan(
                 env=env,
                 close_fds=True,
             )
-        store.mark_running(
-            max_candidates=max_candidates,
-            enqueue_on_success=enqueue_on_success,
-            pid=proc.pid,
-        )
-    return int(proc.pid)
+        for store in stores:
+            store.mark_running(
+                max_candidates=max_candidates,
+                enqueue_on_success=enqueue_on_success,
+                pid=proc.pid,
+            )
+        return int(proc.pid)
+
+    if len(stores) == 1:
+        with stores[0].exclusive():
+            return _spawn_and_reserve()
+    with stores[0].exclusive():
+        with stores[1].exclusive():
+            return _spawn_and_reserve()

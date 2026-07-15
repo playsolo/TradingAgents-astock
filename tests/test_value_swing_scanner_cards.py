@@ -87,3 +87,16 @@ def test_grid_html_auto_fill_capped_at_three_columns():
 
 def test_empty_grid_is_empty_string():
     assert _candidate_grid_html([]) == ""
+
+
+def test_growth_card_shows_np_yoy_and_dual_badge():
+    html = _candidate_card_html(
+        _cand(
+            track="profit",
+            np_ttm_yoy=120.0,
+            dual_pool=True,
+            why="净利TTM 120% · 成长题材",
+        )
+    )
+    assert "净利TTM 120%" in html
+    assert "价值&amp;成长" in html or "价值&成长" in html

@@ -1,8 +1,10 @@
-"""CLI：独立运行价值波段扫描（关 Web 后仍可完成）。
+"""CLI：独立运行策略扫描（关 Web 后仍可完成）。
 
 用法：
-  tradingagents-scan
-  tradingagents-scan --max-candidates 15 --enqueue
+  tradingagents-scan                         # 默认：价值 + 成长都跑
+  tradingagents-scan --strategy value_swing
+  tradingagents-scan --strategy growth_accel
+  tradingagents-scan --strategy both --enqueue
   tradingagents-scan --enqueue --skip-non-trading-day
   python -m tradingagents.strategies.scan_cli --enqueue
 """
@@ -17,20 +19,35 @@ from datetime import datetime
 from tradingagents.strategies.scan_runner import run_scan_job
 from tradingagents.strategies.scan_store import (
     SCAN_STATUS_COMPLETED,
+    STRATEGY_BOTH,
+    STRATEGY_GROWTH_ACCEL,
+    STRATEGY_VALUE_SWING,
     default_store,
+    expand_strategies,
 )
 from tradingagents.watchlist.calendar import CN_TZ, is_cn_trading_day
 
 logger = logging.getLogger(__name__)
 
+_STRATEGY_LABELS = {
+    STRATEGY_VALUE_SWING: "价值波段",
+    STRATEGY_GROWTH_ACCEL: "成长加速",
+}
+
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="价值波段三阶漏斗扫描（独立进程）")
+    p = argparse.ArgumentParser(description="策略漏斗扫描（独立进程）")
+    p.add_argument(
+        "--strategy",
+        choices=(STRATEGY_VALUE_SWING, STRATEGY_GROWTH_ACCEL, STRATEGY_BOTH),
+        default=STRATEGY_BOTH,
+        help="both=价值+成长都跑（默认）；也可只跑 value_swing / growth_accel",
+    )
     p.add_argument(
         "--max-candidates",
         type=int,
         default=15,
-        help="L2 候选上限（默认 15）",
+        help="各策略 L2 候选上限（默认 15）",
     )
     p.add_argument(
         "--enqueue",
@@ -45,39 +62,59 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _print_one_result(strategy: str, record: dict) -> None:
+    label = _STRATEGY_LABELS.get(strategy, strategy)
+    result = record.get("result") or {}
+    print(
+        f"[{label}] 扫描完成 {result.get('scan_date')}: "
+        f"{result.get('l0_passed')}→{result.get('l1a_passed')}→"
+        f"{result.get('l1b_passed')}→{result.get('l2_passed')} 候选, "
+        f"{result.get('duration_seconds', 0):.0f}s"
+        + (
+            f", 已入队 {record.get('enqueued', 0)} 只"
+            if record.get("enqueued")
+            else ""
+        )
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     args = build_parser().parse_args(argv)
+    strategies = expand_strategies(args.strategy)
     if args.skip_non_trading_day:
         now = datetime.now(CN_TZ)
         if not is_cn_trading_day(now):
-            logger.info("非交易日 %s，跳过价值波段扫描", now.date())
+            logger.info(
+                "非交易日 %s，跳过扫描 strategies=%s",
+                now.date(),
+                ",".join(strategies),
+            )
             print(f"非交易日 {now.date()}，跳过扫描")
             return 0
-    store = default_store()
-    record = run_scan_job(
-        max_candidates=args.max_candidates,
-        enqueue_on_success=args.enqueue,
-        scan_store=store,
-    )
-    if record.get("status") != SCAN_STATUS_COMPLETED:
-        print(f"扫描失败: {record.get('error')}", file=sys.stderr)
-        return 1
-    result = record.get("result") or {}
-    print(
-        f"扫描完成 {result.get('scan_date')}: "
-        f"{result.get('l0_passed')}→{result.get('l1a_passed')}→"
-        f"{result.get('l1b_passed')}→{result.get('l2_passed')} 候选, "
-        f"{result.get('duration_seconds', 0):.0f}s"
-        + (
-            f", 已入队 {record.get('enqueued', 0)} 只"
-            if args.enqueue
-            else ""
+
+    failed = 0
+    for strategy in strategies:
+        label = _STRATEGY_LABELS.get(strategy, strategy)
+        logger.info("开始扫描：%s", label)
+        store = default_store(strategy)
+        record = run_scan_job(
+            max_candidates=args.max_candidates,
+            enqueue_on_success=args.enqueue,
+            scan_store=store,
+            strategy=strategy,
         )
-    )
+        if record.get("status") != SCAN_STATUS_COMPLETED:
+            print(f"[{label}] 扫描失败: {record.get('error')}", file=sys.stderr)
+            failed += 1
+            continue
+        _print_one_result(strategy, record)
+
+    if failed:
+        return 1
     return 0
 
 
