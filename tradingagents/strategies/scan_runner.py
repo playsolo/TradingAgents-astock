@@ -100,9 +100,14 @@ def result_dict_from_scan(result: Any, *, strategy: str = STRATEGY_VALUE_SWING) 
                     "rev_ttm_yoy": (
                         round(c.rev_ttm_yoy * 100, 1) if c.rev_ttm_yoy is not None else None
                     ),
+                    "used_deduct": c.used_deduct,
+                    "no_nonrecurring": c.no_nonrecurring,
+                    "ocf_ttm": c.ocf_ttm,
+                    "ocf_score_delta": c.ocf_score_delta,
                     "turnaround": c.turnaround,
                     "loss_narrowed": c.loss_narrowed,
                     "revenue_accel": c.revenue_accel,
+                    "profit_accel": c.profit_accel,
                     "growth_theme": c.growth_theme,
                     "high_liquidity": c.high_liquidity,
                     "factor_hits": l2_factor_hits(c),

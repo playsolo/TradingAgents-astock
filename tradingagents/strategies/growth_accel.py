@@ -1,9 +1,9 @@
 """成长加速选股策略 — 与价值波段并行的第二套漏斗。
 
-L0 流动性（允许亏损）→ L1a 成交额预筛 → L1b 绝对利润/亏损拐点
-→ L2 轻前景加权，输出 top 15。
+L0 流动性（允许亏损）→ L1a 成交额预筛 → L1b 扣非优先利润/亏损拐点 + 现金流质量
+→ L2 偏进攻排序（加速提权），输出 top 15。
 
-不设 PE/PB 硬顶；主排序键为归母净利 TTM 增速。
+不设 PE/PB 硬顶；主排序键为扣非（否则归母）净利 TTM 增速。
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from typing import Any
 
 import pandas as pd
 
-from tradingagents.dataflows.a_stock import _build_name_code_map
+from tradingagents.dataflows.a_stock import _build_name_code_map, _em_get
 from tradingagents.strategies.value_swing import (
     _MIN_LISTED_MONTHS,
     _TENCENT_BATCH_SIZE,
@@ -37,16 +37,18 @@ _MIN_VOLUME_WAN: float = 3000.0
 _L1_PROCESS_LIMIT: int = 120          # 仅对成交额前 N 只做财报深挖
 _MAX_CANDIDATES: int = 15
 
-_MIN_NP_YOY: float = 0.50             # 已盈利：TTM 归母净利 YoY ≥ 50%
+_MIN_NP_YOY: float = 0.50             # 已盈利：扣非/归母 TTM YoY ≥ 50%
 _STRONG_NP_YOY: float = 1.00          # ≥100% 强信号
-_MIN_NP_ABS: float = 1e8              # 归母净利 TTM ≥ 1 亿元
+_MIN_NP_ABS: float = 1e8              # 利润 TTM ≥ 1 亿元
 
 _MIN_REV_YOY_LOSS: float = 0.30       # 亏损轨：营收 TTM YoY ≥ 30%
 _MIN_REV_ABS_LOSS: float = 1e9        # 亏损轨：营收 TTM ≥ 10 亿元
 _MIN_LOSS_NARROW: float = 0.30        # 亏损额同比收窄 ≥ 30%
 
-_NP_COL = "归属于母公司所有者的净利润"
-_REV_COL = "营业收入"
+# 质量：扣非缺口 / OCF
+_NONRECURRING_GAP: float = 0.30       # 扣非 YoY < 归母 YoY − 30pct → 硬剔
+_OCF_RATIO_OK: float = 0.30           # OCF/利润 ≥ 0.3 不加分减分
+_ACCEL_EXTRA_SCORE: int = 2           # 近季加速（偏进攻）
 
 _GROWTH_THEME_KEYWORDS = (
     "算力", "光通信", "光模块", "人工智能", "AI", "半导体", "芯片",
@@ -80,18 +82,26 @@ class GrowthStockInfo:
     listed_months: int = 999
     pe_ttm: float = 0.0
     pb: float = 0.0
-    # TTM 指标
+    # 用于入池/排序的利润 TTM（扣非优先，否则归母）
     np_ttm: float | None = None
     np_ttm_prior: float | None = None
     np_ttm_yoy: float | None = None
+    parent_np_ttm_yoy: float | None = None
+    deduct_np_ttm_yoy: float | None = None
+    used_deduct: bool = False
+    no_nonrecurring: bool = False  # 无扣非字段，回退归母
     rev_ttm: float | None = None
     rev_ttm_prior: float | None = None
     rev_ttm_yoy: float | None = None
+    ocf_ttm: float | None = None
+    ocf_ttm_prior: float | None = None
+    ocf_score_delta: int = 0
     # 分类与加权
     track: str = ""  # "profit" | "loss"
     turnaround: bool = False
     loss_narrowed: bool = False
-    revenue_accel: bool = False
+    revenue_accel: bool = False  # 兼容旧字段：同 profit_accel
+    profit_accel: bool = False
     growth_theme: bool = False
     high_liquidity: bool = False
     signal_score: int = 0
@@ -127,34 +137,39 @@ def selection_rules_snapshot() -> dict[str, Any]:
             f"按成交额取前 {_L1_PROCESS_LIMIT} 只做财报深挖",
         ],
         "l1": [
-            f"已盈利：归母净利 TTM YoY ≥ {_MIN_NP_YOY * 100:g}% 且绝对额 ≥ {_MIN_NP_ABS / 1e8:g} 亿",
-            f"强信号：净利 TTM YoY ≥ {_STRONG_NP_YOY * 100:g}%",
+            f"已盈利：扣非净利 TTM YoY ≥ {_MIN_NP_YOY * 100:g}%（无扣非则归母）"
+            f"且绝对额 ≥ {_MIN_NP_ABS / 1e8:g} 亿",
+            f"扣非 YoY < 归母 YoY − {_NONRECURRING_GAP * 100:g}pct → 剔（一次性利润）",
+            f"强信号：利润 TTM YoY ≥ {_STRONG_NP_YOY * 100:g}%",
             f"亏损成长：营收 TTM YoY ≥ {_MIN_REV_YOY_LOSS * 100:g}% 且营收 ≥ {_MIN_REV_ABS_LOSS / 1e8:g} 亿，"
             f"且亏损收窄 ≥ {_MIN_LOSS_NARROW * 100:g}% 或由亏转盈",
+            f"OCF 质量：利润轨 OCF/利润<{_OCF_RATIO_OK:g} 降权；缺失不踢（偏进攻）",
             "指标缺失 → 不入池（fail-closed）",
         ],
         "l1b": [
-            "同 L1 增长核（见左列细化）",
+            "同 L1 增长核 + 扣非/OCF 质量（见左列）",
         ],
         "l2": {
-            "score_max": 6,
+            "score_max": l2_score_max(),
             "active": [
                 "净利TTM高增",
                 "强增速≥100%",
                 "亏损拐点/收窄",
-                "近季加速",
+                "近季加速(+2)",
                 "成长题材",
                 "高流动性",
+                "扣非/OCF质量调整",
             ],
             "dormant": [],
             "top_n": _MAX_CANDIDATES,
-            "note": "主排序：信号分 → 净利TTM增速；不设估值硬顶",
+            "note": "偏进攻：加速+2；主排序信号分→利润TTM增速；不设估值硬顶",
         },
     }
 
 
 def l2_score_max(*, only_active: bool = True) -> int:
-    return 6
+    # 强增速3 + 加速2 + 题材1 + 流动性1 = 7；亏损轨 OCF+1 可达 8
+    return 8
 
 
 # ── TTM 计算（国内报表为累计 YTD）────────────────────────────────────────────
@@ -215,6 +230,73 @@ def compute_ttm_pair(
     return ttm, prior, yoy
 
 
+def resolve_profit_metrics(
+    *,
+    parent_ttm: float | None,
+    parent_prior: float | None,
+    parent_yoy: float | None,
+    deduct_ttm: float | None,
+    deduct_prior: float | None,
+    deduct_yoy: float | None,
+) -> dict[str, Any]:
+    """扣非优先；无扣非则回退归母并标记 no_nonrecurring。"""
+    if deduct_ttm is not None:
+        return {
+            "np_ttm": deduct_ttm,
+            "np_prior": deduct_prior,
+            "np_yoy": deduct_yoy,
+            "used_deduct": True,
+            "no_nonrecurring": False,
+            "parent_yoy": parent_yoy,
+            "deduct_yoy": deduct_yoy,
+        }
+    return {
+        "np_ttm": parent_ttm,
+        "np_prior": parent_prior,
+        "np_yoy": parent_yoy,
+        "used_deduct": False,
+        "no_nonrecurring": parent_ttm is not None,
+        "parent_yoy": parent_yoy,
+        "deduct_yoy": None,
+    }
+
+
+def is_nonrecurring_gap(
+    parent_yoy: float | None,
+    deduct_yoy: float | None,
+    *,
+    gap: float = _NONRECURRING_GAP,
+) -> bool:
+    """扣非增速明显低于归母 → 一次性利润嫌疑。"""
+    if parent_yoy is None or deduct_yoy is None:
+        return False
+    return deduct_yoy < parent_yoy - gap
+
+
+def ocf_quality_score_delta(
+    *,
+    track: str,
+    np_ttm: float | None,
+    ocf_ttm: float | None,
+    ocf_prior: float | None,
+) -> int:
+    """OCF 质量调整：缺失不处理；利润轨弱匹配降权；亏损轨好转 +1。"""
+    if ocf_ttm is None:
+        return 0
+    if track == "loss":
+        if ocf_prior is not None and ocf_ttm > ocf_prior:
+            return 1
+        return 0
+    if np_ttm is None or np_ttm <= 0:
+        return 0
+    if ocf_ttm < 0 and ocf_prior is not None and ocf_prior < 0 and ocf_ttm < ocf_prior:
+        return -2
+    ratio = ocf_ttm / np_ttm
+    if ratio >= _OCF_RATIO_OK:
+        return 0
+    return -1
+
+
 def evaluate_growth_track(
     *,
     np_ttm: float | None,
@@ -235,7 +317,7 @@ def evaluate_growth_track(
         if np_prior is not None and np_prior <= 0:
             return True, track, ""
         if np_yoy is None or np_yoy < _MIN_NP_YOY:
-            return False, track, f"净利增速不足"
+            return False, track, "净利增速不足"
         return True, track, ""
 
     track = "loss"
@@ -266,46 +348,54 @@ def compute_growth_signal_score(info: GrowthStockInfo) -> int:
             s += 2
         else:
             s += 1
-    if info.revenue_accel:
-        s += 1
+    accel = info.profit_accel or info.revenue_accel
+    if accel:
+        s += _ACCEL_EXTRA_SCORE
     if info.growth_theme:
         s += 1
     if info.high_liquidity:
         s += 1
+    if info.no_nonrecurring:
+        s -= 1
+    s += int(info.ocf_score_delta)
     return s
 
 
 def why_selected_line(candidate: GrowthStockInfo | dict[str, Any]) -> str:
-    if isinstance(candidate, dict):
-        track = candidate.get("track") or ""
-        yoy = candidate.get("np_ttm_yoy")
-        bits = []
-        if track == "profit" and yoy is not None:
-            bits.append(f"净利TTM {float(yoy) * 100:.0f}%")
-        elif track == "loss":
-            bits.append("亏损收窄/成长")
-        if candidate.get("turnaround"):
-            bits.append("由亏转盈")
-        if candidate.get("revenue_accel"):
-            bits.append("近季加速")
-        if candidate.get("growth_theme"):
-            bits.append("成长题材")
-        if candidate.get("high_liquidity"):
-            bits.append("高流动性")
-        return " · ".join(bits) if bits else "成长加速入池"
+    def _get(key: str, default=None):
+        if isinstance(candidate, dict):
+            return candidate.get(key, default)
+        return getattr(candidate, key, default)
+
+    track = _get("track") or ""
+    yoy = _get("np_ttm_yoy")
     bits: list[str] = []
-    if candidate.track == "profit" and candidate.np_ttm_yoy is not None:
-        bits.append(f"净利TTM {candidate.np_ttm_yoy * 100:.0f}%")
-    elif candidate.track == "loss":
+    if track == "profit" and yoy is not None:
+        # result_dict 可能已把 yoy 存成百分数
+        yoy_f = float(yoy)
+        label_yoy = yoy_f if yoy_f > 3 else yoy_f * 100
+        prefix = "扣非TTM" if _get("used_deduct") else "净利TTM"
+        bits.append(f"{prefix} {label_yoy:.0f}%")
+    elif track == "loss":
         bits.append("亏损收窄/成长")
-    if candidate.turnaround:
+    if _get("turnaround"):
         bits.append("由亏转盈")
-    if candidate.revenue_accel:
+    if _get("profit_accel") or _get("revenue_accel"):
         bits.append("近季加速")
-    if candidate.growth_theme:
+    if _get("growth_theme"):
         bits.append("成长题材")
-    if candidate.high_liquidity:
+    if _get("high_liquidity"):
         bits.append("高流动性")
+    if _get("no_nonrecurring"):
+        bits.append("无扣非回退")
+    ocf_d = _get("ocf_score_delta") or 0
+    try:
+        if int(ocf_d) < 0:
+            bits.append("OCF偏弱")
+        elif int(ocf_d) > 0:
+            bits.append("OCF改善")
+    except (TypeError, ValueError):
+        pass
     return " · ".join(bits) if bits else "成长加速入池"
 
 
@@ -317,18 +407,25 @@ def l2_factor_hits(candidate: GrowthStockInfo | dict[str, Any]) -> list[dict[str
 
     yoy = _get("np_ttm_yoy", None)
     track = _get("track", "")
+    yoy_f: float | None
+    try:
+        yoy_f = float(yoy) if yoy is not None else None
+        if yoy_f is not None and yoy_f > 3:
+            yoy_f = yoy_f / 100.0
+    except (TypeError, ValueError):
+        yoy_f = None
     return [
         {
             "key": "np_growth",
             "label": "净利TTM高增",
             "active": True,
-            "hit": track == "profit" and yoy is not None and float(yoy) >= _MIN_NP_YOY,
+            "hit": track == "profit" and yoy_f is not None and yoy_f >= _MIN_NP_YOY,
         },
         {
             "key": "strong_growth",
             "label": "强增速≥100%",
             "active": True,
-            "hit": yoy is not None and float(yoy) >= _STRONG_NP_YOY,
+            "hit": yoy_f is not None and yoy_f >= _STRONG_NP_YOY,
         },
         {
             "key": "loss_inflection",
@@ -337,10 +434,10 @@ def l2_factor_hits(candidate: GrowthStockInfo | dict[str, Any]) -> list[dict[str
             "hit": bool(_get("loss_narrowed") or _get("turnaround")),
         },
         {
-            "key": "revenue_accel",
+            "key": "profit_accel",
             "label": "近季加速",
             "active": True,
-            "hit": bool(_get("revenue_accel")),
+            "hit": bool(_get("profit_accel") or _get("revenue_accel")),
         },
         {
             "key": "growth_theme",
@@ -355,7 +452,6 @@ def l2_factor_hits(candidate: GrowthStockInfo | dict[str, Any]) -> list[dict[str
             "hit": bool(_get("high_liquidity")),
         },
     ]
-
 
 # ── 进度 ────────────────────────────────────────────────────────────────────
 
@@ -466,52 +562,148 @@ def run_l1a_prefilter(stocks: list[GrowthStockInfo]) -> list[GrowthStockInfo]:
     return out
 
 
-# ── 财报拉取与 L1b ───────────────────────────────────────────────────────────
+# ── 财报拉取与 L1b（东财：扣非 + 经营现金流）───────────────────────────────
 
 
-def _series_from_income(df: pd.DataFrame, col: str) -> pd.Series:
-    if df is None or df.empty or col not in df.columns or "报告日" not in df.columns:
+def _em_rows(report_name: str, code: str, columns: str, page_size: int = 16) -> list[dict]:
+    resp = _em_get(
+        "https://datacenter-web.eastmoney.com/api/data/v1/get",
+        params={
+            "reportName": report_name,
+            "columns": columns,
+            "filter": f'(SECURITY_CODE="{code}")',
+            "pageNumber": "1",
+            "pageSize": str(page_size),
+            "sortTypes": "-1",
+            "sortColumns": "REPORT_DATE",
+            "source": "HEXIN",
+            "client": "WEB",
+        },
+        timeout=10,
+    )
+    data = resp.json()
+    rows = (data.get("result") or {}).get("data") or []
+    return rows if isinstance(rows, list) else []
+
+
+def _series_from_em_rows(rows: list[dict], field: str) -> pd.Series:
+    dates: list[pd.Timestamp] = []
+    vals: list[float] = []
+    for row in rows:
+        try:
+            ts = pd.Timestamp(str(row.get("REPORT_DATE", ""))[:10])
+            val = float(row[field]) if row.get(field) is not None else float("nan")
+        except (TypeError, ValueError, KeyError):
+            continue
+        if pd.isna(ts) or pd.isna(val):
+            continue
+        dates.append(ts)
+        vals.append(val)
+    if not dates:
         return pd.Series(dtype=float)
-    dates = pd.to_datetime(df["报告日"], errors="coerce")
-    vals = pd.to_numeric(df[col], errors="coerce")
-    s = pd.Series(vals.values, index=dates)
-    return s.dropna()
+    return pd.Series(vals, index=dates)
 
 
-def _fetch_income_metrics(code: str) -> dict[str, float | None | bool]:
-    from tradingagents.dataflows.a_stock import _get_financial_report_sina
+def _near_yoy_accel(series: pd.Series, ttm_yoy: float | None) -> bool:
+    """最新累计 YoY 是否相对 TTM YoY 加速（> TTM + 5pct）。"""
+    if series is None or series.empty or ttm_yoy is None:
+        return False
+    s = series.dropna().sort_index(ascending=False)
+    if s.empty:
+        return False
+    latest_ts = pd.Timestamp(s.index[0])
+    cur = _lookup_ytd(s, int(latest_ts.year), int(latest_ts.month))
+    prev = _lookup_ytd(s, int(latest_ts.year) - 1, int(latest_ts.month))
+    if cur is None or prev is None or prev == 0:
+        return False
+    # prev 可为负（亏损），仍用相对变化；为正时用常规 YoY
+    if prev > 0:
+        near_yoy = (cur - prev) / prev
+    else:
+        return False
+    return near_yoy > ttm_yoy + 0.05
 
-    df = _get_financial_report_sina(code, "利润表", "quarterly", limit=16)
-    np_s = _series_from_income(df, _NP_COL)
-    rev_s = _series_from_income(df, _REV_COL)
-    np_ttm, np_prior, np_yoy = compute_ttm_pair(np_s)
+
+def _fetch_income_metrics(code: str) -> dict[str, Any]:
+    """东财利润表（含扣非）+ 现金流量表 → TTM 指标。"""
+    income_cols = (
+        "SECURITY_CODE,REPORT_DATE,PARENT_NETPROFIT,"
+        "DEDUCT_PARENT_NETPROFIT,TOTAL_OPERATE_INCOME,OPERATE_INCOME"
+    )
+    income_rows = _em_rows("RPT_DMSK_FN_INCOME", code, income_cols)
+    cf_rows = _em_rows(
+        "RPT_DMSK_FN_CASHFLOW",
+        code,
+        "SECURITY_CODE,REPORT_DATE,NETCASH_OPERATE",
+    )
+
+    parent_s = _series_from_em_rows(income_rows, "PARENT_NETPROFIT")
+    deduct_s = _series_from_em_rows(income_rows, "DEDUCT_PARENT_NETPROFIT")
+    rev_s = _series_from_em_rows(income_rows, "TOTAL_OPERATE_INCOME")
+    if rev_s.empty:
+        rev_s = _series_from_em_rows(income_rows, "OPERATE_INCOME")
+    ocf_s = _series_from_em_rows(cf_rows, "NETCASH_OPERATE")
+
+    parent_ttm, parent_prior, parent_yoy = compute_ttm_pair(parent_s)
+    deduct_ttm, deduct_prior, deduct_yoy = compute_ttm_pair(deduct_s)
     rev_ttm, rev_prior, rev_yoy = compute_ttm_pair(rev_s)
+    ocf_ttm, ocf_prior, _ = compute_ttm_pair(ocf_s)
 
-    # 近季加速：最新 YTD 同比（若报表带不到 item_tongbi，用同月上年 YTD）
-    accel = False
-    if not rev_s.empty and len(rev_s) >= 2:
-        latest_ts = pd.Timestamp(rev_s.sort_index(ascending=False).index[0])
-        cur = _lookup_ytd(rev_s, int(latest_ts.year), int(latest_ts.month))
-        prev = _lookup_ytd(rev_s, int(latest_ts.year) - 1, int(latest_ts.month))
-        if cur is not None and prev is not None and prev > 0 and rev_yoy is not None:
-            near_yoy = (cur - prev) / prev
-            accel = near_yoy > rev_yoy + 0.05
+    resolved = resolve_profit_metrics(
+        parent_ttm=parent_ttm,
+        parent_prior=parent_prior,
+        parent_yoy=parent_yoy,
+        deduct_ttm=deduct_ttm,
+        deduct_prior=deduct_prior,
+        deduct_yoy=deduct_yoy,
+    )
+    # 加速看用于入池的利润序列（扣非优先）
+    profit_s = deduct_s if resolved["used_deduct"] else parent_s
+    accel = _near_yoy_accel(profit_s, resolved["np_yoy"])
 
     return {
-        "np_ttm": np_ttm,
-        "np_ttm_prior": np_prior,
-        "np_ttm_yoy": np_yoy,
+        **resolved,
         "rev_ttm": rev_ttm,
         "rev_ttm_prior": rev_prior,
         "rev_ttm_yoy": rev_yoy,
-        "revenue_accel": accel,
+        "ocf_ttm": ocf_ttm,
+        "ocf_ttm_prior": ocf_prior,
+        "profit_accel": accel,
     }
 
 
+def _finalize_passed_info(info: GrowthStockInfo, track: str) -> None:
+    info.track = track
+    info.turnaround = (
+        info.np_ttm is not None
+        and info.np_ttm > 0
+        and info.np_ttm_prior is not None
+        and info.np_ttm_prior <= 0
+    )
+    if (
+        track == "loss"
+        and info.np_ttm is not None
+        and info.np_ttm_prior is not None
+        and info.np_ttm < 0
+        and info.np_ttm_prior < 0
+    ):
+        narrow = (abs(info.np_ttm_prior) - abs(info.np_ttm)) / abs(info.np_ttm_prior)
+        info.loss_narrowed = narrow >= _MIN_LOSS_NARROW
+    info.ocf_score_delta = ocf_quality_score_delta(
+        track=track,
+        np_ttm=info.np_ttm,
+        ocf_ttm=info.ocf_ttm,
+        ocf_prior=info.ocf_ttm_prior,
+    )
+
+
 def run_l1_growth_filter_impl(stocks: list[GrowthStockInfo]) -> list[GrowthStockInfo]:
-    """纯判定（测试用）：假定 TTM 字段已填好。"""
+    """纯判定（测试用）：假定 TTM / 质量字段已填好。"""
     passed: list[GrowthStockInfo] = []
     for info in stocks:
+        if is_nonrecurring_gap(info.parent_np_ttm_yoy, info.deduct_np_ttm_yoy):
+            info.exclude_reason = "扣非显著低于归母"
+            continue
         ok, track, reason = evaluate_growth_track(
             np_ttm=info.np_ttm,
             np_yoy=info.np_ttm_yoy,
@@ -522,22 +714,7 @@ def run_l1_growth_filter_impl(stocks: list[GrowthStockInfo]) -> list[GrowthStock
         if not ok:
             info.exclude_reason = reason
             continue
-        info.track = track
-        info.turnaround = (
-            info.np_ttm is not None
-            and info.np_ttm > 0
-            and info.np_ttm_prior is not None
-            and info.np_ttm_prior <= 0
-        )
-        if (
-            track == "loss"
-            and info.np_ttm is not None
-            and info.np_ttm_prior is not None
-            and info.np_ttm < 0
-            and info.np_ttm_prior < 0
-        ):
-            narrow = (abs(info.np_ttm_prior) - abs(info.np_ttm)) / abs(info.np_ttm_prior)
-            info.loss_narrowed = narrow >= _MIN_LOSS_NARROW
+        _finalize_passed_info(info, track)
         passed.append(info)
     return passed
 
@@ -558,13 +735,25 @@ def run_l1b_filter(
             logger.debug("成长 L1b 财报失败 %s: %s", info.code, e)
             info.exclude_reason = "指标缺失"
             continue
-        info.np_ttm = metrics["np_ttm"]  # type: ignore[assignment]
-        info.np_ttm_prior = metrics["np_ttm_prior"]  # type: ignore[assignment]
-        info.np_ttm_yoy = metrics["np_ttm_yoy"]  # type: ignore[assignment]
-        info.rev_ttm = metrics["rev_ttm"]  # type: ignore[assignment]
-        info.rev_ttm_prior = metrics["rev_ttm_prior"]  # type: ignore[assignment]
-        info.rev_ttm_yoy = metrics["rev_ttm_yoy"]  # type: ignore[assignment]
-        info.revenue_accel = bool(metrics["revenue_accel"])
+
+        info.np_ttm = metrics["np_ttm"]
+        info.np_ttm_prior = metrics["np_prior"]
+        info.np_ttm_yoy = metrics["np_yoy"]
+        info.parent_np_ttm_yoy = metrics["parent_yoy"]
+        info.deduct_np_ttm_yoy = metrics["deduct_yoy"]
+        info.used_deduct = bool(metrics["used_deduct"])
+        info.no_nonrecurring = bool(metrics["no_nonrecurring"])
+        info.rev_ttm = metrics["rev_ttm"]
+        info.rev_ttm_prior = metrics["rev_ttm_prior"]
+        info.rev_ttm_yoy = metrics["rev_ttm_yoy"]
+        info.ocf_ttm = metrics["ocf_ttm"]
+        info.ocf_ttm_prior = metrics["ocf_ttm_prior"]
+        info.profit_accel = bool(metrics["profit_accel"])
+        info.revenue_accel = info.profit_accel
+
+        if is_nonrecurring_gap(info.parent_np_ttm_yoy, info.deduct_np_ttm_yoy):
+            info.exclude_reason = "扣非显著低于归母"
+            continue
 
         ok, track, reason = evaluate_growth_track(
             np_ttm=info.np_ttm,
@@ -576,24 +765,8 @@ def run_l1b_filter(
         if not ok:
             info.exclude_reason = reason
             continue
-        info.track = track
-        info.turnaround = (
-            info.np_ttm is not None
-            and info.np_ttm > 0
-            and info.np_ttm_prior is not None
-            and info.np_ttm_prior <= 0
-        )
-        if (
-            track == "loss"
-            and info.np_ttm is not None
-            and info.np_ttm_prior is not None
-            and info.np_ttm < 0
-            and info.np_ttm_prior < 0
-        ):
-            narrow = (abs(info.np_ttm_prior) - abs(info.np_ttm)) / abs(info.np_ttm_prior)
-            info.loss_narrowed = narrow >= _MIN_LOSS_NARROW
+        _finalize_passed_info(info, track)
         passed.append(info)
-        time.sleep(0.05)
 
     logger.info("成长 L1b: 通过 %d 只", len(passed))
     return passed
