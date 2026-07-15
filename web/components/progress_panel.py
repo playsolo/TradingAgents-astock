@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import streamlit as st
 
+from web.parallel_runs import RunSnapshot
 from web.progress import PIPELINE_STAGES, ProgressTracker
 
 # Fragment auto-refresh interval. Must stay short: full-app sleep+rerun blocked
@@ -25,6 +26,35 @@ def _status_badge(status: str) -> str:
 def _format_time(seconds: float) -> str:
     m, s = divmod(int(seconds), 60)
     return f"{m}:{s:02d}"
+
+
+def format_run_card_html(snap: RunSnapshot, focused: bool) -> str:
+    """Build the compact run-card HTML for one snapshot.
+
+    Kept blank-line-free on purpose: Streamlit's markdown renderer terminates an
+    HTML block at the first blank (or whitespace-only) line and then prints the
+    remaining tags as literal text. An empty ``final_signal`` used to leave such
+    a whitespace-only line, which leaked raw ``</span>`` tags into the UI.
+    """
+    card_bg = "#1a1a2e" if focused else "#161616"
+    border = "1px solid #ff5a1f" if focused else "1px solid #2a2a2a"
+    market_tag = "美股" if snap.market == "US" else "A股"
+    status_icon = "🟢" if snap.is_running else "✅" if snap.is_complete else "🔴"
+    signal_preview = f" · {snap.final_signal}" if snap.final_signal else ""
+    meta = f"{market_tag} · {snap.trade_date}{signal_preview}"
+
+    lines = [
+        f'<div style="background:{card_bg}; border:{border}; border-radius:8px; padding:0.6rem 1rem; margin:0.3rem 0;">',
+        '<div style="display:flex; justify-content:space-between; align-items:center;">',
+        '<span style="font-size:1rem; font-weight:600; color:#f5f1eb;">',
+        f"{status_icon} {snap.ticker}",
+        f'<span style="font-size:0.75rem; color:#888; margin-left:0.5rem;">{meta}</span>',
+        "</span>",
+        f'<span style="font-size:0.8rem; color:#666;">{_format_time(snap.elapsed)}</span>',
+        "</div>",
+        "</div>",
+    ]
+    return "\n".join(lines)
 
 
 def _split_stages(stages: list[dict[str, str]]) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
@@ -197,35 +227,11 @@ def render_multi_progress() -> None:
     # ── Compact cards for each run ──────────────────────────────────────
     for snap in snapshots:
         is_focused = snap.ticker == focus
-        card_bg = "#1a1a2e" if is_focused else "#161616"
-        border = "1px solid #ff5a1f" if is_focused else "1px solid #2a2a2a"
         pct = len(snap.completed_stages) / max(snap.total_stages, 1)
-        market_tag = "美股" if snap.market == "US" else "A股"
-
-        status_icon = "🟢" if snap.is_running else "✅" if snap.is_complete else "🔴"
-        signal_preview = f" · {snap.final_signal}" if snap.final_signal else ""
 
         with st.container():
             st.markdown(
-                f"""
-                <div style="
-                    background:{card_bg}; border:{border}; border-radius:8px;
-                    padding:0.6rem 1rem; margin:0.3rem 0; cursor:pointer;
-                " onclick="parent.document.querySelector('[data-testid=\\"stMarkdownContainer\\"]').click()">
-                    <div style="display:flex; justify-content:space-between; align-items:center;">
-                        <span style="font-size:1rem; font-weight:600; color:#f5f1eb;">
-                            {status_icon} {snap.ticker}
-                            <span style="font-size:0.75rem; color:#888; margin-left:0.5rem;">
-                                {market_tag} · {snap.trade_date}
-                                {signal_preview}
-                            </span>
-                        </span>
-                        <span style="font-size:0.8rem; color:#666;">
-                            {_format_time(snap.elapsed)}
-                        </span>
-                    </div>
-                </div>
-                """,
+                format_run_card_html(snap, focused=is_focused),
                 unsafe_allow_html=True,
             )
             st.progress(
