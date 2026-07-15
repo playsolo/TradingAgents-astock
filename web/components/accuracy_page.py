@@ -40,7 +40,9 @@ def render_accuracy_page() -> None:
     st.markdown("### 📊 信号准确率")
     st.caption(
         "跟踪分析结果的方向命中（做多后涨 / 做空后跌 / 持有落在 ±0.5% 带宽内）。"
-        "结算窗口：1 / 5 / 20 个交易日。全历史自动纳入，到期自动结算。"
+        "结算窗口：1 / 5 / 20 个交易日。"
+        "生产环境每日 **21:00（北京时间）** 由 systemd timer 自动结算；"
+        "也可在此手动「立即结算」，或 CLI：`tradingagents accuracy`。"
     )
 
     cfg = _overlay_admin_config(dict(DEFAULT_CONFIG))

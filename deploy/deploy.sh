@@ -136,6 +136,16 @@ echo "[远程] 重启 ${SERVICE_NAME} ..."
 sudo systemctl restart "${SERVICE_NAME}"
 echo "[远程] Service 状态:"
 systemctl is-active --quiet "${SERVICE_NAME}" && echo "  active" || echo "  inactive (非预期!)"
+
+# 信号准确率每日 21:00 timer（幂等安装 / 刷新单元文件）
+if [ -f deploy/tradingagents-accuracy.service ] && [ -f deploy/tradingagents-accuracy.timer ]; then
+  echo "[远程] 安装/刷新 tradingagents-accuracy.timer ..."
+  sudo cp deploy/tradingagents-accuracy.service /etc/systemd/system/
+  sudo cp deploy/tradingagents-accuracy.timer /etc/systemd/system/
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now tradingagents-accuracy.timer
+  systemctl list-timers tradingagents-accuracy.timer --no-pager || true
+fi
 CMDEOF
 )
 ssh "${REMOTE_USER}@${REMOTE_HOST}" -p "${SSH_PORT}" "${REMOTE_COMMANDS}" || {

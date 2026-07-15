@@ -1,0 +1,21 @@
+# TradingAgents-Astock 信号准确率 — 每日 21:00（北京时间）结算
+#
+# 与 tradingagents-accuracy.service 成对安装。
+#
+# 安装：
+#   sudo cp deploy/tradingagents-accuracy.service /etc/systemd/system/
+#   sudo cp deploy/tradingagents-accuracy.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now tradingagents-accuracy.timer
+
+[Unit]
+Description=Daily 21:00 signal accuracy settle for TradingAgents Astock
+
+[Timer]
+# 北京时间每日 21:00；关机错过则开机后补跑一次（Persistent）
+OnCalendar=Asia/Shanghai *-*-* 21:00:00
+Persistent=true
+Unit=tradingagents-accuracy.service
+
+[Install]
+WantedBy=timers.target

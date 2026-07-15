@@ -1,0 +1,31 @@
+# TradingAgents-Astock 信号准确率结算（oneshot）
+#
+# 由 tradingagents-accuracy.timer 每日 21:00（Asia/Shanghai）触发。
+#
+# 安装：
+#   sudo cp deploy/tradingagents-accuracy.service /etc/systemd/system/
+#   sudo cp deploy/tradingagents-accuracy.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now tradingagents-accuracy.timer
+#   systemctl list-timers tradingagents-accuracy.timer
+#
+# 手动立刻跑一次：
+#   sudo systemctl start tradingagents-accuracy.service
+
+[Unit]
+Description=TradingAgents Astock Signal Accuracy Settle
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=solo
+WorkingDirectory=/home/solo/TradingAgents-astock
+Environment="PATH=/home/solo/TradingAgents-astock/.venv/bin:/usr/bin"
+Environment="TZ=Asia/Shanghai"
+Environment="ARROW_DEFAULT_MEMORY_POOL=system"
+# 结算会拉 yfinance；限制并发噪音即可
+Nice=10
+ExecStart=/home/solo/TradingAgents-astock/.venv/bin/tradingagents accuracy
+# oneshot 失败不应无限重启；下次 timer 会再试
+SuccessExitStatus=0

@@ -113,6 +113,42 @@ ssh solo@m.wcc.io "sudo journalctl -u tradingagents-astock.service -f --no-hostn
 ssh solo@m.wcc.io "cd /home/solo/TradingAgents-astock && git pull origin dev && sudo systemctl restart tradingagents-astock.service"
 ```
 
+## 信号准确率定时结算（每日 21:00）
+
+生产用 systemd timer，北京时间每天 **21:00** 跑一次 `tradingagents accuracy`（回填 + 结算 1/5/20 日方向命中）。
+
+| 项 | 内容 |
+|---|---|
+| Service | `tradingagents-accuracy.service`（oneshot） |
+| Timer | `tradingagents-accuracy.timer` |
+| 日志 | `journalctl -u tradingagents-accuracy.service` |
+
+**首次安装：**
+
+```bash
+ssh solo@m.wcc.io
+cd /home/solo/TradingAgents-astock && git pull origin dev
+sudo cp deploy/tradingagents-accuracy.service /etc/systemd/system/
+sudo cp deploy/tradingagents-accuracy.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now tradingagents-accuracy.timer
+systemctl list-timers tradingagents-accuracy.timer
+```
+
+**管理：**
+
+```bash
+# 下次触发时间
+ssh solo@m.wcc.io "systemctl list-timers tradingagents-accuracy.timer --no-pager"
+# 立刻跑一次（不等到 21:00）
+ssh solo@m.wcc.io "sudo systemctl start tradingagents-accuracy.service"
+# 查看最近一次结算日志
+ssh solo@m.wcc.io "sudo journalctl -u tradingagents-accuracy.service -n 40 --no-hostname"
+```
+
+> 关机错过 21:00 时，`Persistent=true` 会在开机后补跑一次。
+> Web「立即结算」与分析开跑时的 settle 仍可用，与 timer 互补。
+
 ## 后台分析 worker（关闭页面也跑完队列）
 
 生产采用「Web 只入队 + 独立 worker 执行」模式：
