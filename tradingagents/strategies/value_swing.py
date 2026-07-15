@@ -428,31 +428,31 @@ def _check_ma_support(code: str) -> tuple[bool, bool]:
 
 # ── L2 消息催化剂 ────────────────────────────────────────────────────────────
 
-_CACHED_HOT_STOCKS: dict[str, list[str]] | None = None
-"""缓存当天的同花顺热股题材，key=题材标签, value=股票代码列表。"""
+_CACHED_HOT_STOCKS: tuple[str, dict[str, list[str]]] | None = None
+"""缓存当天的同花顺热股题材，(date, {题材标签: [股票代码, ...]})。"""
 
-_CACHED_GLOBAL_NEWS: list[str] | None = None
-"""缓存当天财联社快讯标题，用于判断市场整体情绪。"""
+_CACHED_GLOBAL_NEWS: tuple[str, list[str]] | None = None
+"""缓存当天财联社快讯标题，(date, [title, ...])。"""
 
-_CACHED_CONCEPT_NAMES: set[str] | None = None
-"""缓存当天活跃概念板块名称。"""
+
+def _cache_date() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
 
 
 def _load_hot_stocks() -> dict[str, list[str]]:
     """获取当天同花顺热股题材，返回 {题材标签: [股票代码, ...]}。"""
     global _CACHED_HOT_STOCKS
-    if _CACHED_HOT_STOCKS is not None:
-        return _CACHED_HOT_STOCKS
+    today = _cache_date()
+    if _CACHED_HOT_STOCKS is not None and _CACHED_HOT_STOCKS[0] == today:
+        return _CACHED_HOT_STOCKS[1]
 
     from tradingagents.dataflows.a_stock import get_hot_stocks
 
-    _CACHED_HOT_STOCKS = {}
-    today = datetime.now().strftime("%Y-%m-%d")
     try:
         text = get_hot_stocks(today)
+        result: dict[str, list[str]] = {}
         for line in text.split("\n"):
             line = line.strip()
-            # 格式: "000001 平安银行: +10% 换手... | 算力租赁+AI政务"
             if "|" not in line:
                 continue
             parts = line.split("|")
@@ -466,22 +466,25 @@ def _load_hot_stocks() -> dict[str, list[str]]:
             for tag in tags_str.split("+"):
                 tag = tag.strip()
                 if tag:
-                    _CACHED_HOT_STOCKS.setdefault(tag, []).append(code)
-        logger.info("消息催化剂: 加载 %d 个热股题材", len(_CACHED_HOT_STOCKS))
+                    result.setdefault(tag, []).append(code)
+        _CACHED_HOT_STOCKS = (today, result)
+        logger.info("消息催化剂: 加载 %d 个热股题材", len(result))
+        return result
     except Exception:
         logger.debug("热股题材加载失败", exc_info=True)
-    return _CACHED_HOT_STOCKS
+        # 不缓存空结果，下次重试
+        return {}
 
 
 def _load_global_news() -> list[str]:
     """获取当天财联社快讯标题列表。"""
     global _CACHED_GLOBAL_NEWS
-    if _CACHED_GLOBAL_NEWS is not None:
-        return _CACHED_GLOBAL_NEWS
+    today = _cache_date()
+    if _CACHED_GLOBAL_NEWS is not None and _CACHED_GLOBAL_NEWS[0] == today:
+        return _CACHED_GLOBAL_NEWS[1]
 
     import requests
 
-    _CACHED_GLOBAL_NEWS = []
     try:
         url = "https://www.cls.cn/nodeapi/telegraphList"
         r = requests.get(
@@ -491,14 +494,17 @@ def _load_global_news() -> list[str]:
             timeout=8,
         )
         d = r.json()
+        result: list[str] = []
         for item in d.get("data", {}).get("roll_data", []):
             title = item.get("title", "") or item.get("brief", "")
             if title:
-                _CACHED_GLOBAL_NEWS.append(title)
-        logger.info("消息催化剂: 加载 %d 条财联社快讯", len(_CACHED_GLOBAL_NEWS))
+                result.append(title)
+        _CACHED_GLOBAL_NEWS = (today, result)
+        logger.info("消息催化剂: 加载 %d 条财联社快讯", len(result))
+        return result
     except Exception:
         logger.debug("财联社快讯加载失败", exc_info=True)
-    return _CACHED_GLOBAL_NEWS
+        return []
 
 
 def _check_news_catalyst(code: str) -> bool:
@@ -526,19 +532,22 @@ def _check_hot_topic_match(code: str, hot_stocks: dict[str, list[str]]) -> bool:
     return False
 
 
-def _check_concept_catalyst(code: str, global_news: list[str]) -> bool:
+def _check_concept_catalyst(code: str, global_news: list[str], hot_stocks: dict[str, list[str]]) -> bool:
     """检查概念板块活跃度：若有新能源/半导体/AI等热门概念相关新闻则活跃。
 
-    当前简化实现：如果有财联社快讯标题包含热门概念词，则认为市场整体
-    概念活跃（个股不逐一检查概念归属，避免额外 HTTP）。
+    兜底：如果财联社无快讯但热股题材有数据，说明市场仍存在活跃概念。
     """
     HOT_CONCEPT_KEYWORDS = {"新能源", "半导体", "人工智能", "AI", "芯片",
                             "机器人", "低空经济", "量子", "算力", "数据要素",
                             "创新药", "光伏", "储能", "无人驾驶", "消费电子"}
+    # 快讯中有热门概念词
     for title in global_news:
         for kw in HOT_CONCEPT_KEYWORDS:
             if kw in title:
                 return True
+    # 兜底：快讯为空但有热股题材 → 市场仍有概念活跃
+    if not global_news and hot_stocks:
+        return True
     return False
 
 
@@ -626,7 +635,7 @@ def run_l2_filter(stocks: list[StockInfo], max_candidates: int = _MAX_CANDIDATES
         # 消息催化剂
         info.news_found = _safe_call(_check_news_catalyst, info.code, default=False)
         info.hot_topic_match = _check_hot_topic_match(info.code, hot_stocks)
-        info.concept_active = _check_concept_catalyst(info.code, global_news)
+        info.concept_active = _check_concept_catalyst(info.code, global_news, hot_stocks)
 
         # 以下暂不启用（东财 SSL 代理问题）
         # info.fund_flow_main_3d = _safe_call(_check_fund_flow_3d, info.code)
