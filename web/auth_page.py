@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from tradingagents.auth import UserManager, AuthConfig
 
@@ -154,16 +155,15 @@ def _restore_session() -> bool:
 
 
 def _save_session(username: str) -> None:
-    """Create a server-side session and set the cookie via URL param.
+    """Create a server-side session and set the cookie via JS in an iframe.
 
-    On the current page load the JS hasn't run yet, but on *subsequent* page
-    loads a tiny frontend script will copy the cookie from document.cookie
-    into the URL so the server can read it.
+    On the current page load the iframe JS hasn't set the cookie yet, but on
+    *subsequent* page loads the cookie will be available.
     """
     token = _create_session_token(username)
     _set_cookie_query(token)
-    # Inject inline JS to persist the token into a real browser cookie.
-    st.markdown(
+    # Use components.html (iframe) to execute JS — st.markdown strips <script> tags.
+    components.html(
         f"""<script>
 (function() {{
     var name = "{_COOKIE_NAME}";
@@ -172,7 +172,8 @@ def _save_session(username: str) -> None:
     document.cookie = name + "=" + value + "; expires=" + expires + "; path=/; SameSite=Lax";
 }})();
 </script>""",
-        unsafe_allow_html=True,
+        height=0,
+        width=0,
     )
 
 
@@ -182,8 +183,8 @@ def _clear_session() -> None:
     if token:
         _delete_session_token(token)
     _remove_cookie_query()
-    # Also clear the cookie via JS.
-    st.markdown(
+    # Also clear the cookie via JS in an iframe.
+    components.html(
         f"""<script>
 (function() {{
     document.cookie = "{_COOKIE_NAME}=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; SameSite=Lax";
@@ -192,7 +193,8 @@ def _clear_session() -> None:
     window.history.replaceState({{}}, "", url);
 }})();
 </script>""",
-        unsafe_allow_html=True,
+        height=0,
+        width=0,
     )
 
 
@@ -206,11 +208,10 @@ def require_auth() -> None:
 
     Must be called from ``web/app.py`` **after** ``st.set_page_config()``.
     """
-    # On every page load, copy the session cookie into the URL query param
-    # so the Streamlit server can read it.  If the cookie exists but no
-    # token is in the URL yet, do a one-time redirect to "/?ta_token=xxx"
-    # so the server picks it up on the next load.
-    st.markdown(
+    # On every page load, try to read the session cookie and copy it into the
+    # URL query param so the Streamlit server can read it.
+    # Uses components.html (iframe) because st.markdown strips <script> tags.
+    components.html(
         f"""<script>
 (function() {{
     var name = "{_COOKIE_NAME}";
@@ -224,7 +225,8 @@ def require_auth() -> None:
     }}
 }})();
 </script>""",
-        unsafe_allow_html=True,
+        height=0,
+        width=0,
     )
 
     mgr = _get_manager()
@@ -245,13 +247,6 @@ def require_auth() -> None:
     # Authenticated + active → proceed to the app.
     if user and getattr(user, "is_authenticated", False):
         if user.status == "active":
-            # Ensure the token is in the URL for the current page load.
-            token = _read_cookie_via_query()
-            if not token:
-                # Edge case: session exists but URL param missing (very first
-                # load after login where the JS cookie script already ran but
-                # the URL query param somehow got lost).  Re-create it.
-                _save_session(user.username)
             return
         if user.status == "pending":
             _render_pending_page(user)
