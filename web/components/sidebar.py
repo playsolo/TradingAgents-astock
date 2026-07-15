@@ -368,13 +368,15 @@ def _render_history_page(entries: list[dict], page_size: int = 20, tab_key: str 
     if total_pages > 1:
         cols = st.columns([1, 2, 1])
         with cols[0]:
-            if st.button("◀ 上一页", key="hist_prev", use_container_width=True, disabled=page == 0):
+            prev_key = f"{tab_key}_hist_prev"
+            if st.button("◀ 上一页", key=prev_key, use_container_width=True, disabled=page == 0):
                 st.session_state[page_key] = page - 1
                 st.rerun()
         with cols[1]:
             st.caption(f"{page + 1}/{total_pages}")
         with cols[2]:
-            if st.button("下一页 ▶", key="hist_next", use_container_width=True, disabled=page >= total_pages - 1):
+            next_key = f"{tab_key}_hist_next"
+            if st.button("下一页 ▶", key=next_key, use_container_width=True, disabled=page >= total_pages - 1):
                 st.session_state[page_key] = page + 1
                 st.rerun()
 
