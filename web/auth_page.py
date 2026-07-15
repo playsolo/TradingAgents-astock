@@ -1,10 +1,13 @@
 """Streamlit login / register / pending / admin page for TradingAgents-Astock.
 
 Supports:
-- 30-day persistent login via browser cookie (streamlit-cookies-controller)
+- Persistent login via URL query parameter (survives refresh, no cookie dependency)
 - Registration with pending approval (non-admin users)
 - Admin review panel for pending accounts
 - First-user auto-creates admin (immediately active)
+
+Uses ``st.query_params`` for persistence — works reliably behind nginx reverse
+proxy without any extra dependencies.
 """
 
 from __future__ import annotations
@@ -12,9 +15,9 @@ from __future__ import annotations
 import time
 
 import streamlit as st
-from streamlit_cookies_controller import CookieController
 
 from tradingagents.auth import UserManager, AuthConfig
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -24,11 +27,12 @@ _SESSION_USER = "auth_user"
 _SESSION_PAGE = "auth_page"
 _SESSION_LOGOUT_PENDING = "_auth_logout_pending"
 
-COOKIE_NAME = "tradingagents_auth_user"
-COOKIE_MAX_AGE = 30 * 24 * 60 * 60  # 30 days in seconds
+# URL query param used for cross-refresh session persistence.
+# Single opaque token: the username. Safe because it carries no auth power
+# by itself — every page load re-validates against UserManager.
+_QUERY_AUTH = "_auth"
 
 _PENDING_SESSION = "_auth_pending_username"
-_LOGOUT_COOKIE_CLEARED = "_auth_cookie_cleared"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -39,12 +43,6 @@ def _get_manager() -> UserManager:
     if "auth_manager" not in st.session_state:
         st.session_state["auth_manager"] = UserManager(AuthConfig.from_env())
     return st.session_state["auth_manager"]
-
-
-def _get_controller() -> CookieController:
-    if "auth_controller" not in st.session_state:
-        st.session_state["auth_controller"] = CookieController()
-    return st.session_state["auth_controller"]
 
 
 def is_authenticated() -> bool:
@@ -60,25 +58,24 @@ def get_current_user():
     return st.session_state.get(_SESSION_USER)
 
 
-def _restore_from_cookie() -> bool:
-    """Try to restore a logged-in session from a persisted cookie.
+def _restore_from_query() -> bool:
+    """Try to restore a logged-in session from URL query param.
 
     Called once per page load in ``require_auth()``.
     Returns ``True`` if a session was restored.
     """
     if _SESSION_USER in st.session_state:
-        return True  # already restored earlier in this render cycle
+        return True
 
-    controller = _get_controller()
-    saved_username = controller.get(COOKIE_NAME)
+    saved_username = st.query_params.get(_QUERY_AUTH)
     if not saved_username:
         return False
 
     mgr = _get_manager()
     stored_user = mgr.get_user(str(saved_username))
     if stored_user is None or stored_user.status != "active":
-        # User was deleted or disabled — clear the stale cookie.
-        controller.remove(COOKIE_NAME)
+        # Stale token — clear it from URL.
+        st.query_params.pop(_QUERY_AUTH, None)
         return False
 
     stored_user.is_authenticated = True
@@ -87,15 +84,13 @@ def _restore_from_cookie() -> bool:
     return True
 
 
-def _save_cookie(username: str) -> None:
-    """Persist ``username`` in a 30-day browser cookie."""
-    controller = _get_controller()
-    controller.set(COOKIE_NAME, username, max_age=COOKIE_MAX_AGE)
+def _save_query(username: str) -> None:
+    """Persist ``username`` in URL query param for cross-refresh survival."""
+    st.query_params[_QUERY_AUTH] = username
 
 
-def _clear_cookie() -> None:
-    controller = _get_controller()
-    controller.remove(COOKIE_NAME)
+def _clear_query() -> None:
+    st.query_params.pop(_QUERY_AUTH, None)
 
 
 # ---------------------------------------------------------------------------
@@ -114,26 +109,28 @@ def require_auth() -> None:
     if st.session_state.pop(_SESSION_LOGOUT_PENDING, False):
         st.session_state.pop(_SESSION_USER, None)
         st.session_state[_SESSION_PAGE] = "login"
-        _clear_cookie()
+        _clear_query()
         st.rerun()
 
-    # Try cookie-based restore (on refresh / new tab).
+    # Try query-param-based restore (on refresh / new tab).
     if _SESSION_USER not in st.session_state:
-        _restore_from_cookie()
+        _restore_from_query()
 
     user = st.session_state.get(_SESSION_USER)
 
     # Authenticated + active → proceed to the app.
     if user and getattr(user, "is_authenticated", False):
         if user.status == "active":
+            # Ensure the query param is present (first login after refresh).
+            if _QUERY_AUTH not in st.query_params:
+                _save_query(user.username)
             return
         if user.status == "pending":
-            # Already logged in but not yet approved.
             _render_pending_page(user)
             st.stop()
         # disabled → force logout.
         st.session_state.pop(_SESSION_USER, None)
-        _clear_cookie()
+        _clear_query()
 
     page = st.session_state.get(_SESSION_PAGE, "login")
 
@@ -342,7 +339,7 @@ def _render_login(mgr: UserManager) -> None:
                             else:
                                 st.session_state[_SESSION_USER] = user
                                 st.session_state[_SESSION_PAGE] = "login"
-                                _save_cookie(user.username)
+                                _save_query(user.username)
                                 st.rerun()
                         else:
                             st.error("用户名或密码错误")
@@ -414,11 +411,10 @@ def _render_register(mgr: UserManager) -> None:
                                 if user:
                                     st.session_state[_SESSION_USER] = user
                                     st.session_state[_SESSION_PAGE] = "login"
-                                    _save_cookie(user.username)
+                                    _save_query(user.username)
                                     st.rerun()
                             else:
                                 st.success(f"账号 {new_username} 注册成功！请等待管理员审核通过后登录。")
-                                # Show the pending page hint.
                                 st.session_state[_PENDING_SESSION] = display_name or new_username
                                 st.session_state[_SESSION_PAGE] = "pending"
                                 time.sleep(1.5)
