@@ -49,6 +49,9 @@ def _run_scan(max_candidates: int) -> dict:
                     "revenue_growth": round(c.revenue_growth * 100, 1) if c.revenue_growth else None,
                     "above_ma20": c.above_ma20,
                     "near_ma250": c.near_ma250,
+                    "news_found": c.news_found,
+                    "hot_topic_match": c.hot_topic_match,
+                    "concept_active": c.concept_active,
                 }
                 for c in result.candidates
             ],
@@ -116,9 +119,14 @@ def _render_candidate_card(candidate: dict, index: int):
         signals.append("接近年线")
     if candidate.get("revenue_growth") and candidate["revenue_growth"] > 0:
         signals.append(f"营收+{candidate['revenue_growth']:.0f}%")
-    # debt_ratio 如果有
     if candidate.get("debt_ratio") is not None:
         signals.append(f"负债{candidate['debt_ratio']:.0f}%")
+    if candidate.get("news_found"):
+        signals.append("📰有新闻")
+    if candidate.get("hot_topic_match"):
+        signals.append("🔥热点题材")
+    if candidate.get("concept_active"):
+        signals.append("🧠概念活跃")
 
     st.markdown(
         f"""
@@ -150,7 +158,7 @@ def _render_candidate_card(candidate: dict, index: int):
                     <span style="color: #aaaaaa; font-size: 0.9rem; margin-left: 6px;">{name}</span>
                 </div>
                 <div style="color: {color}; font-weight: 700; font-size: 1.2rem;">
-                    信号 {score}/7
+                    信号 {score}/10
                 </div>
             </div>
             <div style="display: flex; gap: 16px; margin-top: 10px; flex-wrap: wrap;">
@@ -312,7 +320,7 @@ def render_value_swing_scanner():
             st.write("• L0: 全量种子 → 腾讯批量报价")
             st.write("• L1a: PE/PB 快速筛选")
             st.write("• L1b: 财务验证（前 30 只）")
-            st.write("• L2: 催化剂检测（北向 + 均线）")
+            st.write("• L2: 催化剂检测（北向 + 均线 + 消息催化剂）")
         # 自动轮询 — st.rerun() 会让 Streamlit 重新执行
         st.rerun()
 

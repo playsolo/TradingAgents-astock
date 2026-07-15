@@ -85,6 +85,10 @@ class StockInfo:
     dragon_tiger_inst_net: float | None = None
     above_ma20: bool = False
     near_ma250: bool = False
+    # L2 消息催化剂（新增）
+    news_found: bool = False          # 近期是否有重大个股新闻
+    hot_topic_match: bool = False     # 是否属于热点题材
+    concept_active: bool = False      # 概念板块近期活跃
     signal_score: int = 0
     exclude_reason: str = ""
 
@@ -422,6 +426,122 @@ def _check_ma_support(code: str) -> tuple[bool, bool]:
     return (False, False)
 
 
+# ── L2 消息催化剂 ────────────────────────────────────────────────────────────
+
+_CACHED_HOT_STOCKS: dict[str, list[str]] | None = None
+"""缓存当天的同花顺热股题材，key=题材标签, value=股票代码列表。"""
+
+_CACHED_GLOBAL_NEWS: list[str] | None = None
+"""缓存当天财联社快讯标题，用于判断市场整体情绪。"""
+
+_CACHED_CONCEPT_NAMES: set[str] | None = None
+"""缓存当天活跃概念板块名称。"""
+
+
+def _load_hot_stocks() -> dict[str, list[str]]:
+    """获取当天同花顺热股题材，返回 {题材标签: [股票代码, ...]}。"""
+    global _CACHED_HOT_STOCKS
+    if _CACHED_HOT_STOCKS is not None:
+        return _CACHED_HOT_STOCKS
+
+    from tradingagents.dataflows.a_stock import get_hot_stocks
+
+    _CACHED_HOT_STOCKS = {}
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        text = get_hot_stocks(today)
+        for line in text.split("\n"):
+            line = line.strip()
+            # 格式: "000001 平安银行: +10% 换手... | 算力租赁+AI政务"
+            if "|" not in line:
+                continue
+            parts = line.split("|")
+            if len(parts) < 2:
+                continue
+            code_name = parts[0].strip()
+            tags_str = parts[1].strip()
+            code = code_name.split()[0] if code_name else ""
+            if not code or not tags_str:
+                continue
+            for tag in tags_str.split("+"):
+                tag = tag.strip()
+                if tag:
+                    _CACHED_HOT_STOCKS.setdefault(tag, []).append(code)
+        logger.info("消息催化剂: 加载 %d 个热股题材", len(_CACHED_HOT_STOCKS))
+    except Exception:
+        logger.debug("热股题材加载失败", exc_info=True)
+    return _CACHED_HOT_STOCKS
+
+
+def _load_global_news() -> list[str]:
+    """获取当天财联社快讯标题列表。"""
+    global _CACHED_GLOBAL_NEWS
+    if _CACHED_GLOBAL_NEWS is not None:
+        return _CACHED_GLOBAL_NEWS
+
+    import requests
+
+    _CACHED_GLOBAL_NEWS = []
+    try:
+        url = "https://www.cls.cn/nodeapi/telegraphList"
+        r = requests.get(
+            url,
+            params={"rn": "30", "page": "1"},
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.cls.cn/"},
+            timeout=8,
+        )
+        d = r.json()
+        for item in d.get("data", {}).get("roll_data", []):
+            title = item.get("title", "") or item.get("brief", "")
+            if title:
+                _CACHED_GLOBAL_NEWS.append(title)
+        logger.info("消息催化剂: 加载 %d 条财联社快讯", len(_CACHED_GLOBAL_NEWS))
+    except Exception:
+        logger.debug("财联社快讯加载失败", exc_info=True)
+    return _CACHED_GLOBAL_NEWS
+
+
+def _check_news_catalyst(code: str) -> bool:
+    """检查个股是否有近期重大新闻（东财个股新闻）。"""
+    from tradingagents.dataflows.a_stock import get_news
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    # 看近 3 天
+    from datetime import timedelta
+    start = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+    try:
+        text = get_news(code, start, today)
+        if text and "No news" not in text:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _check_hot_topic_match(code: str, hot_stocks: dict[str, list[str]]) -> bool:
+    """检查个股是否出现在当天热股题材中。"""
+    for stocks_in_tag in hot_stocks.values():
+        if code in stocks_in_tag:
+            return True
+    return False
+
+
+def _check_concept_catalyst(code: str, global_news: list[str]) -> bool:
+    """检查概念板块活跃度：若有新能源/半导体/AI等热门概念相关新闻则活跃。
+
+    当前简化实现：如果有财联社快讯标题包含热门概念词，则认为市场整体
+    概念活跃（个股不逐一检查概念归属，避免额外 HTTP）。
+    """
+    HOT_CONCEPT_KEYWORDS = {"新能源", "半导体", "人工智能", "AI", "芯片",
+                            "机器人", "低空经济", "量子", "算力", "数据要素",
+                            "创新药", "光伏", "储能", "无人驾驶", "消费电子"}
+    for title in global_news:
+        for kw in HOT_CONCEPT_KEYWORDS:
+            if kw in title:
+                return True
+    return False
+
+
 def run_l2_filter_impl(stocks: list[StockInfo], max_candidates: int = _MAX_CANDIDATES) -> list[StockInfo]:
     """L2 纯逻辑评分。"""
     scored: list[StockInfo] = []
@@ -436,6 +556,13 @@ def run_l2_filter_impl(stocks: list[StockInfo], max_candidates: int = _MAX_CANDI
         if info.above_ma20:
             s += 1
         if info.near_ma250:
+            s += 1
+        # 消息催化剂
+        if info.news_found:
+            s += 1
+        if info.hot_topic_match:
+            s += 1
+        if info.concept_active:
             s += 1
         info.signal_score = s
         scored.append(info)
@@ -473,7 +600,10 @@ def _is_stock_code(code: str) -> bool:
 def run_l2_filter(stocks: list[StockInfo], max_candidates: int = _MAX_CANDIDATES) -> list[StockInfo]:
     """L2 含网络调用。仅对成交量前 80 只 A 股个股执行 HTTP 检测。
 
-    注意：fund_flow / dragon_tiger 目前因东财 SSL 代理问题暂不启用。
+    包含消息催化剂：
+    - 个股新闻检测（东财新闻，近 3 天）
+    - 热点题材匹配（同花顺热股）
+    - 概念板块活跃度（财联社快讯关键词）
     """
     _L2_PROCESS_LIMIT = 80
 
@@ -481,14 +611,22 @@ def run_l2_filter(stocks: list[StockInfo], max_candidates: int = _MAX_CANDIDATES
     ranked = sorted(real_stocks, key=lambda s: s.volume_wan, reverse=True)
     to_process = ranked[:_L2_PROCESS_LIMIT]
 
-    # 北向资金是整个市场总量，调用一次共享
+    # 共享数据：一次性加载
     northbound_val = _safe_call(_check_northbound_3d, "ALL")
+    hot_stocks = _load_hot_stocks()
+    global_news = _load_global_news()
 
+    # 个股级别检测
     for info in to_process:
         logger.debug("L2 HTTP: %s %s", info.code, info.name)
 
         info.northbound_net_3d = northbound_val
         info.above_ma20, info.near_ma250 = _safe_call(_check_ma_support, info.code, default=(False, False))
+
+        # 消息催化剂
+        info.news_found = _safe_call(_check_news_catalyst, info.code, default=False)
+        info.hot_topic_match = _check_hot_topic_match(info.code, hot_stocks)
+        info.concept_active = _check_concept_catalyst(info.code, global_news)
 
         # 以下暂不启用（东财 SSL 代理问题）
         # info.fund_flow_main_3d = _safe_call(_check_fund_flow_3d, info.code)
@@ -560,4 +698,7 @@ def build_scan_summary_row(info: StockInfo, recommendation: str) -> dict[str, An
         "revenue_growth": round(info.revenue_growth * 100, 1) if info.revenue_growth else None,
         "above_ma20": info.above_ma20,
         "near_ma250": info.near_ma250,
+        "news_found": info.news_found,
+        "hot_topic_match": info.hot_topic_match,
+        "concept_active": info.concept_active,
     }

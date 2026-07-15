@@ -38,6 +38,9 @@ class TestDataStructures:
         assert i.code == "000001"
         assert i.signal_score == 0
         assert i.exclude_reason == ""
+        assert i.news_found is False
+        assert i.hot_topic_match is False
+        assert i.concept_active is False
 
     def test_scan_result_defaults(self):
         r = ScanResult(scan_date="2026-07-15")
@@ -80,6 +83,14 @@ class TestHelpers:
         row = build_scan_summary_row(info, "")
         assert row["debt_ratio"] is None
         assert row["revenue_growth"] is None
+
+    def test_build_summary_row_news_fields(self):
+        info = StockInfo(code="000001", name="测试", signal_score=5,
+                         news_found=True, hot_topic_match=True, concept_active=True)
+        row = build_scan_summary_row(info, "推荐")
+        assert row["news_found"] is True
+        assert row["hot_topic_match"] is True
+        assert row["concept_active"] is True
 
 
 # ── 推荐映射 ────────────────────────────────────────────────────────────────
@@ -232,6 +243,30 @@ class TestL2Filter:
         assert run_l2_filter_impl([info])[0].signal_score == 2
         info2 = StockInfo(code="002", near_ma250=True)
         assert run_l2_filter_impl([info2])[0].signal_score == 1
+
+    def test_news_catalyst_point(self):
+        info = StockInfo(code="001", news_found=True)
+        assert run_l2_filter_impl([info])[0].signal_score == 1
+
+    def test_hot_topic_point(self):
+        info = StockInfo(code="001", hot_topic_match=True)
+        assert run_l2_filter_impl([info])[0].signal_score == 1
+
+    def test_concept_active_point(self):
+        info = StockInfo(code="001", concept_active=True)
+        assert run_l2_filter_impl([info])[0].signal_score == 1
+
+    def test_all_news_signals(self):
+        info = StockInfo(code="001", news_found=True, hot_topic_match=True, concept_active=True)
+        assert run_l2_filter_impl([info])[0].signal_score == 3
+
+    def test_combined_signals_with_news(self):
+        info = StockInfo(
+            code="001",
+            northbound_net_3d=2, above_ma20=True, near_ma250=True,
+            news_found=True, hot_topic_match=True,
+        )
+        assert run_l2_filter_impl([info])[0].signal_score == 5
 
 
 # ── 端到端（纯逻辑）─────────────────────────────────────────────────────────

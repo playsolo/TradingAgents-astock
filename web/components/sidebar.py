@@ -533,7 +533,8 @@ def render_sidebar() -> None:
     if not incomplete:
         st.caption("暂无未完成任务")
     else:
-        for entry in incomplete[:10]:
+        is_busy = has_running(st.session_state)
+    for entry in incomplete[:10]:
             t, d = entry["ticker"], entry["trade_date"]
             status_label = {
                 "error": "出错",
