@@ -6,12 +6,20 @@ from pathlib import Path
 
 import pytest
 
+from web import history
 from web.analysis_queue import AnalysisJob, AnalysisQueueStore
 
 
 @pytest.fixture
 def store(tmp_path: Path) -> AnalysisQueueStore:
     return AnalysisQueueStore(tmp_path / "analysis_queue.json")
+
+
+@pytest.fixture
+def incomplete_index(tmp_path: Path, monkeypatch):
+    index = tmp_path / "incomplete_tasks.json"
+    monkeypatch.setattr(history, "_INCOMPLETE_TASKS_FILE", index)
+    return index
 
 
 def _job(ticker: str, date: str = "2026-07-15", market: str = "CN") -> AnalysisJob:
@@ -46,6 +54,57 @@ def test_append_atomic_reads_disk_and_dedupes(store: AnalysisQueueStore):
     added = store.append_atomic([_job("300253"), _job("300785")])
     assert added == 1
     assert [j.ticker for j in store.load()] == ["300253", "300785"]
+
+
+def test_append_atomic_clears_incomplete_for_queued_jobs(
+    store: AnalysisQueueStore, incomplete_index
+):
+    history.record_incomplete_task(
+        "300253", "2026-07-15", status="error", error="worker 重启"
+    )
+    history.record_incomplete_task(
+        "300785", "2026-07-15", status="error", error="timeout"
+    )
+    history.record_incomplete_task(
+        "002648", "2026-07-15", status="running", error=""
+    )
+
+    added = store.append_atomic([_job("300253"), _job("300785")])
+    assert added == 2
+
+    left = {(e["ticker"], e["status"]) for e in history.get_incomplete_history()}
+    assert left == {("002648", "running")}
+
+
+def test_append_atomic_clears_incomplete_when_already_queued(
+    store: AnalysisQueueStore, incomplete_index
+):
+    """去重未新增条目时，只要身份已在队列，仍应去掉未完成残留。"""
+    store.save([_job("300253")])
+    history.record_incomplete_task(
+        "300253", "2026-07-15", status="error", error="worker 重启"
+    )
+
+    added = store.append_atomic([_job("300253")])
+    assert added == 0
+    assert history.get_incomplete_history() == []
+
+
+def test_append_atomic_exclude_does_not_clear_incomplete(
+    store: AnalysisQueueStore, incomplete_index
+):
+    history.record_incomplete_task(
+        "300253", "2026-07-15", status="running", error=""
+    )
+    added = store.append_atomic(
+        [_job("300253"), _job("300785")],
+        exclude={("CN", "300253", "2026-07-15")},
+    )
+    assert added == 1
+    assert [j.ticker for j in store.load()] == ["300785"]
+    left = history.get_incomplete_history()
+    assert len(left) == 1
+    assert left[0]["ticker"] == "300253"
 
 
 def test_append_atomic_respects_exclude(store: AnalysisQueueStore):

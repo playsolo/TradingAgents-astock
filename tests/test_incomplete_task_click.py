@@ -5,9 +5,19 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from web import history
 from web.analysis_queue import QUEUE_SESSION_KEY, AnalysisJob
 from web.components import sidebar
 from web.parallel_runs import ACTIVE_RUNS_KEY, FOCUSED_RUN_KEY
+
+
+@pytest.fixture
+def incomplete_index(tmp_path, monkeypatch):
+    index = tmp_path / "incomplete_tasks.json"
+    monkeypatch.setattr(history, "_INCOMPLETE_TASKS_FILE", index)
+    return index
 
 
 def test_incomplete_resume_buttons_not_globally_disabled_when_busy():
@@ -93,7 +103,7 @@ def test_activate_incomplete_start_drops_queued_duplicate():
     assert [j.ticker for j in remaining] == ["600000"]
 
 
-def test_activate_incomplete_enqueues_when_no_slots():
+def test_activate_incomplete_enqueues_when_no_slots(incomplete_index):
     session: dict = {}
     # Cap is 3 by default; fill with 3 running trackers.
     session[ACTIVE_RUNS_KEY] = [
@@ -107,6 +117,9 @@ def test_activate_incomplete_enqueues_when_no_slots():
         )
         for i in range(3)
     ]
+    history.record_incomplete_task(
+        "301031", "2026-07-15", status="error", error="boom"
+    )
 
     action = sidebar.activate_incomplete_task(
         session, "301031", "2026-07-15", market="CN"
@@ -121,3 +134,4 @@ def test_activate_incomplete_enqueues_when_no_slots():
     assert job.trade_date == "2026-07-15"
     assert job.market == "CN"
     assert job.fresh is False
+    assert history.get_incomplete_history() == []

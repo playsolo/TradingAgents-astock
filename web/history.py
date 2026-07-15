@@ -204,7 +204,7 @@ def record_incomplete_task(
 
 
 def clear_incomplete_task(ticker: str, trade_date: str) -> None:
-    """Remove an incomplete task once it completes successfully."""
+    """Remove an incomplete task (success, stop/discard, or successful re-queue)."""
     ticker = ticker.strip().upper()
     trade_date = trade_date.strip()
     with _INCOMPLETE_TASKS_LOCK:
@@ -220,7 +220,8 @@ def clear_incomplete_task(ticker: str, trade_date: str) -> None:
 def get_incomplete_history() -> list[dict[str, Any]]:
     """Return unfinished tasks that can be resumed from their checkpoint.
 
-    Entries stay until ``clear_incomplete_task`` (successful finish / stop).
+    Entries stay until ``clear_incomplete_task`` (successful finish / stop /
+    identity waiting in the analysis queue after enqueue).
     Report file mtime is intentionally ignored — section repair and same-day
     re-runs both rewrite ``full_states_log_*.json`` without ending the task.
     """

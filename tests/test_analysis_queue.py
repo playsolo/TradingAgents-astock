@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from web import history
 from web.analysis_queue import (
     QUEUE_SESSION_KEY,
     SERIAL_QUEUE_SESSION_KEY,
@@ -28,6 +29,13 @@ from web.analysis_queue import (
 @pytest.fixture
 def store(tmp_path: Path) -> AnalysisQueueStore:
     return AnalysisQueueStore(tmp_path / "analysis_queue.json")
+
+
+@pytest.fixture
+def incomplete_index(tmp_path: Path, monkeypatch):
+    index = tmp_path / "incomplete_tasks.json"
+    monkeypatch.setattr(history, "_INCOMPLETE_TASKS_FILE", index)
+    return index
 
 
 def test_parse_ticker_inputs_splits_common_separators():
@@ -137,6 +145,24 @@ def test_append_jobs_dedupes_against_existing_queue(store):
         store=store,
     )
     assert [j.ticker for j in session[QUEUE_SESSION_KEY]] == ["AAPL", "NVDA"]
+
+
+def test_append_jobs_clears_incomplete_for_queued_identities(store, incomplete_index):
+    history.record_incomplete_task(
+        "300253", "2026-07-15", status="error", error="worker 重启"
+    )
+    history.record_incomplete_task(
+        "002648", "2026-07-15", status="running", error=""
+    )
+    session: dict = {}
+    append_jobs(
+        session,
+        [AnalysisJob(ticker="300253", trade_date="2026-07-15", market="CN")],
+        store=store,
+    )
+    left = history.get_incomplete_history()
+    assert len(left) == 1
+    assert left[0]["ticker"] == "002648"
 
 
 def test_take_next_job_sets_notice_and_returns_job(store):

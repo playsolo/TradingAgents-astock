@@ -172,6 +172,10 @@ class AnalysisQueueStore:
         """Atomically append jobs to the on-disk queue, skipping duplicates.
 
         Returns the number of jobs actually added.
+
+        Identities that end up in the waiting queue (newly added *or* already
+        present) drop any matching incomplete-task row so the sidebar does not
+        show both「队列中」and「出错/未完成」.
         """
         with self.exclusive():
             jobs = self.load()
@@ -188,7 +192,9 @@ class AnalysisQueueStore:
                 added += 1
             if added:
                 self.save(jobs)
-            return added
+            queued = {j.identity() for j in jobs}
+        _clear_incomplete_for_queued(new_jobs, queued)
+        return added
 
     def clear_atomic(self) -> None:
         """Atomically empty the on-disk queue."""
@@ -421,6 +427,24 @@ def remove_job_identity(
     return removed
 
 
+def _clear_incomplete_for_queued(
+    requested: list[AnalysisJob],
+    queued_idents: set[tuple[str, str, str]],
+) -> None:
+    """Drop incomplete rows for request identities that are waiting in the queue."""
+    if not requested or not queued_idents:
+        return
+    from web.history import clear_incomplete_task
+
+    seen: set[tuple[str, str, str]] = set()
+    for job in requested:
+        ident = job.identity()
+        if ident not in queued_idents or ident in seen:
+            continue
+        seen.add(ident)
+        clear_incomplete_task(job.ticker, job.trade_date)
+
+
 def append_jobs(
     session: MutableMapping[str, Any],
     jobs: list[AnalysisJob],
@@ -431,6 +455,7 @@ def append_jobs(
     """Append jobs to the session queue; skip duplicates already queued. Returns added count.
 
     ``exclude`` identities (e.g. the currently running job) are also treated as duplicates.
+    Request identities that remain in the waiting queue clear matching incomplete tasks.
     """
     queue = _coerce_list(session)
     existing = {j.identity() for j in queue}
@@ -447,6 +472,7 @@ def append_jobs(
     if added:
         mark_serial_queue_session(session, True)
     _persist(session, store)
+    _clear_incomplete_for_queued(jobs, {j.identity() for j in queue})
     return added
 
 

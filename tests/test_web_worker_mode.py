@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from web import history
 from web.analysis_queue import QUEUE_SESSION_KEY, AnalysisJob, AnalysisQueueStore
 from web.components import sidebar
 from web.parallel_runs import ACTIVE_RUNS_KEY
@@ -16,6 +17,7 @@ def worker_env(monkeypatch, tmp_path):
     monkeypatch.setenv("TRADINGAGENTS_ANALYSIS_EXECUTOR", "worker")
     store = AnalysisQueueStore(tmp_path / "analysis_queue.json")
     monkeypatch.setattr(sidebar, "default_store", lambda: store)
+    monkeypatch.setattr(history, "_INCOMPLETE_TASKS_FILE", tmp_path / "incomplete.json")
     return store
 
 
@@ -52,6 +54,9 @@ def test_submit_has_worker_only_enqueue_branch():
 # ── Behavior: activate incomplete + queue read from disk ─────────────────────
 
 def test_activate_incomplete_enqueues_to_disk_in_worker_mode(worker_env):
+    history.record_incomplete_task(
+        "300253", "2026-07-15", status="error", error="worker 重启"
+    )
     session: dict = {ACTIVE_RUNS_KEY: []}
     action = sidebar.activate_incomplete_task(
         session, "300253", "2026-07-15", market="CN"
@@ -62,11 +67,16 @@ def test_activate_incomplete_enqueues_to_disk_in_worker_mode(worker_env):
     # Written to disk queue, not session queue:
     queued = worker_env.load()
     assert [j.ticker for j in queued] == ["300253"]
+    assert history.get_incomplete_history() == []
 
 
 def test_activate_incomplete_dedupes_on_disk(worker_env):
     worker_env.save([AnalysisJob(ticker="300253", trade_date="2026-07-15", market="CN")])
+    history.record_incomplete_task(
+        "300253", "2026-07-15", status="error", error="worker 重启"
+    )
     session: dict = {ACTIVE_RUNS_KEY: []}
     sidebar.activate_incomplete_task(session, "300253", "2026-07-15", market="CN")
     queued = worker_env.load()
     assert [j.ticker for j in queued] == ["300253"]
+    assert history.get_incomplete_history() == []
