@@ -253,21 +253,40 @@ class AnalysisQueueStore:
         Returns None when the waiting queue is empty. The job remains tracked
         under ``leases`` until :meth:`complete` or reclaim/release.
         """
+        return self.claim_next_by_market(market=None, owner_pid=owner_pid)
+
+    def claim_next_by_market(
+        self,
+        market: str | None = None,
+        *,
+        owner_pid: int | None = None,
+    ) -> Optional[AnalysisJob]:
+        """Atomically claim the first waiting job for *market* (or any market
+        when *market* is ``None``).  Jobs for other markets are preserved in
+        FIFO order.
+
+        Returns None when no unclaimed job of the requested market exists.
+        """
         pid = os.getpid() if owner_pid is None else int(owner_pid)
         with self.exclusive():
             jobs, leases = self._load_state()
             if not jobs:
                 return None
-            head = jobs.pop(0)
             leased_idents = {lease.job.identity() for lease in leases}
-            if head.identity() in leased_idents:
-                # Should not happen; drop duplicate wait entry and retry shape.
-                self._save_state(jobs, leases)
+            target_idx: int | None = None
+            for i, job in enumerate(jobs):
+                if job.identity() in leased_idents:
+                    continue
+                if market is None or (job.market or "CN").upper() == market.upper():
+                    target_idx = i
+                    break
+            if target_idx is None:
                 return None
+            job = jobs.pop(target_idx)
             now = time.time()
             leases.append(
                 QueueLease(
-                    job=head,
+                    job=job,
                     lease_id=uuid.uuid4().hex,
                     claimed_at=now,
                     heartbeat_at=now,
@@ -275,7 +294,7 @@ class AnalysisQueueStore:
                 )
             )
             self._save_state(jobs, leases)
-            return head
+            return job
 
     def heartbeat(self, identity: tuple[str, str, str]) -> bool:
         """Refresh lease heartbeat. Returns False if no matching lease."""

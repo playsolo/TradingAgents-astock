@@ -43,6 +43,8 @@ def test_claim_batch_respects_free_slots_and_fifo(store: AnalysisQueueStore):
     store.save([_job("A"), _job("B"), _job("C")])
     worker = AnalyzeWorker(store=store, config={}, max_workers=3, run_fn=lambda *a: None)
 
+    # _claim_batch is now market-aware: free_slots is a hint but per-market
+    # caps constrain the batch.  All CN jobs → up to CN_MAX_PARALLEL=3.
     batch = worker._claim_batch(2)
     assert [j.ticker for j in batch] == ["A", "B"]
     assert [j.ticker for j in store.load()] == ["C"]

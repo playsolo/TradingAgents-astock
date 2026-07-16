@@ -315,15 +315,55 @@ class AnalyzeWorker:
             except Exception:  # noqa: BLE001
                 logger.exception("heartbeat failed for %s", job.ticker)
 
+    def _cn_in_flight(self) -> int:
+        """Count in-flight jobs whose market is CN."""
+        with self._in_flight_lock:
+            return sum(
+                1 for job in self._in_flight.values()
+                if (job.market or "CN").upper() == "CN"
+            )
+
+    def _us_in_flight(self) -> int:
+        """Count in-flight jobs whose market is US."""
+        with self._in_flight_lock:
+            return sum(
+                1 for job in self._in_flight.values()
+                if (job.market or "CN").upper() == "US"
+            )
+
     def _claim_batch(self, free_slots: int) -> list[AnalysisJob]:
-        """Atomically claim up to ``free_slots`` jobs from the queue (FIFO)."""
+        """Atomically claim up to ``free_slots`` jobs from the queue.
+
+        CN and US jobs use separate parallel pools controlled by
+        ``CN_MAX_PARALLEL`` and ``US_MAX_PARALLEL`` env vars (each defaults
+        to 3).  The queue is scanned in FIFO order; a job is claimed only
+        when its market has a free slot.  The total returned never exceeds
+        ``free_slots``.
+
+        CN slots are filled first (preserves approximate FIFO for mixed
+        queues where CN jobs tend to be ahead of US jobs).
+        """
         self._reclaim_stale()
+        cn_cap = max(0, int(os.environ.get("CN_MAX_PARALLEL", "3")) - self._cn_in_flight())
+        us_cap = max(0, int(os.environ.get("US_MAX_PARALLEL", "3")) - self._us_in_flight())
         batch: list[AnalysisJob] = []
-        for _ in range(max(0, free_slots)):
-            job = self.store.claim_next()
+        remaining = max(0, free_slots)
+        # Phase 1: fill CN slots up to min(cn_cap, remaining).
+        cn_quota = min(cn_cap, remaining)
+        for _ in range(cn_quota):
+            job = self.store.claim_next_by_market("CN")
             if job is None:
                 break
             batch.append(job)
+            remaining -= 1
+        # Phase 2: fill US slots up to min(us_cap, remaining).
+        us_quota = min(us_cap, remaining)
+        for _ in range(us_quota):
+            job = self.store.claim_next_by_market("US")
+            if job is None:
+                break
+            batch.append(job)
+            remaining -= 1
         return batch
 
     def _run_safe(self, job: AnalysisJob) -> None:
