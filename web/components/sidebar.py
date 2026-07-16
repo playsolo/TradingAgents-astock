@@ -36,11 +36,13 @@ from web.home_mode import HOME_MODE_SCAN, set_home_mode
 from web.navigation import navigate
 from web.parallel_runs import (
     active_runs,
+    cn_max_runs,
     has_running,
     request_fill_parallel_slots,
     running_count,
     set_focused_ticker,
     slots_available,
+    us_max_runs,
 )
 from web.stock_display import format_list_ticker_label, signal_text_tag
 
@@ -191,7 +193,7 @@ def activate_incomplete_task(
     # when slots free up later (add_tracker only replaces the session handle).
     remove_job_identity(session, (resolved_market, ticker, trade_date))
 
-    if slots_available(session) > 0:
+    if slots_available(session, market=resolved_market) > 0:
         session["start_analysis"] = {
             "ticker": ticker,
             "trade_date": trade_date,
@@ -278,11 +280,12 @@ def _submit_analysis_jobs(raw_tickers: str, market: str, trade_date: str) -> Non
             if t.ticker and t.trade_date:
                 exclude.add((getattr(t, "market", market), t.ticker, t.trade_date))
         added = append_jobs(st.session_state, jobs, exclude=exclude)
-        slots = slots_available(st.session_state)
+        cn_slots = slots_available(st.session_state, market="CN")
+        us_slots = slots_available(st.session_state, market="US")
         queued = len(queue_snapshot(st.session_state))
-        if slots > 0 and added > 0:
+        if (cn_slots > 0 or us_slots > 0) and added > 0:
             st.session_state["queue_advance_notice"] = (
-                f"✅ 已加入 {added} 只，空闲 {slots} 个槽位将自动并行开跑"
+                f"✅ 已加入 {added} 只，空闲 A股 {cn_slots} / 美股 {us_slots} 个槽位将自动并行开跑"
                 f"（队列共 {queued}）"
             )
         else:
@@ -339,9 +342,11 @@ def _render_analysis_queue() -> None:
     if not jobs:
         return
     st.markdown("#### 分析队列")
-    slots = slots_available(st.session_state)
+    cn_slots = slots_available(st.session_state, market="CN")
+    us_slots = slots_available(st.session_state, market="US")
     st.caption(
-        f"最多 3 只并行，当前空闲 {slots} 个槽位。"
+        f"A股最多 {cn_max_runs()} 只并行，空闲 {cn_slots} 个槽位；"
+        f"美股最多 {us_max_runs()} 只并行，空闲 {us_slots} 个槽位。"
         "刷新后会从本地恢复，空闲时自动开跑。"
     )
     for idx, job in enumerate(jobs, start=1):

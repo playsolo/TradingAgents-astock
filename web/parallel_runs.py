@@ -25,11 +25,29 @@ FORCE_FILL_KEY = "_force_fill_parallel_slots"
 # Max concurrent analysis runs across the entire process (CN + US combined).
 # Can be overridden via environment variable.
 _DEFAULT_MAX_RUNS = 3
+_DEFAULT_CN_MAX_RUNS = 3
+_DEFAULT_US_MAX_RUNS = 3
 
 
 def max_runs() -> int:
     """Return the global slot cap. Only used for enqueue gating."""
     return int(os.environ.get("TRADINGAGENTS_MAX_PARALLEL", str(_DEFAULT_MAX_RUNS)))
+
+
+def cn_max_runs() -> int:
+    """Return the CN-specific max concurrent runs cap.
+
+    Controlled by ``CN_MAX_PARALLEL`` env var; defaults to 3.
+    """
+    return int(os.environ.get("CN_MAX_PARALLEL", str(_DEFAULT_CN_MAX_RUNS)))
+
+
+def us_max_runs() -> int:
+    """Return the US-specific max concurrent runs cap.
+
+    Controlled by ``US_MAX_PARALLEL`` env var; defaults to 3.
+    """
+    return int(os.environ.get("US_MAX_PARALLEL", str(_DEFAULT_US_MAX_RUNS)))
 
 
 # ── Active trackers snapshot ─────────────────────────────────────────────────
@@ -70,13 +88,32 @@ def active_runs(session: MutableMapping[str, Any]) -> list[ProgressTracker]:
     return list(session.get(ACTIVE_RUNS_KEY, []))
 
 
-def running_count(session: MutableMapping[str, Any]) -> int:
-    """Count trackers that are still running."""
-    return sum(1 for t in active_runs(session) if t.is_running and not t.is_complete and not t.error)
+def running_count(session: MutableMapping[str, Any], market: str | None = None) -> int:
+    """Count trackers that are still running, optionally filtered by market.
+
+    When *market* is ``None`` (default), returns the total across all markets.
+    """
+    all_runs = active_runs(session)
+    if market is not None:
+        market_norm = market.upper()
+        return sum(
+            1 for t in all_runs
+            if getattr(t, "market", "CN") == market_norm
+            and t.is_running and not t.is_complete and not t.error
+        )
+    return sum(1 for t in all_runs if t.is_running and not t.is_complete and not t.error)
 
 
-def slots_available(session: MutableMapping[str, Any]) -> int:
-    """How many more slots are free to start new jobs."""
+def slots_available(session: MutableMapping[str, Any], market: str | None = None) -> int:
+    """How many more slots are free to start new jobs, optionally by market.
+
+    When *market* is ``None`` (default), returns the total available slots
+    across all markets using the legacy ``TRADINGAGENTS_MAX_PARALLEL`` cap.
+    """
+    if market is not None:
+        market_norm = market.upper()
+        cap = cn_max_runs() if market_norm == "CN" else us_max_runs()
+        return max(0, cap - running_count(session, market=market_norm))
     return max(0, max_runs() - running_count(session))
 
 
@@ -197,22 +234,82 @@ def pop_and_start_queued_jobs(
 ) -> list[ProgressTracker]:
     """Pop as many jobs as slots are free and start them.
 
+    CN and US jobs use separate parallel pools (``CN_MAX_PARALLEL`` and
+    ``US_MAX_PARALLEL``).  The queue is scanned in FIFO order; a job is
+    started only when its market has a free slot.  Jobs for a market that
+    has no free slots stay in the queue and we move on to the next job.
+
     Returns the list of newly started trackers (possibly empty).
     """
     started: list[ProgressTracker] = []
-    while slots_available(session) > 0:
-        job = advance_queue(session)
-        if job is None:
+    remaining: list[AnalysisJob] = []
+    started_any = True
+
+    while started_any:
+        started_any = False
+        # Collect the full queue snapshot at the beginning of each scan pass.
+        queue = list(queue_snapshot(session))
+        if not queue:
             break
-        try:
-            tracker = begin_analysis_fn(job)
-            started.append(tracker)
-        except Exception:
-            # Put the job back to front of queue on failure.
-            from web.analysis_queue import prepend_job
-            prepend_job(session, job)
+
+        remaining.clear()
+        for job in queue:
+            job_market = (job.market or "CN").upper()
+            if slots_available(session, market=job_market) <= 0:
+                remaining.append(job)
+                continue
+
+            # Remove this job from the persisted queue.
+            if not _remove_first_job(session, job):
+                # Already gone (race) — just skip.
+                remaining[:] = [j for j in remaining if j.identity() != job.identity()]
+                continue
+
+            try:
+                tracker = begin_analysis_fn(job)
+                started.append(tracker)
+                started_any = True
+            except Exception:
+                from web.analysis_queue import prepend_job
+                prepend_job(session, job)
+                return started
+
+        # Write back the remaining jobs to the queue.
+        if remaining:
+            _replace_queue(session, remaining)
+        else:
             break
+
+    # If the loop terminated because no job could be started, the remaining
+    # queue has already been written back in the loop body.
     return started
+
+
+def _remove_first_job(session: MutableMapping[str, Any], job: AnalysisJob) -> bool:
+    """Remove the first occurrence of *job* from the session queue.
+
+    Returns True if found and removed.
+    """
+    from web.analysis_queue import QUEUE_SESSION_KEY
+
+    queue = list(session.get(QUEUE_SESSION_KEY, []))
+    for i, candidate in enumerate(queue):
+        if candidate.identity() == job.identity():
+            queue.pop(i)
+            session[QUEUE_SESSION_KEY] = queue
+            return True
+    return False
+
+
+def _replace_queue(session: MutableMapping[str, Any], jobs: list[AnalysisJob]) -> None:
+    """Replace the session queue with *jobs*.
+
+    Does NOT persist to disk — the queue is transient in session_state;
+    persistence is handled by append/advance/prepend callers.
+    """
+    from web.analysis_queue import QUEUE_SESSION_KEY
+
+    session[QUEUE_SESSION_KEY] = jobs
 
 
 def request_fill_parallel_slots(
@@ -233,10 +330,19 @@ def can_fill_parallel_slots(
     *,
     incomplete_entries: list[Any] | None = None,
 ) -> bool:
-    """True when free slots + queued jobs should be started now."""
-    if slots_available(session) <= 0:
-        return False
+    """True when free slots + queued jobs should be started now.
+
+    Checks per-market: there must be at least one job in the queue whose
+    market has a free slot.
+    """
     if not queue_snapshot(session):
+        return False
+    # There must be at least one job whose market has a free slot.
+    for job in queue_snapshot(session):
+        job_market = (job.market or "CN").upper()
+        if slots_available(session, market=job_market) > 0:
+            break
+    else:
         return False
     if has_running(session):
         return True
