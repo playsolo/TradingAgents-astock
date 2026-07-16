@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import re
 import threading
 import traceback
+from pathlib import Path
 from typing import Any
 
+from tradingagents.dataflows.utils import safe_ticker_component
 from web.history import clear_incomplete_task, record_incomplete_task
 from web.progress import PIPELINE_STAGES, ProgressTracker
 from web.stock_display import normalize_report_state_mentions, normalize_stock_mentions
@@ -231,6 +234,69 @@ def _setup_tracker_for_run(
     )
 
 
+def _finalize_us_run(
+    ticker: str,
+    trade_date: str,
+    config: dict,
+    tracker: ProgressTracker,
+) -> None:
+    """Persist a completed US analysis to the same log location as A-stock.
+
+    The US bridge subprocess runs the (older) TradingAgents graph which may
+    not have a working ``finalize_graph_run`` on the server. Even when it
+    does, its ``_log_state`` writes to ``full_states_log_{date}.json`` in the
+    same ``~/.tradingagents/logs/`` tree — but the entry lacks A-stock-specific
+    keys (policy_report, hot_money_report, lockup_report…) and the
+    ``company_of_interest`` may be an empty string.
+
+    This function writes a compatible log entry so that ``get_history()``
+    can find it via ``logs/<ticker>/TradingAgentsStrategy_logs/full_states_log_*.json``.
+    """
+    final_state = tracker.final_state
+    if not final_state or not final_state.get("final_trade_decision"):
+        # Not really complete — skip.
+        return
+
+    from web.us_bridge.protocol import serialize_final_state
+
+    serialized = serialize_final_state(final_state)
+
+    safe_ticker = safe_ticker_component(ticker)
+    results_dir = config.get("results_dir") or str(
+        Path.home() / ".tradingagents" / "logs"
+    )
+    directory = (
+        Path(results_dir) / safe_ticker / "TradingAgentsStrategy_logs"
+    )
+    directory.mkdir(parents=True, exist_ok=True)
+
+    # Build a log entry compatible with history.py's _load_state() expectations.
+    log_entry: dict[str, Any] = {
+        "company_of_interest": serialized.get("company_of_interest", ticker),
+        "trade_date": serialized.get("trade_date", trade_date),
+        "market_report": serialized.get("market_report", ""),
+        "sentiment_report": serialized.get("sentiment_report", ""),
+        "news_report": serialized.get("news_report", ""),
+        "fundamentals_report": serialized.get("fundamentals_report", ""),
+        "policy_report": "",
+        "hot_money_report": "",
+        "lockup_report": "",
+        "data_quality_summary": "",
+        "investment_debate_state": serialized.get("investment_debate_state", {}),
+        "trader_investment_decision": serialized.get("trader_investment_decision", ""),
+        "risk_debate_state": serialized.get("risk_debate_state", {}),
+        "investment_plan": serialized.get("investment_plan", ""),
+        "final_trade_decision": serialized.get("final_trade_decision", ""),
+    }
+    action_plan = serialized.get("action_plan")
+    if action_plan:
+        log_entry["action_plan"] = action_plan
+
+    log_path = directory / f"full_states_log_{trade_date}.json"
+    with open(log_path, "w", encoding="utf-8") as f:
+        json.dump(log_entry, f, indent=4, ensure_ascii=False)
+
+
 def _run_pipeline_body(
     ticker: str,
     trade_date: str,
@@ -246,6 +312,7 @@ def _run_pipeline_body(
     try:
         if tracker.market == "US":
             _run_us(ticker, trade_date, config, tracker)
+            _finalize_us_run(ticker, trade_date, config, tracker)
         else:
             _run(
                 ticker,
