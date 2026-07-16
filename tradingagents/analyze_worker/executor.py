@@ -62,17 +62,53 @@ def run_one_job(job: Any, config: dict[str, Any]) -> None:
 
     Never raises: pipeline errors are recorded in the incomplete index by the
     underlying runner. Runs inside a worker pool thread.
+
+    Honors ``job.fresh``: when True, clears checkpoint + incomplete so a new
+    analysis does not resume a stale graph. Auto-resume jobs use ``fresh=False``.
     """
+    from web.history import clear_incomplete_task, record_incomplete_task
     from web.progress import ProgressTracker
     from web.runner import execute_analysis_run
 
     market = job.market if job.market in {"CN", "US"} else "CN"
+    fresh = bool(getattr(job, "fresh", True))
+    try:
+        resume_count = int(getattr(job, "resume_count", 0) or 0)
+    except (TypeError, ValueError):
+        resume_count = 0
+
+    if fresh:
+        clear_incomplete_task(job.ticker, job.trade_date)
+        if market == "CN":
+            try:
+                from tradingagents.graph.checkpointer import clear_checkpoint
+
+                clear_checkpoint(config["data_cache_dir"], job.ticker, job.trade_date)
+            except Exception:  # noqa: BLE001
+                logger.exception("clear_checkpoint failed for %s", job.ticker)
+    else:
+        # Seed incomplete row with resume_count before the runner overwrites stages.
+        record_incomplete_task(
+            job.ticker,
+            job.trade_date,
+            status="running",
+            completed_stages=[],
+            resume_count=resume_count,
+        )
+
     tracker = ProgressTracker(
         ticker=job.ticker,
         trade_date=job.trade_date,
         market=market,
     )
-    logger.info("analyze start %s %s (%s)", job.ticker, job.trade_date, market)
+    logger.info(
+        "analyze start %s %s (%s) fresh=%s resume_count=%d",
+        job.ticker,
+        job.trade_date,
+        market,
+        fresh,
+        resume_count,
+    )
     execute_analysis_run(
         job.ticker,
         job.trade_date,

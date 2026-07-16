@@ -199,6 +199,22 @@ ssh solo@m.wcc.io "sudo journalctl -u tradingagents-scan.service -n 40 --no-host
 | 队列文件 | `~/.tradingagents/analysis_queue.json`（Web 与 worker 通过 flock 原子读写） |
 | 互斥锁 | `~/.tradingagents/analyze.worker.lock`（全局仅一个 worker） |
 | 并发上限 | `TRADINGAGENTS_MAX_PARALLEL`（默认 3，两个 service 都要设一致） |
+| 自动续跑上限 | `TRADINGAGENTS_MAX_AUTO_RESUME`（默认 2；lease 回收 + 启动孤儿入队共用） |
+| Lease 心跳超时 | `TRADINGAGENTS_QUEUE_LEASE_TTL`（默认 180 秒） |
+
+中断后自动继续（生产 worker）：
+
+1. **优雅停机**：`SIGTERM` 把 in-flight 写回队列（不增加续跑次数），`TimeoutStopSec=30`
+2. **Lease**：出队后任务留在 `leases`；心跳超时或进程崩溃后回收并 `resume_count+1` 入队
+3. **启动恢复**：有 checkpoint 的 `running` 孤儿自动入队；达上限则标 error，需侧栏手动续
+
+部署 worker 单元后务必：
+
+```bash
+sudo cp deploy/tradingagents-analyze.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl restart tradingagents-analyze.service
+```
 
 **首次安装 worker：**
 

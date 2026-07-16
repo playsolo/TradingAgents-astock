@@ -98,6 +98,7 @@ def test_incomplete_task_round_trip(tmp_path, monkeypatch):
             "status": "error",
             "error": "quota exceeded",
             "completed_stages": ["market", "news"],
+            "resume_count": 0,
             "updated_at": entries[0]["updated_at"],
             "checkpoint_step": 3,
         }

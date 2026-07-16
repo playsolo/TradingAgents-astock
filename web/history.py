@@ -230,21 +230,40 @@ def record_incomplete_task(
     status: str,
     error: str | None = None,
     completed_stages: list[str] | None = None,
+    resume_count: int | None = None,
 ) -> None:
-    """Upsert a resumable task entry."""
+    """Upsert a resumable task entry.
+
+    ``resume_count`` tracks how many times the worker has auto-continued this
+    ticker+date after an interrupt. When omitted, the previous value is kept
+    (or 0 for a new row).
+    """
     ticker = ticker.strip().upper()
     trade_date = trade_date.strip()
     if not ticker or not trade_date:
         return
 
     with _INCOMPLETE_TASKS_LOCK:
-        entries = [
-            entry
-            for entry in _load_incomplete_index()
-            if _completed_key(entry["ticker"], entry["trade_date"])
-            != _completed_key(ticker, trade_date)
-        ]
+        prev_resume = 0
+        entries = []
+        for entry in _load_incomplete_index():
+            if _completed_key(entry["ticker"], entry["trade_date"]) == _completed_key(
+                ticker, trade_date
+            ):
+                try:
+                    prev_resume = int(entry.get("resume_count", 0) or 0)
+                except (TypeError, ValueError):
+                    prev_resume = 0
+                continue
+            entries.append(entry)
         now = time.time()
+        if resume_count is None:
+            count = prev_resume
+        else:
+            try:
+                count = max(0, int(resume_count))
+            except (TypeError, ValueError):
+                count = prev_resume
         entries.append(
             {
                 "ticker": ticker,
@@ -252,6 +271,7 @@ def record_incomplete_task(
                 "status": status,
                 "error": error or "",
                 "completed_stages": completed_stages or [],
+                "resume_count": count,
                 "updated_at": now,
             }
         )

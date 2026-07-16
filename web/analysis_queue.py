@@ -11,8 +11,10 @@ import json
 import os
 import re
 import threading
+import time
+import uuid
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterator, MutableMapping, Optional
 
@@ -28,6 +30,9 @@ _TICKER_SPLIT_RE = re.compile(r"[\s,，;；、]+")
 
 _STORE_LOCK = threading.RLock()
 
+# Queue JSON schema: v1 = waiting jobs only; v2 adds in-flight leases.
+_QUEUE_VERSION = 2
+
 
 @dataclass(frozen=True)
 class AnalysisJob:
@@ -35,6 +40,7 @@ class AnalysisJob:
     trade_date: str
     market: str  # "CN" | "US"
     fresh: bool = True
+    resume_count: int = 0
 
     def to_start_request(self) -> dict[str, Any]:
         return {
@@ -42,6 +48,7 @@ class AnalysisJob:
             "trade_date": self.trade_date,
             "fresh": self.fresh,
             "market": self.market,
+            "resume_count": self.resume_count,
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -50,6 +57,11 @@ class AnalysisJob:
     def identity(self) -> tuple[str, str, str]:
         return (self.market, self.ticker, self.trade_date)
 
+    def with_resume(self, *, resume_count: int | None = None, fresh: bool = False) -> "AnalysisJob":
+        """Return a copy suitable for auto-continue / graceful requeue."""
+        count = self.resume_count if resume_count is None else int(resume_count)
+        return replace(self, fresh=fresh, resume_count=max(0, count))
+
     @classmethod
     def from_mapping(cls, raw: Any) -> "AnalysisJob":
         if isinstance(raw, cls):
@@ -57,17 +69,64 @@ class AnalysisJob:
         # Streamlit hot-reload replaces this class; session may still hold instances
         # from the previous class object (isinstance fails, but attributes remain).
         if not isinstance(raw, (dict, MutableMapping)) and hasattr(raw, "ticker"):
+            try:
+                resume_count = int(getattr(raw, "resume_count", 0) or 0)
+            except (TypeError, ValueError):
+                resume_count = 0
             return cls(
                 ticker=str(getattr(raw, "ticker")),
                 trade_date=str(getattr(raw, "trade_date", "")),
                 market=str(getattr(raw, "market", None) or "CN"),
                 fresh=bool(getattr(raw, "fresh", True)),
+                resume_count=max(0, resume_count),
             )
+        try:
+            resume_count = int(raw.get("resume_count", 0) or 0)
+        except (TypeError, ValueError):
+            resume_count = 0
         return cls(
             ticker=str(raw["ticker"]),
             trade_date=str(raw["trade_date"]),
             market=str(raw.get("market") or "CN"),
             fresh=bool(raw.get("fresh", True)),
+            resume_count=max(0, resume_count),
+        )
+
+
+@dataclass(frozen=True)
+class QueueLease:
+    """In-flight claim so a crashed worker can reclaim unfinished jobs."""
+
+    job: AnalysisJob
+    lease_id: str
+    claimed_at: float
+    heartbeat_at: float
+    owner_pid: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "job": self.job.to_dict(),
+            "lease_id": self.lease_id,
+            "claimed_at": self.claimed_at,
+            "heartbeat_at": self.heartbeat_at,
+            "owner_pid": self.owner_pid,
+        }
+
+    @classmethod
+    def from_mapping(cls, raw: Any) -> "QueueLease":
+        if isinstance(raw, cls):
+            return raw
+        job = AnalysisJob.from_mapping(raw["job"] if isinstance(raw, dict) else raw.job)
+        return cls(
+            job=job,
+            lease_id=str(raw["lease_id"] if isinstance(raw, dict) else raw.lease_id),
+            claimed_at=float(
+                raw["claimed_at"] if isinstance(raw, dict) else raw.claimed_at
+            ),
+            heartbeat_at=float(
+                raw["heartbeat_at"] if isinstance(raw, dict) else raw.heartbeat_at
+            ),
+            owner_pid=int(raw["owner_pid"] if isinstance(raw, dict) else raw.owner_pid),
         )
 
 
@@ -85,38 +144,73 @@ class AnalysisQueueStore:
                 else Path.home() / ".tradingagents" / "analysis_queue.json"
             )
 
+    def _parse_jobs(self, data: dict[str, Any]) -> list[AnalysisJob]:
+        jobs: list[AnalysisJob] = []
+        for raw in data.get("jobs") or []:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                jobs.append(AnalysisJob.from_mapping(raw))
+            except (KeyError, TypeError, ValueError):
+                continue
+        return jobs
+
+    def _parse_leases(self, data: dict[str, Any]) -> list[QueueLease]:
+        leases: list[QueueLease] = []
+        for raw in data.get("leases") or []:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                leases.append(QueueLease.from_mapping(raw))
+            except (KeyError, TypeError, ValueError):
+                continue
+        return leases
+
+    def _read_payload(self) -> dict[str, Any]:
+        if not self.path.exists():
+            return {"version": _QUEUE_VERSION, "jobs": [], "leases": []}
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError, TypeError):
+            return {"version": _QUEUE_VERSION, "jobs": [], "leases": []}
+        if not isinstance(data, dict):
+            return {"version": _QUEUE_VERSION, "jobs": [], "leases": []}
+        return data
+
+    def _load_state(self) -> tuple[list[AnalysisJob], list[QueueLease]]:
+        """Load waiting jobs + in-flight leases. Caller must hold the store lock."""
+        data = self._read_payload()
+        return self._parse_jobs(data), self._parse_leases(data)
+
+    def _save_state(self, jobs: list[AnalysisJob], leases: list[QueueLease]) -> None:
+        """Persist waiting jobs + leases. Caller must hold the store lock."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": _QUEUE_VERSION,
+            "jobs": [job.to_dict() for job in jobs],
+            "leases": [lease.to_dict() for lease in leases],
+        }
+        tmp = self.path.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        tmp.replace(self.path)
+
     def load(self) -> list[AnalysisJob]:
         with _STORE_LOCK:
-            if not self.path.exists():
-                return []
-            try:
-                with open(self.path, encoding="utf-8") as f:
-                    data = json.load(f)
-            except (OSError, json.JSONDecodeError, TypeError):
-                return []
-            if not isinstance(data, dict):
-                return []
-            jobs: list[AnalysisJob] = []
-            for raw in data.get("jobs") or []:
-                if not isinstance(raw, dict):
-                    continue
-                try:
-                    jobs.append(AnalysisJob.from_mapping(raw))
-                except (KeyError, TypeError, ValueError):
-                    continue
+            jobs, _leases = self._load_state()
             return jobs
 
-    def save(self, jobs: list[AnalysisJob]) -> None:
+    def load_leases(self) -> list[QueueLease]:
         with _STORE_LOCK:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            payload = {
-                "version": 1,
-                "jobs": [job.to_dict() for job in jobs],
-            }
-            tmp = self.path.with_suffix(".tmp")
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-            tmp.replace(self.path)
+            _jobs, leases = self._load_state()
+            return leases
+
+    def save(self, jobs: list[AnalysisJob]) -> None:
+        """Replace waiting jobs; preserve any existing leases."""
+        with _STORE_LOCK:
+            _old_jobs, leases = self._load_state()
+            self._save_state(jobs, leases)
 
     # ── Cross-process atomic ops (Web appends, worker claims) ─────────────
     #
@@ -153,15 +247,166 @@ class AnalysisQueueStore:
             finally:
                 fh.close()
 
-    def claim_next(self) -> Optional[AnalysisJob]:
-        """Atomically pop and return the head job, or None when empty."""
+    def claim_next(self, *, owner_pid: int | None = None) -> Optional[AnalysisJob]:
+        """Atomically move the head waiting job into a lease and return it.
+
+        Returns None when the waiting queue is empty. The job remains tracked
+        under ``leases`` until :meth:`complete` or reclaim/release.
+        """
+        pid = os.getpid() if owner_pid is None else int(owner_pid)
         with self.exclusive():
-            jobs = self.load()
+            jobs, leases = self._load_state()
             if not jobs:
                 return None
             head = jobs.pop(0)
-            self.save(jobs)
+            leased_idents = {lease.job.identity() for lease in leases}
+            if head.identity() in leased_idents:
+                # Should not happen; drop duplicate wait entry and retry shape.
+                self._save_state(jobs, leases)
+                return None
+            now = time.time()
+            leases.append(
+                QueueLease(
+                    job=head,
+                    lease_id=uuid.uuid4().hex,
+                    claimed_at=now,
+                    heartbeat_at=now,
+                    owner_pid=pid,
+                )
+            )
+            self._save_state(jobs, leases)
             return head
+
+    def heartbeat(self, identity: tuple[str, str, str]) -> bool:
+        """Refresh lease heartbeat. Returns False if no matching lease."""
+        with self.exclusive():
+            jobs, leases = self._load_state()
+            updated: list[QueueLease] = []
+            found = False
+            now = time.time()
+            for lease in leases:
+                if lease.job.identity() == identity:
+                    updated.append(
+                        QueueLease(
+                            job=lease.job,
+                            lease_id=lease.lease_id,
+                            claimed_at=lease.claimed_at,
+                            heartbeat_at=now,
+                            owner_pid=lease.owner_pid,
+                        )
+                    )
+                    found = True
+                else:
+                    updated.append(lease)
+            if found:
+                self._save_state(jobs, updated)
+            return found
+
+    def complete(self, identity: tuple[str, str, str]) -> bool:
+        """Drop a finished lease. Returns True when a lease was removed."""
+        with self.exclusive():
+            jobs, leases = self._load_state()
+            kept = [lease for lease in leases if lease.job.identity() != identity]
+            if len(kept) == len(leases):
+                return False
+            self._save_state(jobs, kept)
+            return True
+
+    def release_to_queue(
+        self,
+        identities: list[tuple[str, str, str]],
+        *,
+        bump_resume: bool = False,
+        max_auto_resume: int = 2,
+    ) -> tuple[list[AnalysisJob], list[AnalysisJob]]:
+        """Move leased jobs back to the front of the waiting queue.
+
+        ``bump_resume=False`` is for graceful stop (B): preserve resume_count.
+        ``bump_resume=True`` is for crash reclaim (C): increment resume_count;
+        jobs already at ``max_auto_resume`` are returned as exhausted and not
+        requeued.
+
+        Returns ``(requeued, exhausted)``.
+        """
+        wanted = set(identities)
+        if not wanted:
+            return [], []
+        with self.exclusive():
+            jobs, leases = self._load_state()
+            requeued: list[AnalysisJob] = []
+            exhausted: list[AnalysisJob] = []
+            remaining_leases: list[QueueLease] = []
+            for lease in leases:
+                ident = lease.job.identity()
+                if ident not in wanted:
+                    remaining_leases.append(lease)
+                    continue
+                if bump_resume:
+                    next_count = lease.job.resume_count + 1
+                    if next_count > max_auto_resume:
+                        exhausted.append(lease.job)
+                        continue
+                    job = lease.job.with_resume(resume_count=next_count, fresh=False)
+                else:
+                    job = lease.job.with_resume(
+                        resume_count=lease.job.resume_count, fresh=False
+                    )
+                requeued.append(job)
+            if not requeued and not exhausted:
+                return [], []
+            # Prepend requeued jobs; drop duplicates already waiting.
+            waiting_idents = {j.identity() for j in jobs}
+            prefix: list[AnalysisJob] = []
+            for job in requeued:
+                if job.identity() in waiting_idents:
+                    continue
+                prefix.append(job)
+                waiting_idents.add(job.identity())
+            self._save_state(prefix + jobs, remaining_leases)
+        if prefix:
+            _clear_incomplete_for_queued(prefix, {j.identity() for j in prefix})
+        return requeued, exhausted
+
+    def reclaim_expired(
+        self,
+        *,
+        ttl_seconds: float,
+        max_auto_resume: int = 2,
+        now: float | None = None,
+        owner_pid: int | None = None,
+    ) -> tuple[list[AnalysisJob], list[AnalysisJob]]:
+        """Reclaim stale leases (or all leases when ``ttl_seconds<=0`` on startup).
+
+        Leases owned by ``owner_pid`` (current process) are never reclaimed while
+        their heartbeat is still fresh — protects against double-run in the same
+        worker. On startup pass ``ttl_seconds=0`` to reclaim every lease from a
+        previous process.
+        """
+        ts = time.time() if now is None else float(now)
+        pid = os.getpid() if owner_pid is None else int(owner_pid)
+        with self.exclusive():
+            jobs, leases = self._load_state()
+            if not leases:
+                return [], []
+            stale_idents: list[tuple[str, str, str]] = []
+            for lease in leases:
+                age = ts - float(lease.heartbeat_at)
+                if ttl_seconds <= 0:
+                    # Startup: reclaim every leftover lease from a prior process.
+                    stale_idents.append(lease.job.identity())
+                    continue
+                if lease.owner_pid == pid and age < ttl_seconds:
+                    continue
+                if age >= ttl_seconds:
+                    stale_idents.append(lease.job.identity())
+            if not stale_idents:
+                return [], []
+
+        return self.release_to_queue(
+            stale_idents,
+            bump_resume=True,
+            max_auto_resume=max_auto_resume,
+        )
 
     def append_atomic(
         self,
@@ -175,11 +420,13 @@ class AnalysisQueueStore:
 
         Identities that end up in the waiting queue (newly added *or* already
         present) drop any matching incomplete-task row so the sidebar does not
-        show both「队列中」and「出错/未完成」.
+        show both「队列中」and「出错/未完成」. Leased identities also count as
+        duplicates so Web cannot double-enqueue an in-flight ticker.
         """
         with self.exclusive():
-            jobs = self.load()
+            jobs, leases = self._load_state()
             existing = {j.identity() for j in jobs}
+            existing |= {lease.job.identity() for lease in leases}
             if exclude:
                 existing |= exclude
             added = 0
@@ -191,15 +438,16 @@ class AnalysisQueueStore:
                 existing.add(ident)
                 added += 1
             if added:
-                self.save(jobs)
+                self._save_state(jobs, leases)
             queued = {j.identity() for j in jobs}
         _clear_incomplete_for_queued(new_jobs, queued)
         return added
 
     def clear_atomic(self) -> None:
-        """Atomically empty the on-disk queue."""
+        """Atomically empty the on-disk waiting queue (leases preserved)."""
         with self.exclusive():
-            self.save([])
+            _jobs, leases = self._load_state()
+            self._save_state([], leases)
 
 
 def default_store() -> AnalysisQueueStore:
