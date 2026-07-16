@@ -346,38 +346,34 @@ class AnalyzeWorker:
             )
 
     def _claim_batch(self, free_slots: int) -> list[AnalysisJob]:
-        """Atomically claim up to ``free_slots`` jobs from the queue.
+        """Claim jobs from the queue, respecting per-market caps.
 
-        CN and US jobs use separate parallel pools controlled by
-        ``CN_MAX_PARALLEL`` and ``US_MAX_PARALLEL`` env vars (each defaults
-        to 3).  The queue is scanned in FIFO order; a job is claimed only
-        when its market has a free slot.  The total returned never exceeds
-        ``free_slots``.
+        CN and US pools are **independent** – each is filled up to its own
+        cap (``CN_MAX_PARALLEL`` / ``US_MAX_PARALLEL``, each defaults to 3)
+        without one starving the other.  ``free_slots`` is a hint on how
+        many thread-pool slots are available; the caller's
+        ``run_forever``/``run_until_drained`` loops already bound total
+        concurrency via ``max_workers``, so this method simply claims up to
+        the per-market cap regardless of ``free_slots``.
 
-        CN slots are filled first (preserves approximate FIFO for mixed
-        queues where CN jobs tend to be ahead of US jobs).
+        Jobs already in-flight (tracked by leases) are skipped.
         """
         self._reclaim_stale()
         cn_cap = max(0, int(os.environ.get("CN_MAX_PARALLEL", "3")) - self._cn_in_flight())
         us_cap = max(0, int(os.environ.get("US_MAX_PARALLEL", "3")) - self._us_in_flight())
         batch: list[AnalysisJob] = []
-        remaining = max(0, free_slots)
-        # Phase 1: fill CN slots up to min(cn_cap, remaining).
-        cn_quota = min(cn_cap, remaining)
-        for _ in range(cn_quota):
+        # Claim CN jobs up to cn_cap.
+        for _ in range(cn_cap):
             job = self.store.claim_next_by_market("CN")
             if job is None:
                 break
             batch.append(job)
-            remaining -= 1
-        # Phase 2: fill US slots up to min(us_cap, remaining).
-        us_quota = min(us_cap, remaining)
-        for _ in range(us_quota):
+        # Claim US jobs up to us_cap, independent of CN.
+        for _ in range(us_cap):
             job = self.store.claim_next_by_market("US")
             if job is None:
                 break
             batch.append(job)
-            remaining -= 1
         return batch
 
     def _run_safe(self, job: AnalysisJob) -> None:
@@ -438,8 +434,8 @@ class AnalyzeWorker:
             while not self._stop.is_set():
                 in_flight = self._reap(in_flight)
                 self._heartbeat_in_flight()
-                free = self.max_workers - len(in_flight)
-                batch = self._claim_batch(free) if free > 0 else []
+                # Always try to claim — _claim_batch self-limits per market.
+                batch = self._claim_batch(self.max_workers)
                 for job in batch:
                     fut = pool.submit(self._run_safe, job)
                     with self._in_flight_lock:
@@ -475,8 +471,8 @@ class AnalyzeWorker:
             while not self._stop.is_set():
                 in_flight = self._reap(in_flight)
                 self._heartbeat_in_flight()
-                free = self.max_workers - len(in_flight)
-                batch = self._claim_batch(free) if free > 0 else []
+                # Always try to claim — _claim_batch self-limits per market.
+                batch = self._claim_batch(self.max_workers)
                 for job in batch:
                     logger.info(
                         "dispatch %s %s (fresh=%s resume_count=%d)",

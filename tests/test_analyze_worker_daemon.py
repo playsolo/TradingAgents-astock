@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from pathlib import Path
@@ -11,6 +12,26 @@ import pytest
 from tradingagents.analyze_worker import daemon as daemon_mod
 from tradingagents.analyze_worker.daemon import AnalyzeWorker, reconcile_orphan_runs
 from web.analysis_queue import AnalysisJob, AnalysisQueueStore
+
+
+class _env:
+    """Temporarily set an environment variable within a context."""
+
+    def __init__(self, key: str, value: str):
+        self.key = key
+        self.value = value
+        self._old: str | None = None
+
+    def __enter__(self):
+        self._old = os.environ.get(self.key)
+        os.environ[self.key] = self.value
+        return self
+
+    def __exit__(self, *args):
+        if self._old is None:
+            os.environ.pop(self.key, None)
+        else:
+            os.environ[self.key] = self._old
 
 
 @pytest.fixture
@@ -43,9 +64,9 @@ def test_claim_batch_respects_free_slots_and_fifo(store: AnalysisQueueStore):
     store.save([_job("A"), _job("B"), _job("C")])
     worker = AnalyzeWorker(store=store, config={}, max_workers=3, run_fn=lambda *a: None)
 
-    # _claim_batch is now market-aware: free_slots is a hint but per-market
-    # caps constrain the batch.  All CN jobs → up to CN_MAX_PARALLEL=3.
-    batch = worker._claim_batch(2)
+    # _claim_batch ignores free_slots, claims up to per-market cap (3).
+    with _env("CN_MAX_PARALLEL", "2"):
+        batch = worker._claim_batch(99)
     assert [j.ticker for j in batch] == ["A", "B"]
     assert [j.ticker for j in store.load()] == ["C"]
 
