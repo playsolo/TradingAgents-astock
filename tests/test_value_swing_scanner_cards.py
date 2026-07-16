@@ -22,7 +22,7 @@ def _cand(**overrides):
         "news_found": True,
         "concept_active": False,
         "hot_topic_match": False,
-        "why": "站上MA20 · 接近年线 · 近3日个股新闻",
+        "why": "站上MA20 · 接近年线 · 近3日新闻且涨幅/预期未透支",
     }
     base.update(overrides)
     return base

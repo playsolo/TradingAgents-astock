@@ -67,6 +67,8 @@ _MIN_AMPLITUDE_20D: float = 0.02        # 20日振幅 > 2%
 _MAX_CANDIDATES: int = 15
 _TENCENT_BATCH_SIZE = 800
 _L1B_BATCH_SIZE = 30                    # L1b 验证的候选上限（防耗时过长）
+# 近 5 日涨幅 ≥ 该阈值时，个股新闻不再计催化剂分（利好可能已兑现）
+_NEWS_RET_5D_MAX: float = 0.10
 
 # L2 因子口径：active=当前生产路径会采集并计入；dormant=逻辑仍评分但暂未拉数。
 # （UI / 快照用公开结构；改名时同步 tests/test_value_swing_explain.py）
@@ -76,7 +78,7 @@ L2_FACTOR_SPECS: tuple[tuple[str, str, bool], ...] = (
     ("dragon_tiger", "龙虎榜机构净买≥100万", False),
     ("above_ma20", "站上MA20", True),
     ("near_ma250", "接近年线", True),
-    ("news_found", "近3日个股新闻", True),
+    ("news_found", "近3日新闻且涨幅/预期未透支", True),
     ("hot_topic_match", "热点题材", True),
     ("concept_active", "概念活跃", True),
     ("exp_hit", "远期估值更便宜", True),
@@ -116,7 +118,9 @@ def selection_rules_snapshot() -> dict[str, Any]:
             "dormant": dormant,
             "top_n": _MAX_CANDIDATES,
             "note": (
-                "每命中一项 +1；一致预期闸门：覆盖≥3 家时 "
+                "每命中一项 +1；个股新闻仅在近5日涨幅<"
+                f"{_NEWS_RET_5D_MAX * 100:.0f}% 且一致预期未透支时计分；"
+                "一致预期闸门：覆盖≥3 家时 "
                 "FwdPE 相对 TTM 更便宜 +1 / 暗示盈利下滑 −1；取信号分最高的 top N"
             ),
         },
@@ -141,7 +145,29 @@ def _l2_factor_hit(key: str, candidate: StockInfo | dict[str, Any]) -> bool:
         return v is not None and float(v) >= 100
     if key == "exp_hit":
         return bool(_cand_get(candidate, "exp_hit", False))
+    if key == "news_found":
+        return news_catalyst_hit(candidate)
     return bool(_cand_get(candidate, key, False))
+
+
+def news_catalyst_hit(candidate: StockInfo | dict[str, Any]) -> bool:
+    """B2：有近3日新闻，且近5日涨幅/一致预期未透支时才计催化剂分。"""
+    if not bool(_cand_get(candidate, "news_found", False)):
+        return False
+    try:
+        delta = int(_cand_get(candidate, "exp_score_delta", 0) or 0)
+    except (TypeError, ValueError):
+        delta = 0
+    if delta < 0:
+        return False
+    ret = _cand_get(candidate, "ret_5d", None)
+    if ret is not None:
+        try:
+            if float(ret) >= _NEWS_RET_5D_MAX:
+                return False
+        except (TypeError, ValueError):
+            pass
+    return True
 
 
 def l2_factor_hits(candidate: StockInfo | dict[str, Any]) -> list[dict[str, Any]]:
@@ -271,6 +297,7 @@ class StockInfo:
     near_ma250: bool = False
     # L2 消息催化剂（新增）
     news_found: bool = False          # 近期是否有重大个股新闻
+    ret_5d: float | None = None       # 近 5 日涨跌幅（新闻计分用）
     hot_topic_match: bool = False     # 是否属于热点题材
     concept_active: bool = False      # 概念板块近期活跃
     # L2 一致预期质量闸门
@@ -707,6 +734,33 @@ def _load_global_news() -> list[str]:
         return []
 
 
+def _calc_ret_nd(code: str, n: int = 5) -> float | None:
+    """近 N 个交易日收盘价涨跌幅（含当日相对 N 日前）。"""
+    try:
+        from tradingagents.dataflows.a_stock import _sina_kline_fallback
+
+        df = _sina_kline_fallback(code)
+        if df is None or df.empty or "Close" not in df.columns:
+            return None
+        closes: list[float] = []
+        for _, r in df.iterrows():
+            try:
+                c = float(r["Close"])
+            except (TypeError, ValueError):
+                continue
+            if c > 0:
+                closes.append(c)
+        if len(closes) <= n:
+            return None
+        base = closes[-(n + 1)]
+        if base <= 0:
+            return None
+        return (closes[-1] - base) / base
+    except Exception as e:
+        logger.debug("近%d日涨幅失败 %s: %s", n, code, e)
+    return None
+
+
 def _check_news_catalyst(code: str) -> bool:
     """检查个股是否有近期重大新闻（东财个股新闻）。"""
     from tradingagents.dataflows.a_stock import get_news
@@ -767,7 +821,7 @@ def run_l2_filter_impl(stocks: list[StockInfo], max_candidates: int = _MAX_CANDI
         if info.near_ma250:
             s += 1
         # 消息催化剂
-        if info.news_found:
+        if news_catalyst_hit(info):
             s += 1
         if info.hot_topic_match:
             s += 1
@@ -845,6 +899,8 @@ def run_l2_filter(
 
         # 消息催化剂
         info.news_found = _safe_call(_check_news_catalyst, info.code, default=False)
+        if info.news_found:
+            info.ret_5d = _safe_call(_calc_ret_nd, info.code, default=None)
         info.hot_topic_match = _check_hot_topic_match(info.code, hot_stocks)
         info.concept_active = _check_concept_catalyst(info.code, global_news, hot_stocks)
 
@@ -967,6 +1023,7 @@ def build_scan_summary_row(info: StockInfo, recommendation: str) -> dict[str, An
         "above_ma20": info.above_ma20,
         "near_ma250": info.near_ma250,
         "news_found": info.news_found,
+        "ret_5d": round(info.ret_5d, 4) if info.ret_5d is not None else None,
         "hot_topic_match": info.hot_topic_match,
         "concept_active": info.concept_active,
         "exp_score_delta": info.exp_score_delta,

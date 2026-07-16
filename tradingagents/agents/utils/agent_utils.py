@@ -85,6 +85,26 @@ def analysis_date_instruction(trade_date: str) -> str:
     )
 
 
+def catalyst_pricing_instruction() -> str:
+    """Gate Buy ratings when positive news looks already priced in (利好兑现).
+
+    Shared by news / bear / research manager / risk / portfolio manager so the
+    rating cap stays consistent across the graph.
+    """
+    return (
+        "\n\n**Catalyst pricing gate (利好兑现)**: "
+        "Positive catalysts are often traded on expectation; confirmation can be "
+        "a sell-the-news event. Explicitly classify pricing status as one of "
+        "未定价 / 部分定价 / 已兑现, using evidence such as pre-event run-up, "
+        "announcement vs rumor stage, volume divergence after a rally "
+        "(放量滞涨), hot-money distribution/exit, and extreme consensus optimism. "
+        "Rating cap: if status is 已兑现, Buy is forbidden — maximum rating is "
+        "Overweight. If 已兑现 and (hot-money exit OR euphoric sentiment OR a "
+        "sharp recent rally), prefer Hold or Underweight over Overweight. "
+        "Momentum / limit-up arguments must not override this cap."
+    )
+
+
 def actionability_instruction(
     trade_date: str,
     now: datetime | None = None,

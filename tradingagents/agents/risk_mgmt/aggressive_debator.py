@@ -1,5 +1,8 @@
 
-from tradingagents.agents.utils.agent_utils import analysis_date_instruction
+from tradingagents.agents.utils.agent_utils import (
+    analysis_date_instruction,
+    catalyst_pricing_instruction,
+)
 
 
 def create_aggressive_debator(llm):
@@ -21,9 +24,11 @@ def create_aggressive_debator(llm):
 
         trader_decision = state["trader_investment_plan"]
         date_rule = analysis_date_instruction(state.get("trade_date", ""))
+        pricing_gate = catalyst_pricing_instruction()
 
         prompt = f"""As the Aggressive Risk Analyst evaluating an A-share (China mainland) stock, your role is to champion high-reward opportunities and bold strategies. Focus on the potential upside, growth potential, and momentum—even when these come with elevated risk. Counter the conservative and neutral analysts with data-driven rebuttals.
 {date_rule}
+{pricing_gate}
 
 A-Share Aggressive Framework — leverage these China-specific upside arguments:
 - Limit-Up Momentum (涨停板效应): In A-shares, consecutive limit-ups create powerful momentum; T+1 actually helps by preventing same-day profit-taking, allowing multi-day runs
@@ -32,6 +37,7 @@ A-Share Aggressive Framework — leverage these China-specific upside arguments:
 - Northbound Validation: If foreign institutions via Stock Connect are net buying alongside domestic momentum, this dual confirmation is a strong signal
 - PE Expansion Phase: In A-share bull cycles, PEs routinely expand to 50-100x for thematic leaders; applying US-market valuation discipline too early means missing the main move
 - Retail Sentiment Tailwind: A-shares are 80% retail; when sentiment turns positive, the herd effect amplifies gains far beyond what fundamentals alone would suggest
+- Hard stop: if catalysts are 已兑现 / priced in, do not argue for Buy; Overweight is the ceiling
 
 Here is the trader's decision:
 

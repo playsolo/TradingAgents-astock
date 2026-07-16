@@ -15,6 +15,7 @@ from tradingagents.agents.utils.agent_utils import (
     actionability_instruction,
     analysis_date_instruction,
     build_instrument_context,
+    catalyst_pricing_instruction,
     clock_from_state,
     get_language_instruction,
 )
@@ -34,6 +35,7 @@ def create_portfolio_manager(llm):
             trade_date,
             now=clock_from_state(state),
         )
+        pricing_gate = catalyst_pricing_instruction()
 
         history = state["risk_debate_state"]["history"]
         risk_debate_state = state["risk_debate_state"]
@@ -51,6 +53,7 @@ def create_portfolio_manager(llm):
 
 {instrument_context}
 {date_rule}
+{pricing_gate}
 
 ---
 
@@ -65,8 +68,8 @@ def create_portfolio_manager(llm):
 ---
 
 **Rating Scale** (use exactly one):
-- **Buy**: Strong conviction to enter or add to position
-- **Overweight**: Favorable outlook, gradually increase exposure
+- **Buy**: Strong conviction to enter or add to position (not allowed when catalysts are 已兑现)
+- **Overweight**: Favorable outlook, gradually increase exposure (ceiling when catalysts are 已兑现)
 - **Hold**: Maintain current position, no action needed
 - **Underweight**: Reduce exposure, take partial profits
 - **Sell**: Exit position or avoid entry

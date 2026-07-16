@@ -6,6 +6,7 @@ from tradingagents.agents.schemas import ResearchPlan, render_research_plan
 from tradingagents.agents.utils.agent_utils import (
     analysis_date_instruction,
     build_instrument_context,
+    catalyst_pricing_instruction,
     get_language_instruction,
 )
 from tradingagents.agents.utils.structured import (
@@ -21,6 +22,7 @@ def create_research_manager(llm):
         instrument_context = build_instrument_context(state["company_of_interest"])
         history = state["investment_debate_state"].get("history", "")
         date_rule = analysis_date_instruction(state.get("trade_date", ""))
+        pricing_gate = catalyst_pricing_instruction()
 
         investment_debate_state = state["investment_debate_state"]
 
@@ -28,14 +30,15 @@ def create_research_manager(llm):
 
 {instrument_context}
 {date_rule}
+{pricing_gate}
 
 Note: This is an A-share (China mainland) stock. Factor in regulatory policy impact, hot money / capital flow dynamics, and lockup expiry / insider reduction risks when synthesising the debate.
 
 ---
 
 **Rating Scale** (use exactly one):
-- **Buy**: Strong conviction in the bull thesis; recommend taking or growing the position
-- **Overweight**: Constructive view; recommend gradually increasing exposure
+- **Buy**: Strong conviction in the bull thesis; recommend taking or growing the position (not allowed when catalysts are 已兑现)
+- **Overweight**: Constructive view; recommend gradually increasing exposure (ceiling when catalysts are 已兑现)
 - **Hold**: Balanced view; recommend maintaining the current position
 - **Underweight**: Cautious view; recommend trimming exposure
 - **Sell**: Strong conviction in the bear thesis; recommend exiting or avoiding the position

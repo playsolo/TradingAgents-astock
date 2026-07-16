@@ -163,6 +163,7 @@ def result_dict_from_scan(result: Any, *, strategy: str = STRATEGY_VALUE_SWING) 
                 "above_ma20": c.above_ma20,
                 "near_ma250": c.near_ma250,
                 "news_found": c.news_found,
+                "ret_5d": round(c.ret_5d, 4) if getattr(c, "ret_5d", None) is not None else None,
                 "hot_topic_match": c.hot_topic_match,
                 "concept_active": c.concept_active,
                 "exp_score_delta": c.exp_score_delta,
