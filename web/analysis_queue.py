@@ -539,6 +539,62 @@ def resolve_ticker_batch(
     return jobs, errors
 
 
+def _infer_token_market(token: str) -> str:
+    """Return ``"CN"`` for 6-digit codes and Chinese names, ``"US"`` otherwise."""
+    code = (token or "").strip()
+    if code.isdigit() and len(code) == 6:
+        return "CN"
+    from web.stock_display import lookup_code_by_cached_name
+    if lookup_code_by_cached_name(code):
+        return "CN"
+    return "US"
+
+
+def resolve_ticker_batch_mixed(
+    raw_tickers: list[str],
+    *,
+    trade_date: str,
+    resolve_cn: Callable[[str], str],
+) -> tuple[list[AnalysisJob], list[str]]:
+    """Resolve a batch of tickers that may mix CN and US markets.
+
+    Each token is auto-classified by ``_infer_token_market``, then resolved
+    with the appropriate market resolver. Returns jobs with per-token market
+    tags alongside error messages for invalid entries.
+    """
+    jobs: list[AnalysisJob] = []
+    errors: list[str] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    for raw in raw_tickers:
+        token = (raw or "").strip()
+        if not token:
+            continue
+        try:
+            market = _infer_token_market(token)
+            if market == "US":
+                code = token.upper()
+                if any(ch.isspace() for ch in code):
+                    raise ValueError("美股代码不能包含空格")
+            else:
+                code = resolve_cn(token)
+            job = AnalysisJob(
+                ticker=code,
+                trade_date=trade_date,
+                market=market,
+                fresh=True,
+            )
+            ident = job.identity()
+            if ident in seen:
+                continue
+            seen.add(ident)
+            jobs.append(job)
+        except ValueError as exc:
+            errors.append(f"{token}: {exc}")
+
+    return jobs, errors
+
+
 def format_queue_job_caption(job: AnalysisJob, index: int) -> str:
     """Sidebar caption: ``N. code name · date · market`` (name when resolvable)."""
     from web.stock_display import format_list_ticker_label

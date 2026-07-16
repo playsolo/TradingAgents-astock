@@ -21,7 +21,7 @@ from web.analysis_queue import (
     parse_ticker_inputs,
     queue_snapshot,
     remove_job_identity,
-    resolve_ticker_batch,
+    resolve_ticker_batch_mixed,
 )
 from tradingagents.analyze_worker import is_worker_mode
 from web.history import (
@@ -82,10 +82,6 @@ def _default_provider_index() -> int:
     return 0
 
 
-def _normalize_us_ticker(raw: str) -> str:
-    return (raw or "").strip().upper()
-
-
 def _resolve_user_input(raw: str) -> tuple[str, str | None]:
     """Resolve raw user input to (ticker_code, error_msg).
 
@@ -108,18 +104,6 @@ def _resolve_user_input(raw: str) -> tuple[str, str | None]:
         return code, None
     except ValueError as e:
         return "", str(e)
-
-
-def _resolve_user_input_for_market(raw: str, market: str) -> tuple[str, str | None]:
-    """Resolve ticker for CN (A-share) or US (Yahoo-style symbol) markets."""
-    if market == "US":
-        code = _normalize_us_ticker(raw)
-        if not code:
-            return "", "请输入美股代码，例如 AAPL / NVDA / BRK.B"
-        if any(ch.isspace() for ch in code):
-            return "", "美股代码不能包含空格"
-        return code, None
-    return _resolve_user_input(raw)
 
 
 def _clear_analysis_artifacts(ticker: str, trade_date: str) -> None:
@@ -241,16 +225,18 @@ def apply_pending_clear_ticker_input(session_state) -> bool:
     return True
 
 
-def _submit_analysis_jobs(raw_tickers: str, market: str, trade_date: str) -> None:
-    """Start the first job immediately when idle; otherwise enqueue the whole batch."""
+def _submit_analysis_jobs(raw_tickers: str, trade_date: str) -> None:
+    """Start the first job immediately when idle; otherwise enqueue the whole batch.
+
+    Tokens are auto-classified as CN or US by ``resolve_ticker_batch_mixed``.
+    """
     tokens = parse_ticker_inputs(raw_tickers)
     if not tokens:
         st.error("❌ 请输入至少一个股票代码")
         return
 
-    jobs, errors = resolve_ticker_batch(
+    jobs, errors = resolve_ticker_batch_mixed(
         tokens,
-        market=market,
         trade_date=trade_date,
         resolve_cn=_resolve_cn_or_raise,
     )
@@ -299,7 +285,8 @@ def _submit_analysis_jobs(raw_tickers: str, market: str, trade_date: str) -> Non
         return
 
     head, *rest = jobs
-    if market == "CN" and tokens:
+    head_market = getattr(head, "market", "CN")
+    if head_market == "CN" and tokens:
         # jobs 已解析过；不要再次 resolve_ticker（中文名会卡 mootdx 全表）。
         raw0 = tokens[0].strip()
         if raw0 and raw0 != head.ticker and not (
@@ -609,30 +596,20 @@ def render_sidebar() -> None:
     st.markdown("---")
     st.markdown("#### 新建分析")
 
-    market_label = st.radio(
-        "市场",
-        options=["A股", "美股"],
-        horizontal=True,
-        key="input_market_label",
-        help="美股将通过本机 TradingAgents 项目子进程分析，进度实时回传",
-    )
-    market = "US" if market_label == "美股" else "CN"
-    st.session_state["analysis_market"] = market
-
     apply_pending_clear_ticker_input(st.session_state)
     ticker_input = st.text_area(
         "股票代码（可多个）",
         placeholder=(
-            "每行一个，或逗号分隔\n例: AAPL, NVDA, BRK.B"
-            if market == "US"
-            else "每行一个，或逗号分隔\n例: 300750, 600519\n或: 宁德时代"
+            "每行一个，或逗号分隔\n"
+            "A股: 300750, 600519, 宁德时代\n"
+            "美股: AAPL, NVDA, BRK.B"
         ),
         key=_INPUT_TICKERS_KEY,
         height=88,
         help=(
-            "支持一次输入多只美股代码（Yahoo 风格）。分析为串行队列，不会加入观察池。"
-            if market == "US"
-            else "支持一次输入多只 A 股代码或中文全称。分析为串行队列，不会加入观察池。"
+            "支持 A 股代码/中文全称和美股代码混输，系统自动判断市场。"
+            "分析为串行队列，不会加入观察池。"
+            "美股将通过本机 TradingAgents 项目子进程分析，进度实时回传。"
         ),
     )
 
@@ -648,12 +625,11 @@ def render_sidebar() -> None:
     if is_admin:
         with st.expander("⚙️ 模型配置", expanded=False):
             _render_llm_config()
-            if market == "US":
-                st.caption(
-                    "美股模式会把此处模型配置转发到本机 TradingAgents；"
-                    "API Key 仍读对应项目的 `.env`。"
-                    "路径可用环境变量 US_TRADINGAGENTS_ROOT / US_TRADINGAGENTS_PYTHON 覆盖。"
-                )
+            st.caption(
+                "美股分析会把此处模型配置转发到本机 TradingAgents；"
+                "API Key 仍读对应项目的 `.env`。"
+                "路径可用环境变量 US_TRADINGAGENTS_ROOT / US_TRADINGAGENTS_PYTHON 覆盖。"
+            )
     else:
         render_model_config_info()
 
@@ -676,36 +652,34 @@ def render_sidebar() -> None:
     ):
         _submit_analysis_jobs(
             ticker_input or "",
-            market,
             trade_date.strftime("%Y-%m-%d"),
         )
 
     _render_analysis_controls(ticker_input or "", trade_date)
     _render_analysis_queue()
 
-    if market == "CN":
-        st.markdown("---")
-        st.markdown("#### 策略")
-        if st.button(
-            "📊 策略扫描",
-            key="nav_value_swing",
-            use_container_width=True,
-            help="价值波段 + 成长加速双池：各自 Top15，互不改规则",
-        ):
-            set_home_mode(st.session_state, HOME_MODE_SCAN)
-            navigate("home")
+    st.markdown("---")
+    st.markdown("#### 策略")
+    if st.button(
+        "📊 策略扫描",
+        key="nav_value_swing",
+        use_container_width=True,
+        help="价值波段 + 成长加速双池：各自 Top15，互不改规则",
+    ):
+        set_home_mode(st.session_state, HOME_MODE_SCAN)
+        navigate("home")
 
-        st.markdown("#### 观察")
-        from web.auth_page import current_watch_store
+    st.markdown("#### 观察")
+    from web.auth_page import current_watch_store
 
-        watch_items = current_watch_store().list_items()
-        watch_n = len(watch_items)
-        alert_n = sum(len(i.alerts) for i in watch_items)
-        watch_label = f"📡 观察池（{watch_n}）"
-        if alert_n:
-            watch_label += f" · {alert_n}告警"
-        if st.button(watch_label, key="nav_watchlist", use_container_width=True):
-            navigate("watch")
+    watch_items = current_watch_store().list_items()
+    watch_n = len(watch_items)
+    alert_n = sum(len(i.alerts) for i in watch_items)
+    watch_label = f"📡 观察池（{watch_n}）"
+    if alert_n:
+        watch_label += f" · {alert_n}告警"
+    if st.button(watch_label, key="nav_watchlist", use_container_width=True):
+        navigate("watch")
 
     st.markdown("---")
     st.markdown("#### 未完成任务")

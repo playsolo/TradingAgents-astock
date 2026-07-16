@@ -1,47 +1,33 @@
-"""Sidebar market selection: A-share resolve vs US ticker passthrough."""
+"""Mixed market input: auto-infer CN vs US from raw token."""
 
 from __future__ import annotations
 
-from web.components import sidebar
+from web.analysis_queue import _infer_token_market
 
 
-def test_normalize_us_ticker_uppercases_and_strips():
-    assert sidebar._normalize_us_ticker("  nvda  ") == "NVDA"
-    assert sidebar._normalize_us_ticker("brk.b") == "BRK.B"
+def test_infer_market_cn_by_digit_length():
+    assert _infer_token_market("300750") == "CN"
+    assert _infer_token_market("600519") == "CN"
+    assert _infer_token_market("000001") == "CN"
+    assert _infer_token_market("688256") == "CN"
 
 
-def test_normalize_us_ticker_rejects_empty():
-    code, err = sidebar._resolve_user_input_for_market("   ", "US")
-    assert code == ""
-    assert err
+def test_infer_market_us_by_non_digit():
+    assert _infer_token_market("AAPL") == "US"
+    assert _infer_token_market("NVDA") == "US"
+    assert _infer_token_market("BRK.B") == "US"
+    assert _infer_token_market("MSFT") == "US"
+    assert _infer_token_market("FIG") == "US"
+    assert _infer_token_market("AMPX") == "US"
 
 
-def test_resolve_us_skips_a_share_resolver(monkeypatch):
-    def boom(_raw):
-        raise AssertionError("resolve_ticker should not be called for US")
+def test_infer_market_cn_by_cached_name():
+    """If the token is a Chinese name known in the local cache, it's CN."""
+    from web.stock_display import remember_resolved_name
 
-    monkeypatch.setattr(
-        "tradingagents.dataflows.a_stock.resolve_ticker",
-        boom,
-        raising=False,
-    )
-    # Patch the import site used by sidebar helper
-    import tradingagents.dataflows.a_stock as a_stock
-
-    monkeypatch.setattr(a_stock, "resolve_ticker", boom)
-
-    code, err = sidebar._resolve_user_input_for_market("AAPL", "US")
-    assert err is None
-    assert code == "AAPL"
+    remember_resolved_name("601899", "紫金矿业")
+    assert _infer_token_market("紫金矿业") == "CN"
 
 
-def test_resolve_cn_still_uses_resolve_ticker(monkeypatch):
-    monkeypatch.setattr(
-        "tradingagents.dataflows.a_stock.resolve_ticker",
-        lambda raw: "300750" if "宁德" in raw or raw == "300750" else (_ for _ in ()).throw(
-            ValueError("bad")
-        ),
-    )
-    code, err = sidebar._resolve_user_input_for_market("宁德时代", "CN")
-    assert err is None
-    assert code == "300750"
+def test_infer_market_us_fallback_when_not_digit_not_cached():
+    assert _infer_token_market("SOMETHING_NEW") == "US"
