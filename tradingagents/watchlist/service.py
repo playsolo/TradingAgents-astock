@@ -35,6 +35,17 @@ def prior_context_from_baseline(baseline: Baseline) -> str:
     return "\n".join(parts)
 
 
+def _infer_market(ticker: str, explicit: str | None = None) -> str:
+    if explicit in {"CN", "US"}:
+        return explicit
+    code = (ticker or "").strip().upper()
+    if code.isdigit() and len(code) == 6:
+        return "CN"
+    if any(ch.isalpha() for ch in code):
+        return "US"
+    return "CN"
+
+
 def add_from_analysis(
     state: dict[str, Any],
     *,
@@ -42,17 +53,19 @@ def add_from_analysis(
     trade_date: str,
     log_path: str = "",
     store: WatchlistStore | None = None,
+    market: str | None = None,
 ) -> WatchItem:
-    """将一次分析结果加入观察池（覆盖同代码旧条目）。一期仅 A 股。"""
+    """将一次分析结果加入观察池（覆盖同代码旧条目）。支持 CN / US。"""
     store = store or default_store()
-    price = _current_price(ticker)
+    resolved = _infer_market(ticker, market)
+    price = _current_price(ticker, market=resolved)
     baseline = extract_baseline(
         state,
         ticker=ticker,
         trade_date=trade_date,
         price=price,
         log_path=log_path,
-        market="CN",
+        market=resolved,
     )
     item = WatchItem(baseline=baseline, enabled=True)
     store.add(item)
@@ -67,19 +80,24 @@ def refresh_from_analysis(
     log_path: str = "",
     store: WatchlistStore | None = None,
     price: float | None = None,
+    market: str | None = None,
 ) -> WatchItem:
     """用新一轮完整分析覆盖基准，保留 enabled / alerts / 观察摘要。"""
     store = store or default_store()
     existing = store.get(ticker)
+    resolved = _infer_market(
+        ticker,
+        market or (existing.baseline.market if existing else None),
+    )
     if price is None:
-        price = _current_price(ticker)
+        price = _current_price(ticker, market=resolved)
     baseline = extract_baseline(
         state,
         ticker=ticker,
         trade_date=trade_date,
         price=price,
         log_path=log_path,
-        market="CN",
+        market=resolved,
     )
     item = WatchItem(
         baseline=baseline,
@@ -95,8 +113,14 @@ def refresh_from_analysis(
     return item
 
 
-def _current_price(ticker: str) -> float | None:
+def _current_price(ticker: str, *, market: str = "CN") -> float | None:
     try:
+        if market == "US":
+            from tradingagents.watchlist.snapshot import fetch_snapshot
+
+            snap = fetch_snapshot(ticker, market="US")
+            return snap.price if snap.price > 0 else None
+
         from tradingagents.dataflows import a_stock
 
         code = ticker.upper()

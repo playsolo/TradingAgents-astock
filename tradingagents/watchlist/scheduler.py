@@ -10,7 +10,7 @@ import os
 import threading
 from typing import Any, Callable, TextIO
 
-from tradingagents.watchlist.calendar import slot_key_for
+from tradingagents.watchlist.calendar import active_observe_slots
 from tradingagents.watchlist.observe import observe_all
 from tradingagents.watchlist.store import WatchlistStore, iter_user_stores
 
@@ -44,34 +44,48 @@ def _loop(
     config_provider: Callable[[], dict[str, Any] | None],
     stop_event: threading.Event,
 ) -> None:
-    last_slot: str | None = None
+    last_slots: set[str] = set()
     while not stop_event.is_set():
         try:
             from datetime import datetime
 
             now = datetime.now()
-            key = slot_key_for(now)
-            if key and key != last_slot:
+            active = active_observe_slots(now)
+            for market, key in active:
+                if key in last_slots:
+                    continue
                 stores = [store] if store is not None else list(iter_user_stores())
                 cfg = config_provider() or {}
                 llm = build_quick_llm(cfg)
                 total = 0
                 for s in stores:
-                    items = [i for i in s.list_items() if i.enabled]
+                    items = [
+                        i
+                        for i in s.list_items()
+                        if i.enabled and (i.baseline.market or "CN") == market
+                    ]
                     if not items:
                         continue
                     total += len(items)
                     observe_all(
-                        s, llm=llm, slot_key=key, analysis_config=cfg or None
+                        s,
+                        llm=llm,
+                        slot_key=key,
+                        analysis_config=cfg or None,
+                        market=market,
                     )
                 if total:
                     logger.info(
-                        "watchlist slot %s — observing %d names across %d watchlists",
+                        "watchlist slot %s (%s) — observing %d names across %d watchlists",
                         key,
+                        market,
                         total,
                         len(stores),
                     )
-                last_slot = key
+                last_slots.add(key)
+            # Drop keys that are no longer active so the next day's same HH:MM can fire.
+            active_keys = {k for _, k in active}
+            last_slots &= active_keys
         except Exception:
             logger.exception("watchlist scheduler tick failed")
         stop_event.wait(_POLL_SECONDS)
@@ -111,4 +125,7 @@ def start_watchlist_scheduler(
             daemon=True,
         )
         thread.start()
-        logger.info("watchlist scheduler started (slots Mon–Fri 09:35/13:05/15:05)")
+        logger.info(
+            "watchlist scheduler started "
+            "(CN 09:35/13:05/15:05 Beijing; US 09:35/12:05/16:05 ET)"
+        )

@@ -489,15 +489,12 @@ def render_report(
             ticker,
             tracker_market=getattr(tracker, "market", None),
         )
-        if market == "US":
-            st.button(
-                "📡 观察池（仅A股）",
-                use_container_width=True,
-                disabled=True,
-                key=f"add_watch_{ticker}_{trade_date}",
-                help="美股分析结果暂不支持加入观察池",
-            )
-        elif st.button("📡 加入观察池", use_container_width=True, key=f"add_watch_{ticker}_{trade_date}"):
+        if st.button(
+            "📡 加入观察池",
+            use_container_width=True,
+            key=f"add_watch_{ticker}_{trade_date}",
+            help="加入后按市场交易时段轻量复核（A股北京时间 / 美股美东时间）",
+        ):
             from tradingagents.watchlist.service import add_from_analysis, resolve_log_path
             from web.auth_page import current_watch_store
 
@@ -508,8 +505,10 @@ def render_report(
                     trade_date=trade_date,
                     log_path=resolve_log_path(ticker, trade_date),
                     store=current_watch_store(),
+                    market=market,
                 )
-                st.success(f"已加入观察池：{ticker}（仅 A 股 · 本机运行时定时复核）")
+                market_tag = "美股" if market == "US" else "A股"
+                st.success(f"已加入观察池：{ticker}（{market_tag} · 本机运行时定时复核）")
             except Exception as exc:  # noqa: BLE001
                 st.error(f"加入观察池失败：{exc}")
 

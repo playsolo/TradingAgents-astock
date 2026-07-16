@@ -234,6 +234,56 @@ def _setup_tracker_for_run(
     )
 
 
+def _build_quick_llm_from_config(config: dict) -> Any:
+    """Build a quick-think LLM from a runtime config dict (worker / Streamlit)."""
+    from tradingagents.llm_clients import create_llm_client
+
+    client = create_llm_client(
+        provider=config.get("llm_provider") or "deepseek",
+        model=config.get("quick_think_llm") or "deepseek-chat",
+        base_url=config.get("backend_url"),
+    )
+    return client.get_llm()
+
+
+def _ensure_us_action_plan(
+    serialized: dict[str, Any],
+    config: dict,
+    tracker: ProgressTracker,
+) -> dict[str, Any] | None:
+    """Extract action_plan on the A-stock side when the US worker omitted it."""
+    existing = serialized.get("action_plan")
+    if isinstance(existing, dict) and existing.get("rating"):
+        return existing
+
+    decision = str(serialized.get("final_trade_decision") or "")
+    if not decision.strip():
+        return None
+
+    try:
+        from tradingagents.agents.utils.action_plan import (
+            extract_action_plan,
+            rating_to_sidebar_signal,
+        )
+
+        llm = _build_quick_llm_from_config(config)
+        plan = extract_action_plan(llm, decision)
+    except Exception:
+        traceback.print_exc()
+        return None
+
+    if not plan:
+        return None
+
+    serialized["action_plan"] = plan
+    if isinstance(tracker.final_state, dict):
+        tracker.final_state["action_plan"] = plan
+    rating = plan.get("rating")
+    if rating:
+        tracker.signal = rating_to_sidebar_signal(rating)
+    return plan
+
+
 def _finalize_us_run(
     ticker: str,
     trade_date: str,
@@ -250,7 +300,8 @@ def _finalize_us_run(
     ``company_of_interest`` may be an empty string.
 
     This function writes a compatible log entry so that ``get_history()``
-    can find it via ``logs/<ticker>/TradingAgentsStrategy_logs/full_states_log_*.json``.
+    can find it via ``logs/<ticker>/TradingAgentsStrategy_logs/full_states_log_*.json``,
+    and runs ``extract_action_plan`` so the report card / watchlist get levels.
     """
     final_state = tracker.final_state
     if not final_state or not final_state.get("final_trade_decision"):
@@ -260,6 +311,7 @@ def _finalize_us_run(
     from web.us_bridge.protocol import serialize_final_state
 
     serialized = serialize_final_state(final_state)
+    action_plan = _ensure_us_action_plan(serialized, config, tracker)
 
     safe_ticker = safe_ticker_component(ticker)
     results_dir = config.get("results_dir") or str(
@@ -288,7 +340,6 @@ def _finalize_us_run(
         "investment_plan": serialized.get("investment_plan", ""),
         "final_trade_decision": serialized.get("final_trade_decision", ""),
     }
-    action_plan = serialized.get("action_plan")
     if action_plan:
         log_entry["action_plan"] = action_plan
 

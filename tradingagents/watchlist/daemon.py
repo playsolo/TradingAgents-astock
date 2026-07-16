@@ -18,7 +18,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from tradingagents.watchlist.calendar import OBSERVE_SLOTS, slot_key_for
+from tradingagents.watchlist.calendar import (
+    OBSERVE_SLOTS,
+    US_OBSERVE_SLOTS,
+    active_observe_slots,
+)
 from tradingagents.watchlist.lockfile import LOCK_PATH, acquire_scheduler_lock
 from tradingagents.watchlist.observe import observe_all
 from tradingagents.watchlist.scheduler import build_quick_llm
@@ -86,16 +90,25 @@ def run_slot_once(
     """
     cfg = config if config is not None else config_from_env()
     dt = now or datetime.now()
-    key = slot_key_for(dt)
-    if not key:
+    active = active_observe_slots(dt)
+    if not active:
         return {"slot_key": None, "observed": {}}
     llm = build_quick_llm(cfg)
     stores = [store] if store is not None else list(iter_user_stores())
     observed: dict[str, Any] = {}
-    for s in stores:
-        batch = observe_all(s, llm=llm, slot_key=key, analysis_config=cfg or None)
-        observed.update(batch.alerts)
-    return {"slot_key": key, "observed": observed}
+    keys: list[str] = []
+    for market, key in active:
+        keys.append(key)
+        for s in stores:
+            batch = observe_all(
+                s,
+                llm=llm,
+                slot_key=key,
+                analysis_config=cfg or None,
+                market=market,
+            )
+            observed.update(batch.alerts)
+    return {"slot_key": ",".join(keys), "observed": observed}
 
 
 def run_forever(
@@ -106,36 +119,54 @@ def run_forever(
 ) -> None:
     """常驻轮询（需已持有调度锁）。``store=None`` 时遍历全部用户观察池。"""
     cfg = config if config is not None else config_from_env()
-    last_slot: str | None = None
+    last_slots: set[str] = set()
     stop = threading.Event()
-    slots = " / ".join(f"{h:02d}:{m:02d}" for h, m in OBSERVE_SLOTS)
-    logger.info("watchlist daemon running — CN trading days %s", slots)
+    cn_slots = " / ".join(f"{h:02d}:{m:02d}" for h, m in OBSERVE_SLOTS)
+    us_slots = " / ".join(f"{h:02d}:{m:02d}" for h, m in US_OBSERVE_SLOTS)
+    logger.info(
+        "watchlist daemon running — CN %s (Beijing); US %s (ET)",
+        cn_slots,
+        us_slots,
+    )
     while not stop.is_set():
         try:
             now = datetime.now()
-            key = slot_key_for(now)
-            if key and key != last_slot:
+            active = active_observe_slots(now)
+            for market, key in active:
+                if key in last_slots:
+                    continue
                 stores = [store] if store is not None else list(iter_user_stores())
                 llm = build_quick_llm(cfg)
                 total = 0
                 for s in stores:
-                    items = [i for i in s.list_items() if i.enabled]
+                    items = [
+                        i
+                        for i in s.list_items()
+                        if i.enabled and (i.baseline.market or "CN") == market
+                    ]
                     if not items:
                         continue
                     total += len(items)
                     observe_all(
-                        s, llm=llm, slot_key=key, analysis_config=cfg or None
+                        s,
+                        llm=llm,
+                        slot_key=key,
+                        analysis_config=cfg or None,
+                        market=market,
                     )
                 if total:
                     logger.info(
-                        "slot %s — %d symbols across %d watchlists",
+                        "slot %s (%s) — %d symbols across %d watchlists",
                         key,
+                        market,
                         total,
                         len(stores),
                     )
                 else:
-                    logger.info("slot %s — watchlists empty, skip", key)
-                last_slot = key
+                    logger.info("slot %s (%s) — watchlists empty, skip", key, market)
+                last_slots.add(key)
+            active_keys = {k for _, k in active}
+            last_slots &= active_keys
         except Exception:
             logger.exception("daemon tick failed")
         stop.wait(poll_seconds)
@@ -143,7 +174,7 @@ def run_forever(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="A股观察池守护进程（不依赖 Streamlit Web）",
+        description="A股/美股观察池守护进程（不依赖 Streamlit Web）",
     )
     parser.add_argument(
         "--once",

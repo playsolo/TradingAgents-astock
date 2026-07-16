@@ -12,7 +12,7 @@ class Baseline:
 
     ticker: str
     trade_date: str
-    market: str  # 一期仅 "CN"
+    market: str  # "CN" | "US"
     stance: str
     position_pct: float | None
     baseline_price: float | None

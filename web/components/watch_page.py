@@ -8,6 +8,7 @@ import streamlit as st
 
 from tradingagents.watchlist.calendar import (
     OBSERVE_SLOTS,
+    US_OBSERVE_SLOTS,
     action_validity_expires_on,
     effective_valid_trading_days,
     is_action_validity_expired,
@@ -43,16 +44,17 @@ def _fmt_observed_at(raw: str | None) -> str:
 
 def render_watch_page() -> None:
     st.markdown("### 📡 观察池")
+    cn_slots = " / ".join(f"{h:02d}:{m:02d}" for h, m in OBSERVE_SLOTS)
+    us_slots = " / ".join(f"{h:02d}:{m:02d}" for h, m in US_OBSERVE_SLOTS)
     st.caption(
-        "仅 A 股 · 交易日 "
-        + " / ".join(f"{h:02d}:{m:02d}" for h, m in OBSERVE_SLOTS)
-        + " 轻量复核（推荐 launchd 守护 `com.tradingagents.watchlist`：登录自启、崩溃自动重启；睡眠/关机将跳过）。"
+        f"A股交易日 {cn_slots}（北京）· 美股交易日 {us_slots}（美东）轻量复核"
+        "（推荐 launchd 守护 `com.tradingagents.watchlist`：登录自启、崩溃自动重启；睡眠/关机将跳过）。"
         " 跟踪时效对齐报告「操作建议」时限（区间取上限）；过期后自动停跟，"
         "需新完整分析或再次加入观察池以续命。"
         " 告警条件：立场变化、仓位变动>5个百分点、价格偏离基准>5%、跌破止损、新增重大风险。"
         " 时限内每次观察（手动或定时）都会更新盘面小结与乐观/中性/悲观三情景。"
     )
-    st.warning("港股 / 美股尚未支持。本功能仅供研究，不构成投资建议。")
+    st.warning("港股尚未支持。本功能仅供研究，不构成投资建议。")
 
     batch_msg = st.session_state.pop("watch_batch_summary", None)
     batch_has_fail = bool(st.session_state.pop("watch_batch_has_fail", None))

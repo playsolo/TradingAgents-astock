@@ -1,6 +1,6 @@
-"""A 股交易日与观察时段。
+"""A 股 / 美股交易日与观察时段。
 
-一期用「周一至周五」近似交易日（不含法定节假日日历）；本机开机时由调度器轮询。
+用「周一至周五」近似交易日（不含法定节假日日历）；本机开机时由调度器轮询。
 """
 
 from __future__ import annotations
@@ -10,8 +10,10 @@ from enum import Enum
 from zoneinfo import ZoneInfo
 
 
-# 产品确认默认：开盘确认 / 午后 / 收盘
+# 产品确认默认：开盘确认 / 午后 / 收盘（北京时间）
 OBSERVE_SLOTS: list[tuple[int, int]] = [(9, 35), (13, 5), (15, 5)]
+# 美股：开盘+5 / 午间 / 收盘+5（美东时间）
+US_OBSERVE_SLOTS: list[tuple[int, int]] = [(9, 35), (12, 5), (16, 5)]
 # 每个时段的命中窗口（分钟），避免整点秒级漏检
 _SLOT_WINDOW_MINUTES = 5
 
@@ -19,6 +21,7 @@ _SLOT_WINDOW_MINUTES = 5
 FULL_ANALYSIS_STALE_TRADING_DAYS = 3
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
+US_TZ = ZoneInfo("America/New_York")
 
 # A 股连续竞价边界（分钟自 00:00）
 _CN_MORNING_OPEN_MIN = 9 * 60 + 30
@@ -183,7 +186,7 @@ def action_validity_expires_on(baseline: object) -> date:
 
 
 def slot_key_for(dt: datetime) -> str | None:
-    """若当前时刻落在某个观察窗口内，返回稳定 slot key，否则 None。"""
+    """若当前时刻落在某个 A 股观察窗口内，返回稳定 slot key，否则 None。"""
     if not is_cn_trading_day(dt):
         return None
     for hour, minute in OBSERVE_SLOTS:
@@ -192,3 +195,60 @@ def slot_key_for(dt: datetime) -> str | None:
         if start <= now < start + _SLOT_WINDOW_MINUTES:
             return f"{dt.strftime('%Y-%m-%d')}T{hour:02d}:{minute:02d}"
     return None
+
+
+def is_us_trading_day(dt: datetime | date) -> bool:
+    """True if weekday Mon–Fri. Holidays treated as trading days in v1."""
+    d = dt.date() if isinstance(dt, datetime) else dt
+    return d.weekday() < 5
+
+
+def to_us_datetime(dt: datetime | None = None) -> datetime:
+    """Normalize to America/New_York.
+
+    - ``None`` → current US Eastern time
+    - aware → convert to US Eastern
+    - naive → treat as US Eastern wall clock (for tests / explicit ET inputs)
+    """
+    if dt is None:
+        return datetime.now(US_TZ)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=US_TZ)
+    return dt.astimezone(US_TZ)
+
+
+def slot_key_for_us(dt: datetime | None = None) -> str | None:
+    """若美东时间落在美股观察窗口内，返回 ``US:YYYY-MM-DDTHH:MM`` slot key。"""
+    now = to_us_datetime(dt)
+    if not is_us_trading_day(now):
+        return None
+    for hour, minute in US_OBSERVE_SLOTS:
+        start = hour * 60 + minute
+        minutes = now.hour * 60 + now.minute
+        if start <= minutes < start + _SLOT_WINDOW_MINUTES:
+            return f"US:{now.strftime('%Y-%m-%d')}T{hour:02d}:{minute:02d}"
+    return None
+
+
+def active_observe_slots(dt: datetime | None = None) -> list[tuple[str, str]]:
+    """Return currently active ``(market, slot_key)`` pairs for CN and/or US.
+
+    CN slots use the provided naive local wall clock (Beijing on production).
+    US slots always evaluate against America/New_York; a naive ``dt`` is
+    interpreted as Beijing local and converted to ET.
+    """
+    now_local = dt if dt is not None else datetime.now()
+    out: list[tuple[str, str]] = []
+    cn_key = slot_key_for(now_local)
+    if cn_key:
+        out.append(("CN", cn_key))
+    if dt is None:
+        us_dt: datetime | None = None
+    elif dt.tzinfo is not None:
+        us_dt = dt
+    else:
+        us_dt = dt.replace(tzinfo=CN_TZ)
+    us_key = slot_key_for_us(us_dt)
+    if us_key:
+        out.append(("US", us_key))
+    return out

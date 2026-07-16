@@ -164,8 +164,9 @@ def judge_vs_baseline(
         if snapshot.turnover_pct is not None
         else "未知"
     )
+    is_us = (baseline.market or "CN") == "US"
     if snapshot.main_net_inflow is None:
-        fund_flow_line = "未知（无可靠实时数据）"
+        fund_flow_line = "未知（美股无此项）" if is_us else "未知（无可靠实时数据）"
     else:
         wan = snapshot.main_net_inflow / 1e4
         direction = "净流入" if snapshot.main_net_inflow > 0 else (
@@ -173,7 +174,22 @@ def judge_vs_baseline(
         )
         fund_flow_line = f"主力{direction} {wan:.0f} 万元（以快照为准）"
     as_of_line = (as_of or "").strip() or "未知"
-    prompt = f"""你是 A 股交易员的轻量盯盘助手。只做相对「基准分析」的增量判断，不要重写完整研报。
+    market_label = "美股" if is_us else "A 股"
+    fund_rules = (
+        "- 美股无主力净流入字段；market_brief / summary 聚焦价量与消息面，勿编造资金流向。\n"
+        if is_us
+        else (
+            "- 个股资金流向必须以快照数值为准；标题里的板块资金新闻可能过时，标题中的「今日」不可信。\n"
+            "- 快照资金为未知时，不得编造个股净流入或净流出。\n"
+            "- market_brief / summary 须点明快照中的个股主力净流入或净流出金额，禁止与快照方向相反。\n"
+        )
+    )
+    risk_examples = (
+        "财报爆雷/监管诉讼/大额减持/指引大幅下修"
+        if is_us
+        else "立案/业绩变脸/减持暴增/解禁冲击"
+    )
+    prompt = f"""你是 {market_label}交易员的轻量盯盘助手。只做相对「基准分析」的增量判断，不要重写完整研报。
 
 基准（{baseline.trade_date}）：
 - 股票: {baseline.ticker} {snapshot.name}
@@ -209,14 +225,11 @@ def judge_vs_baseline(
   }}
 }}
 规则：
-- 没有实质变化时立场与仓位应接近基准；new_major_risks 仅填高影响事件（立案/业绩变脸/减持暴增/解禁冲击等），不要把日常波动当重大风险。
+- 没有实质变化时立场与仓位应接近基准；new_major_risks 仅填高影响事件（{risk_examples}等），不要把日常波动当重大风险。
 - lean 必须是 optimistic / neutral / pessimistic 之一；无明确方向时用 neutral。
 - 三个 scenarios 都要给，即便今日倾向明确，也要写清另外两种情景的触发条件式理由。
 - 「今日/当日」均相对观察日 {as_of_line}，不要与基准日混淆。
-- 个股资金流向必须以快照数值为准；标题里的板块资金新闻可能过时，标题中的「今日」不可信。
-- 快照资金为未知时，不得编造个股净流入或净流出。
-- market_brief / summary 须点明快照中的个股主力净流入或净流出金额，禁止与快照方向相反。
-"""
+{fund_rules}"""
     try:
         resp = llm.invoke(prompt)
         text = _content_to_text(resp)

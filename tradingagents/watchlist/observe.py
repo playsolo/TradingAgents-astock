@@ -81,8 +81,8 @@ def observe_item(
     del analysis_config  # legacy kw; auto full-refresh removed
     if not item.enabled and not force:
         return []
-    if item.baseline.market != "CN":
-        logger.info("skip non-CN watch item %s", item.baseline.ticker)
+    if item.baseline.market not in {"CN", "US"}:
+        logger.info("skip unsupported market %s for %s", item.baseline.market, item.baseline.ticker)
         return []
 
     dt = now or datetime.now()
@@ -119,7 +119,7 @@ def _light_observe(
     observed_at: str,
 ) -> list[Alert]:
     ticker = item.baseline.ticker
-    snapshot = fetch_snapshot(ticker)
+    snapshot = fetch_snapshot(ticker, market=item.baseline.market or "CN")
     judgment = judge_vs_baseline(
         item.baseline,
         snapshot,
@@ -169,15 +169,19 @@ def observe_all(
     slot_key: str | None = None,
     analysis_config: dict[str, Any] | None = None,
     now: datetime | None = None,
+    market: str | None = None,
 ) -> ObserveBatchResult:
     """串行跑一遍全部 enabled 且未过期的标的；单票失败跳过继续。
 
     手动「观察全部」请传入新的 ``slot_key``（如 ``manual-batch-…``）以强制重跑。
+    ``market`` 非空时只观察该市场（``CN`` / ``US``）。
     """
     dt = now or datetime.now()
     out = ObserveBatchResult()
     for item in store.list_items():
         if not item.enabled:
+            continue
+        if market and (item.baseline.market or "CN") != market:
             continue
         ticker = item.baseline.ticker
         if is_action_validity_expired(item.baseline, dt):
