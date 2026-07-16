@@ -42,10 +42,24 @@ _DEFAULT_MAX_AUTO_RESUME = 2
 
 
 def _max_workers() -> int:
+    """Return the thread pool size.
+
+    Default is ``CN_MAX_PARALLEL + US_MAX_PARALLEL`` (each defaults to 3)
+    so the pool is large enough to fill both per-market caps.  Override
+    with ``TRADINGAGENTS_MAX_PARALLEL`` env var if needed.
+    """
+    override = os.environ.get("TRADINGAGENTS_MAX_PARALLEL")
+    if override is not None:
+        try:
+            return max(1, int(override))
+        except ValueError:
+            return 3
     try:
-        return max(1, int(os.environ.get("TRADINGAGENTS_MAX_PARALLEL", "3")))
+        cn = int(os.environ.get("CN_MAX_PARALLEL", "3"))
+        us = int(os.environ.get("US_MAX_PARALLEL", "3"))
     except ValueError:
         return 3
+    return max(1, cn + us)
 
 
 def _max_auto_resume() -> int:
