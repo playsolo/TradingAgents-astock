@@ -321,7 +321,62 @@ def _resolve_cn_or_raise(raw: str) -> str:
     return code
 
 
-def _render_analysis_queue() -> None:
+def _render_incomplete_tasks() -> None:
+    """Render 未完成任务 list (inline, no fragment — refreshed via queue fragment)."""
+    incomplete = get_incomplete_history()
+    if not incomplete:
+        st.caption("暂无未完成任务")
+        return
+    for entry in incomplete[:10]:
+        t, d = entry["ticker"], entry["trade_date"]
+        status_label = {
+            "error": "出错",
+            "paused": "已暂停",
+            "running": "进行中",
+        }.get(entry.get("status"), "可继续")
+        step = entry.get("checkpoint_step")
+        step_label = f"step {step}" if step is not None else ""
+        label = format_list_ticker_label(t, d, status_label, step_label)
+        if st.button(
+            label,
+            key=f"resume_{t}_{d}",
+            use_container_width=True,
+        ):
+            activate_incomplete_task(
+                st.session_state,
+                t,
+                d,
+                market=(
+                    "CN" if t.isdigit() and len(t) == 6 else "US"
+                ),
+            )
+            st.query_params.clear()
+            st.query_params["view"] = "home"
+            st.rerun()
+
+
+@st.fragment(run_every=2.0)
+def _render_queue_and_incomplete() -> None:
+    """Fragment that auto-refreshes the analysis queue and incomplete tasks.
+
+    Both sections are grouped in one fragment so Streamlit does not need to
+    manage two independent sidebar fragments with overlapping widget trees.
+    When no background work exists the fragment renders once and stops polling.
+    """
+    jobs = queue_snapshot(st.session_state)
+    incomplete = get_incomplete_history()
+    has_work = bool(has_running(st.session_state) or jobs or incomplete)
+
+    if jobs:
+        _render_analysis_queue_inner()
+    if has_work:
+        st.markdown("---")
+        st.markdown("#### 未完成任务")
+        _render_incomplete_tasks()
+
+
+def _render_analysis_queue_inner() -> None:
+    """Render the analysis queue display (fragment body)."""
     if is_worker_mode():
         _render_worker_queue()
         return
@@ -656,9 +711,7 @@ def render_sidebar() -> None:
         )
 
     _render_analysis_controls(ticker_input or "", trade_date)
-    _render_analysis_queue()
-
-    st.markdown("---")
+    _render_queue_and_incomplete()
     st.markdown("#### 策略")
     if st.button(
         "📊 策略扫描",
@@ -680,42 +733,6 @@ def render_sidebar() -> None:
         watch_label += f" · {alert_n}告警"
     if st.button(watch_label, key="nav_watchlist", use_container_width=True):
         navigate("watch")
-
-    st.markdown("---")
-    st.markdown("#### 未完成任务")
-
-    incomplete = get_incomplete_history()
-    if not incomplete:
-        st.caption("暂无未完成任务")
-    else:
-        for entry in incomplete[:10]:
-            t, d = entry["ticker"], entry["trade_date"]
-            status_label = {
-                "error": "出错",
-                "paused": "已暂停",
-                "running": "进行中",
-            }.get(entry.get("status"), "可继续")
-            step = entry.get("checkpoint_step")
-            step_label = f"step {step}" if step is not None else ""
-            label = format_list_ticker_label(t, d, status_label, step_label)
-            # Always clickable (same as single-task resume). Live runs focus;
-            # others start a free parallel slot or enqueue when full.
-            if st.button(
-                label,
-                key=f"resume_{t}_{d}",
-                use_container_width=True,
-            ):
-                activate_incomplete_task(
-                    st.session_state,
-                    t,
-                    d,
-                    market=(
-                        "CN" if t.isdigit() and len(t) == 6 else "US"
-                    ),
-                )
-                st.query_params.clear()
-                st.query_params["view"] = "home"
-                st.rerun()
 
     st.markdown("---")
     st.markdown("#### 历史记录")
