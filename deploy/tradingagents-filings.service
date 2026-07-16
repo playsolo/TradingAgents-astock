@@ -19,7 +19,7 @@ Type=simple
 User=solo
 WorkingDirectory=/home/solo/TradingAgents-astock
 Environment="PATH=/home/solo/TradingAgents-astock/.venv/bin"
-Environment="SEC_EDGAR_USER_AGENT=TradingAgents-Astock/0.2 (solo@wcc.io)"
+Environment="SEC_EDGAR_USER_AGENT=TradingAgents-Astock/0.2 (solo.fu@gmail.com)"
 Environment="FILINGS_POLL_SECONDS=900"
 Environment="FILINGS_DENSE_POLL_SECONDS=300"
 ExecStart=/home/solo/TradingAgents-astock/.venv/bin/tradingagents-filings
