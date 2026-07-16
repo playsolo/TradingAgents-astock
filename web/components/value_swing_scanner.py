@@ -355,14 +355,18 @@ def _render_funnel_stats(result: dict, *, strategy: str = "value_swing"):
             st.metric(label=label, value=value, help=help_text)
 
 
-@st.fragment
 def render_scan_results(
     candidates: list[dict],
     *,
     rules: dict | None = None,
     strategy: str = "value_swing",
 ):
-    """渲染扫描结果面板（强烈推荐/推荐/关注分组）。"""
+    """渲染扫描结果面板（强烈推荐/推荐/关注分组）。
+
+    注意：不要加 ``@st.fragment``。重扫时父级会切换到进度视图；
+    若结果面板仍是 fragment，Streamlit 会残留旧 DOM，再叠加
+    ``time.sleep`` + ``st.rerun`` 就会整页纵向叠两层。
+    """
     if not candidates:
         st.info("当前无候选股票。请点击「开始扫描」生成候选池。")
         return
@@ -467,6 +471,105 @@ def _render_progress(progress: dict | None):
         st.caption(f"🔎 正在验证：{code} {name} {pos}")
 
 
+def _scan_detach_caption() -> None:
+    st.caption(
+        "扫描在独立进程运行，关闭页面 / 浏览器 / 停掉 Web 都不影响；"
+        "稍后回来可继续查看进度与结果。"
+    )
+
+
+def _is_strategy_launching(strategy: str, status: str) -> bool:
+    from tradingagents.strategies.scan_runner import is_process_alive
+    from tradingagents.strategies.scan_store import SCAN_STATUS_RUNNING
+
+    pid_key, ts_key = _launch_keys(strategy)
+    launch_pid = st.session_state.get(pid_key)
+    launched_at = st.session_state.get(ts_key)
+    return (
+        launch_pid is not None
+        and launched_at is not None
+        and status != SCAN_STATUS_RUNNING
+        and is_process_alive(launch_pid)
+        and (time.time() - launched_at) < _LAUNCH_GRACE_S
+    )
+
+
+@st.fragment(run_every=_POLL_INTERVAL_S)
+def _render_running_scan_poll(strategy: str) -> None:
+    """运行中只刷进度；结束后整页 rerun 以展示结果（禁止 sleep+rerun）。"""
+    from tradingagents.strategies.scan_runner import reconcile_stale_running
+    from tradingagents.strategies.scan_store import (
+        SCAN_STATUS_RUNNING,
+        default_store,
+        resolve_strategy,
+    )
+
+    strategy = resolve_strategy(strategy)
+    store = default_store(strategy)
+    reconcile_stale_running(store)
+    record = store.load()
+    status = record.get("status")
+    pid_key, ts_key = _launch_keys(strategy)
+
+    if status == SCAN_STATUS_RUNNING:
+        st.session_state.pop(pid_key, None)
+        st.session_state.pop(ts_key, None)
+        _render_progress(record.get("progress"))
+        _scan_detach_caption()
+        return
+
+    if _is_strategy_launching(strategy, status):
+        st.info("扫描进程正在启动…")
+        _scan_detach_caption()
+        return
+
+    # 完成 / 失败 / 进程已退出：回到完整页面渲染结果与控件
+    st.rerun()
+
+
+@st.fragment(run_every=_POLL_INTERVAL_S)
+def _render_dual_pool_running_poll() -> None:
+    """双池扫描进行中：只显示两侧进度，不渲染旧候选（避免叠层）。"""
+    from tradingagents.strategies.scan_runner import reconcile_stale_running
+    from tradingagents.strategies.scan_store import (
+        SCAN_STATUS_RUNNING,
+        STRATEGY_GROWTH_ACCEL,
+        STRATEGY_VALUE_SWING,
+        default_store,
+    )
+
+    if not _any_strategy_running():
+        st.rerun()
+        return
+
+    st.subheader("扫描进行中")
+    left, right = st.columns(2)
+    panels = (
+        (left, STRATEGY_VALUE_SWING, "价值波段"),
+        (right, STRATEGY_GROWTH_ACCEL, "成长加速"),
+    )
+    for col, strategy, title in panels:
+        with col:
+            st.markdown(f"**{title}**")
+            store = default_store(strategy)
+            reconcile_stale_running(store)
+            rec = store.load()
+            status = rec.get("status")
+            if status == SCAN_STATUS_RUNNING:
+                _render_progress(rec.get("progress"))
+            elif _is_strategy_launching(strategy, status) or _session_launch_busy(
+                ("both", strategy)
+            ):
+                st.info("扫描进程正在启动…")
+            else:
+                n = len((rec.get("result") or {}).get("candidates") or [])
+                if n:
+                    st.success(f"本池已完成（上次 {n} 只；全部结束后刷新对照）")
+                else:
+                    st.caption("本池尚未开始或暂无结果。")
+    _scan_detach_caption()
+
+
 def _render_finished_result(record: dict, *, strategy: str = "value_swing"):
     """渲染最近一次完成扫描的结果（来自持久化存储）。"""
     from tradingagents.strategies.scan_store import SCAN_STATUS_COMPLETED
@@ -503,7 +606,6 @@ def _launch_keys(strategy: str) -> tuple[str, str]:
 def render_strategy_scanner(strategy: str = "value_swing"):
     """单策略扫描主面板（独立进程 + 持久化）。"""
     from tradingagents.strategies.scan_runner import (
-        is_process_alive,
         reconcile_stale_running,
         start_detached_scan,
     )
@@ -529,32 +631,14 @@ def render_strategy_scanner(strategy: str = "value_swing"):
     status = record.get("status")
 
     pid_key, ts_key = _launch_keys(strategy)
-    launch_pid = st.session_state.get(pid_key)
-    launched_at = st.session_state.get(ts_key)
-    launching = (
-        launch_pid is not None
-        and launched_at is not None
-        and status != SCAN_STATUS_RUNNING
-        and is_process_alive(launch_pid)
-        and (time.time() - launched_at) < _LAUNCH_GRACE_S
-    )
+    launching = _is_strategy_launching(strategy, status)
     is_running = status == SCAN_STATUS_RUNNING or launching
     # 双池同扫时一侧先结束，另一侧仍在跑：禁止对本侧再点「开始扫描」
     other_busy = _any_strategy_running() and not is_running
 
     if is_running:
-        if status == SCAN_STATUS_RUNNING:
-            st.session_state.pop(pid_key, None)
-            st.session_state.pop(ts_key, None)
-            _render_progress(record.get("progress"))
-        else:
-            st.info("扫描进程正在启动…")
-        st.caption(
-            "扫描在独立进程运行，关闭页面 / 浏览器 / 停掉 Web 都不影响；"
-            "稍后回来可继续查看进度与结果。"
-        )
-        time.sleep(_POLL_INTERVAL_S)
-        st.rerun()
+        # 进行中不渲染旧候选：旧 result 仍留在 store 里供失败回退，但 UI 只显示进度。
+        _render_running_scan_poll(strategy)
         return
 
     st.session_state.pop(pid_key, None)
@@ -777,8 +861,8 @@ def render_value_swing_scanner():
         render_strategy_scanner(STRATEGY_GROWTH_ACCEL)
     elif mode == "价值波段":
         render_strategy_scanner(STRATEGY_VALUE_SWING)
+    elif both_busy:
+        # 进行中只刷进度，不画旧候选；避免 fragment 残留 + sleep/rerun 叠层
+        _render_dual_pool_running_poll()
     else:
         _render_dual_pool_overview()
-        if both_busy:
-            time.sleep(_POLL_INTERVAL_S)
-            st.rerun()
