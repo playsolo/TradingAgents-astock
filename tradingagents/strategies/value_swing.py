@@ -10,7 +10,7 @@
 设计要点：
 - L0: 全A腾讯批量报价（~10s），筛流动性/ST/上市时长
 - L1: 双阶段 — L1a 秒级(仅 PE/PB 判定)，L1b 后置(财务验证)
-- L2: 催化剂信号评分，取 top N
+- L2: 催化剂信号评分 + 一致预期质量闸门（窄池），取 top N
 """
 
 from __future__ import annotations
@@ -29,6 +29,11 @@ from tradingagents.dataflows.a_stock import (
     _build_name_code_map,
     _tencent_quote,
     get_fund_flow,
+)
+from tradingagents.strategies.expectation_gate import (
+    apply_gate_fields,
+    fetch_consensus_snapshot,
+    score_value_expectation,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,6 +79,7 @@ L2_FACTOR_SPECS: tuple[tuple[str, str, bool], ...] = (
     ("news_found", "近3日个股新闻", True),
     ("hot_topic_match", "热点题材", True),
     ("concept_active", "概念活跃", True),
+    ("exp_hit", "远期估值更便宜", True),
 )
 
 
@@ -109,7 +115,10 @@ def selection_rules_snapshot() -> dict[str, Any]:
             "active": active,
             "dormant": dormant,
             "top_n": _MAX_CANDIDATES,
-            "note": "每命中一项 +1；取信号分最高的 top N",
+            "note": (
+                "每命中一项 +1；一致预期闸门：覆盖≥3 家时 "
+                "FwdPE 相对 TTM 更便宜 +1 / 暗示盈利下滑 −1；取信号分最高的 top N"
+            ),
         },
     }
 
@@ -130,6 +139,8 @@ def _l2_factor_hit(key: str, candidate: StockInfo | dict[str, Any]) -> bool:
     if key == "dragon_tiger":
         v = _cand_get(candidate, "dragon_tiger_inst_net")
         return v is not None and float(v) >= 100
+    if key == "exp_hit":
+        return bool(_cand_get(candidate, "exp_hit", False))
     return bool(_cand_get(candidate, key, False))
 
 
@@ -147,12 +158,19 @@ def l2_factor_hits(candidate: StockInfo | dict[str, Any]) -> list[dict[str, Any]
 
 
 def why_selected_line(candidate: StockInfo | dict[str, Any]) -> str:
-    """入选原因一行：仅列出当前生效且命中的因子。"""
+    """入选原因一行：仅列出当前生效且命中的因子；预期减分单独标注。"""
     hits = [
         h["label"]
         for h in l2_factor_hits(candidate)
         if h["active"] and h["hit"]
     ]
+    try:
+        delta = int(_cand_get(candidate, "exp_score_delta", 0) or 0)
+    except (TypeError, ValueError):
+        delta = 0
+    if delta < 0:
+        label = str(_cand_get(candidate, "exp_label", "") or "一致预期偏弱")
+        hits.append(label)
     return " · ".join(hits) if hits else "无生效催化剂命中（低分进池或仅靠同分排序）"
 
 
@@ -255,6 +273,14 @@ class StockInfo:
     news_found: bool = False          # 近期是否有重大个股新闻
     hot_topic_match: bool = False     # 是否属于热点题材
     concept_active: bool = False      # 概念板块近期活跃
+    # L2 一致预期质量闸门
+    exp_score_delta: int = 0
+    exp_hit: bool = False
+    exp_label: str = ""
+    exp_low_coverage: bool = False
+    exp_fwd_pe: float | None = None
+    exp_implied_cagr: float | None = None
+    exp_analysts: int = 0
     signal_score: int = 0
     exclude_reason: str = ""
 
@@ -747,7 +773,9 @@ def run_l2_filter_impl(stocks: list[StockInfo], max_candidates: int = _MAX_CANDI
             s += 1
         if info.concept_active:
             s += 1
-        info.signal_score = s
+        # 一致预期质量闸门（可为 −1）
+        s += int(info.exp_score_delta or 0)
+        info.signal_score = max(0, s)
         scored.append(info)
     scored.sort(key=lambda x: x.signal_score, reverse=True)
     return scored[:max_candidates]
@@ -819,6 +847,15 @@ def run_l2_filter(
         info.news_found = _safe_call(_check_news_catalyst, info.code, default=False)
         info.hot_topic_match = _check_hot_topic_match(info.code, hot_stocks)
         info.concept_active = _check_concept_catalyst(info.code, global_news, hot_stocks)
+
+        # 一致预期质量闸门（窄池；东财限流）
+        snap = _safe_call(
+            lambda c: fetch_consensus_snapshot(c, info.price),
+            info.code,
+            default=None,
+        )
+        if snap is not None:
+            apply_gate_fields(info, score_value_expectation(pe_ttm=info.pe_ttm, snap=snap))
 
         # 以下暂不启用（东财 SSL 代理问题）
         # info.fund_flow_main_3d = _safe_call(_check_fund_flow_3d, info.code)
@@ -932,4 +969,7 @@ def build_scan_summary_row(info: StockInfo, recommendation: str) -> dict[str, An
         "news_found": info.news_found,
         "hot_topic_match": info.hot_topic_match,
         "concept_active": info.concept_active,
+        "exp_score_delta": info.exp_score_delta,
+        "exp_fwd_pe": round(info.exp_fwd_pe, 1) if info.exp_fwd_pe is not None else None,
+        "exp_analysts": info.exp_analysts,
     }

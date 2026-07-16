@@ -11,8 +11,8 @@ from tradingagents.strategies.value_swing import (
 
 def test_l2_score_max_counts_only_active_factors():
     """休眠因子（主力/龙虎）不计入展示满分。"""
-    assert l2_score_max() == 6
-    assert l2_score_max(only_active=False) == 8
+    assert l2_score_max() == 7
+    assert l2_score_max(only_active=False) == 9
 
 
 def test_selection_rules_snapshot_exposes_thresholds_and_active_l2():
@@ -20,8 +20,9 @@ def test_selection_rules_snapshot_exposes_thresholds_and_active_l2():
     assert "成交额" in snap["l0"][0] or any("3000" in x for x in snap["l0"])
     assert any("PE" in x for x in snap["l1a"])
     assert any("负债" in x for x in snap["l1b"])
-    assert snap["l2"]["score_max"] == 6
+    assert snap["l2"]["score_max"] == 7
     assert "站上MA20" in snap["l2"]["active"]
+    assert "远期估值更便宜" in snap["l2"]["active"]
     assert any("主力" in x or "龙虎" in x for x in snap["l2"]["dormant"])
 
 
@@ -81,3 +82,23 @@ def test_why_selected_line_lists_active_hits_only():
     assert "接近年线" in line
     assert "个股新闻" in line or "新闻" in line
     assert "主力" not in line
+
+
+def test_why_selected_line_includes_exp_penalty():
+    line = why_selected_line(
+        {
+            "above_ma20": True,
+            "exp_score_delta": -1,
+            "exp_label": "一致预期暗示盈利下滑",
+            "exp_hit": False,
+        }
+    )
+    assert "站上MA20" in line
+    assert "盈利下滑" in line
+
+
+def test_exp_hit_factor():
+    hits = l2_factor_hits({"exp_hit": True, "above_ma20": False})
+    by_key = {h["key"]: h for h in hits}
+    assert by_key["exp_hit"]["hit"] is True
+    assert by_key["exp_hit"]["active"] is True

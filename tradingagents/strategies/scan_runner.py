@@ -110,6 +110,15 @@ def result_dict_from_scan(result: Any, *, strategy: str = STRATEGY_VALUE_SWING) 
                     "profit_accel": c.profit_accel,
                     "growth_theme": c.growth_theme,
                     "high_liquidity": c.high_liquidity,
+                    "exp_score_delta": c.exp_score_delta,
+                    "exp_fwd_pe": round(c.exp_fwd_pe, 1) if c.exp_fwd_pe is not None else None,
+                    "exp_implied_cagr": (
+                        round(c.exp_implied_cagr * 100, 1)
+                        if c.exp_implied_cagr is not None
+                        else None
+                    ),
+                    "exp_analysts": c.exp_analysts,
+                    "exp_low_coverage": c.exp_low_coverage,
                     "factor_hits": l2_factor_hits(c),
                     "why": why_selected_line(c),
                 }
@@ -156,6 +165,10 @@ def result_dict_from_scan(result: Any, *, strategy: str = STRATEGY_VALUE_SWING) 
                 "news_found": c.news_found,
                 "hot_topic_match": c.hot_topic_match,
                 "concept_active": c.concept_active,
+                "exp_score_delta": c.exp_score_delta,
+                "exp_fwd_pe": round(c.exp_fwd_pe, 1) if c.exp_fwd_pe is not None else None,
+                "exp_analysts": c.exp_analysts,
+                "exp_low_coverage": c.exp_low_coverage,
                 "factor_hits": l2_factor_hits(c),
                 "why": why_selected_line(c),
             }

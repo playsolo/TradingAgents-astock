@@ -268,6 +268,18 @@ class TestL2Filter:
         )
         assert run_l2_filter_impl([info])[0].signal_score == 5
 
+    def test_exp_bonus_adds_point(self):
+        info = StockInfo(code="001", above_ma20=True, exp_score_delta=1, exp_hit=True)
+        assert run_l2_filter_impl([info])[0].signal_score == 2
+
+    def test_exp_penalty_floors_at_zero(self):
+        info = StockInfo(code="001", exp_score_delta=-1)
+        assert run_l2_filter_impl([info])[0].signal_score == 0
+
+    def test_exp_penalty_reduces_score(self):
+        info = StockInfo(code="001", above_ma20=True, near_ma250=True, exp_score_delta=-1)
+        assert run_l2_filter_impl([info])[0].signal_score == 1
+
 
 # ── 端到端（纯逻辑）─────────────────────────────────────────────────────────
 

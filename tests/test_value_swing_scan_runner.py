@@ -66,9 +66,10 @@ def test_result_dict_from_scan_matches_ui_shape():
     assert d["candidates"][0]["code"] == "000001"
     assert "debt_ratio" in d["candidates"][0]
     assert "rules" in d
-    assert d["score_max"] == 6
+    assert d["score_max"] == 7
     assert "why" in d["candidates"][0]
     assert "factor_hits" in d["candidates"][0]
+    assert "exp_score_delta" in d["candidates"][0]
 
 
 def test_run_scan_job_persists_completed_without_enqueue(

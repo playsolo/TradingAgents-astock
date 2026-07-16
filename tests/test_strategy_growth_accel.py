@@ -281,6 +281,17 @@ class TestL2Rank:
         )
         assert compute_growth_signal_score(strong) > compute_growth_signal_score(weak)
 
+    def test_exp_delta_affects_score(self):
+        base = GrowthStockInfo(code="A", track="profit", np_ttm_yoy=0.6)
+        bonus = GrowthStockInfo(
+            code="B", track="profit", np_ttm_yoy=0.6, exp_score_delta=1, exp_hit=True
+        )
+        pen = GrowthStockInfo(
+            code="C", track="profit", np_ttm_yoy=0.6, exp_score_delta=-1
+        )
+        assert compute_growth_signal_score(bonus) == compute_growth_signal_score(base) + 1
+        assert compute_growth_signal_score(pen) == compute_growth_signal_score(base) - 1
+
     def test_max_candidates_constant(self):
         assert _MAX_CANDIDATES == 15
 
@@ -292,6 +303,7 @@ class TestRulesAndWhy:
         assert any("扣非" in x for x in snap["l1"])
         assert any("OCF" in x for x in snap["l1"])
         assert snap["l2"]["top_n"] == 15
+        assert any("预期" in x for x in snap["l2"]["active"])
 
     def test_why_line_profit(self):
         info = GrowthStockInfo(
@@ -306,6 +318,18 @@ class TestRulesAndWhy:
         assert "扣非" in line or "净利" in line
         assert "加速" in line
         assert "题材" in line or "主题" in line
+
+    def test_why_line_includes_exp(self):
+        info = GrowthStockInfo(
+            code="X",
+            track="profit",
+            np_ttm_yoy=0.6,
+            exp_score_delta=1,
+            exp_hit=True,
+            exp_label="实际增速高于一致预期",
+        )
+        line = why_selected_line(info)
+        assert "一致预期" in line or "预期" in line
 
     def test_constants_match_prd(self):
         assert _MIN_VOLUME_WAN == 3000

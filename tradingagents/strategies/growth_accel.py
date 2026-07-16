@@ -18,6 +18,11 @@ from typing import Any
 import pandas as pd
 
 from tradingagents.dataflows.a_stock import _build_name_code_map, _em_get
+from tradingagents.strategies.expectation_gate import (
+    apply_gate_fields,
+    fetch_consensus_snapshot,
+    score_growth_expectation,
+)
 from tradingagents.strategies.value_swing import (
     _MIN_LISTED_MONTHS,
     _TENCENT_BATCH_SIZE,
@@ -104,6 +109,14 @@ class GrowthStockInfo:
     profit_accel: bool = False
     growth_theme: bool = False
     high_liquidity: bool = False
+    # 一致预期质量闸门
+    exp_score_delta: int = 0
+    exp_hit: bool = False
+    exp_label: str = ""
+    exp_low_coverage: bool = False
+    exp_fwd_pe: float | None = None
+    exp_implied_cagr: float | None = None
+    exp_analysts: int = 0
     signal_score: int = 0
     exclude_reason: str = ""
 
@@ -159,17 +172,21 @@ def selection_rules_snapshot() -> dict[str, Any]:
                 "成长题材",
                 "高流动性",
                 "扣非/OCF质量调整",
+                "一致预期差/透支闸门(±1)",
             ],
             "dormant": [],
             "top_n": _MAX_CANDIDATES,
-            "note": "偏进攻：加速+2；主排序信号分→利润TTM增速；不设估值硬顶",
+            "note": (
+                "偏进攻：加速+2；主排序信号分→利润TTM增速；不设估值硬顶；"
+                "覆盖≥3 家时：实际≫隐含 +1，预期透支 −1"
+            ),
         },
     }
 
 
 def l2_score_max(*, only_active: bool = True) -> int:
-    # 强增速3 + 加速2 + 题材1 + 流动性1 = 7；亏损轨 OCF+1 可达 8
-    return 8
+    # 强增速3 + 加速2 + 题材1 + 流动性1 + 预期闸门1 = 8；亏损轨 OCF+1 可达 9
+    return 9
 
 
 # ── TTM 计算（国内报表为累计 YTD）────────────────────────────────────────────
@@ -358,6 +375,7 @@ def compute_growth_signal_score(info: GrowthStockInfo) -> int:
     if info.no_nonrecurring:
         s -= 1
     s += int(info.ocf_score_delta)
+    s += int(info.exp_score_delta or 0)
     return s
 
 
@@ -396,6 +414,14 @@ def why_selected_line(candidate: GrowthStockInfo | dict[str, Any]) -> str:
             bits.append("OCF改善")
     except (TypeError, ValueError):
         pass
+    try:
+        exp_d = int(_get("exp_score_delta") or 0)
+    except (TypeError, ValueError):
+        exp_d = 0
+    if exp_d > 0:
+        bits.append(str(_get("exp_label") or "实际高于一致预期"))
+    elif exp_d < 0:
+        bits.append(str(_get("exp_label") or "一致预期透支"))
     return " · ".join(bits) if bits else "成长加速入池"
 
 
@@ -450,6 +476,12 @@ def l2_factor_hits(candidate: GrowthStockInfo | dict[str, Any]) -> list[dict[str
             "label": "高流动性",
             "active": True,
             "hit": bool(_get("high_liquidity")),
+        },
+        {
+            "key": "exp_hit",
+            "label": str(_get("exp_label") or "实际增速高于一致预期"),
+            "active": True,
+            "hit": bool(_get("exp_hit")),
         },
     ]
 
@@ -822,6 +854,19 @@ def run_l2_filter(
             on_item(info.code, info.name, idx, total)
         info.growth_theme = _check_growth_theme(info.code, hot)
         info.high_liquidity = info.volume_wan >= mid
+        # 一致预期质量闸门（L1b 窄池；东财限流）
+        try:
+            snap = fetch_consensus_snapshot(info.code, info.price)
+            apply_gate_fields(
+                info,
+                score_growth_expectation(
+                    actual_yoy=info.np_ttm_yoy,
+                    snap=snap,
+                    track=info.track or "profit",
+                ),
+            )
+        except Exception as e:
+            logger.debug("成长预期闸门失败 %s: %s", info.code, e)
     return run_l2_rank_impl(stocks, max_candidates=max_candidates)
 
 
