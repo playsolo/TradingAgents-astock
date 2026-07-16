@@ -206,6 +206,7 @@ def candidates_to_analysis_jobs(
                 trade_date=trade_date,
                 market="CN",
                 fresh=True,
+                source="scan",
             )
         )
     return jobs
@@ -217,17 +218,44 @@ def enqueue_scan_candidates(
     trade_date: str,
     queue_store=None,
 ) -> int:
-    """Append scan candidates to the persisted analysis queue. Returns added count."""
-    from web.analysis_queue import AnalysisQueueStore, append_jobs
+    """Append scan candidates to the persisted analysis queue. Returns added count.
+
+    Narrow-path overlaps (校准仍有效且无硬闸) are not enqueued; an inbox note is
+    emitted per skipped ticker.
+    """
+    from tradingagents.inbox import emit_analysis_skipped
+    from web.analysis_queue import (
+        AnalysisQueueStore,
+        append_jobs,
+        partition_scan_jobs_for_enqueue,
+    )
 
     store = queue_store if queue_store is not None else AnalysisQueueStore()
     jobs = candidates_to_analysis_jobs(candidates, trade_date=trade_date)
     if not jobs:
         return 0
+    keep, skipped = partition_scan_jobs_for_enqueue(jobs, as_of=trade_date)
+    for ticker, reason in skipped:
+        emit_analysis_skipped(ticker, trade_date, reason=reason)
+        try:
+            from tradingagents.analysis.skip_followup import follow_up_scan_skip
+            from tradingagents.watchlist.store import default_store as default_watch_store
+
+            follow_up_scan_skip(
+                ticker,
+                trade_date=trade_date,
+                market="CN",
+                watch_store=default_watch_store(),
+                llm=None,
+                escalate=True,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    if not keep:
+        return 0
     # Disk-first: hydrate a scratch session from existing queue, then append.
     session: dict[str, Any] = {"analysis_queue": store.load()}
-    return append_jobs(session, jobs, store=store)
-
+    return append_jobs(session, keep, store=store)
 
 def _refuse_if_running(
     scan_store: ValueSwingScanStore,

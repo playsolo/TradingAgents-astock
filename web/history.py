@@ -111,6 +111,68 @@ def get_history() -> list[dict[str, Any]]:
     return [entry for _, entry in entries]
 
 
+def filter_history_by_ticker(
+    entries: list[dict[str, Any]],
+    ticker: str,
+) -> list[dict[str, Any]]:
+    """Keep history rows whose ticker matches ``ticker`` (case-insensitive).
+
+    Empty ``ticker`` returns ``entries`` unchanged (no filter).
+    """
+    key = str(ticker or "").strip().upper()
+    if not key:
+        return list(entries)
+    return [
+        entry
+        for entry in entries
+        if str(entry.get("ticker") or "").strip().upper() == key
+    ]
+
+
+def _has_chinese(value: str) -> bool:
+    return any("一" <= ch <= "鿿" for ch in value)
+
+
+def resolve_history_search_query(raw: str) -> tuple[str | None, str | None]:
+    """Normalize sidebar history search input to a ticker code.
+
+    Returns:
+      ``(None, None)`` when blank — caller should show the full history list.
+      ``(ticker, None)`` when resolved (A-share code or US symbol).
+      ``(None, error)`` when the input cannot be resolved.
+    """
+    token = (raw or "").strip()
+    if not token:
+        return None, None
+
+    from tradingagents.dataflows.utils import safe_ticker_component
+    from web.stock_display import lookup_code_by_cached_name, remember_resolved_name
+
+    cached = lookup_code_by_cached_name(token)
+    if cached:
+        return cached, None
+
+    # 6-digit codes and Chinese names → A-share resolve path
+    if (token.isdigit() and len(token) == 6) or _has_chinese(token):
+        try:
+            from tradingagents.dataflows.a_stock import resolve_ticker
+
+            code = resolve_ticker(token)
+            if _has_chinese(token):
+                remember_resolved_name(code, token)
+            return code, None
+        except ValueError as exc:
+            return None, str(exc)
+
+    # US (and other Latin) tickers
+    if any(ch.isspace() for ch in token):
+        return None, "美股代码不能包含空格"
+    try:
+        return safe_ticker_component(token.upper()), None
+    except ValueError as exc:
+        return None, str(exc)
+
+
 def _action_plan_summary_from_state(state: dict[str, Any]) -> dict[str, Any] | None:
     plan = state.get("action_plan")
     if not isinstance(plan, dict) or not plan.get("rating"):

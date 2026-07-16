@@ -26,10 +26,12 @@ from web.analysis_queue import (
 from tradingagents.analyze_worker import is_worker_mode
 from web.history import (
     clear_incomplete_task,
+    filter_history_by_ticker,
     get_history,
     get_incomplete_history,
     group_history_by_signal,
     record_incomplete_task,
+    resolve_history_search_query,
     signal_count_label,
 )
 from web.home_mode import HOME_MODE_SCAN, set_home_mode
@@ -225,7 +227,12 @@ def apply_pending_clear_ticker_input(session_state) -> bool:
     return True
 
 
-def _submit_analysis_jobs(raw_tickers: str, trade_date: str) -> None:
+def _submit_analysis_jobs(
+    raw_tickers: str,
+    trade_date: str,
+    *,
+    force_full_reeval: bool = False,
+) -> None:
     """Start the first job immediately when idle; otherwise enqueue the whole batch.
 
     Tokens are auto-classified as CN or US by ``resolve_ticker_batch_mixed``.
@@ -239,6 +246,8 @@ def _submit_analysis_jobs(raw_tickers: str, trade_date: str) -> None:
         tokens,
         trade_date=trade_date,
         resolve_cn=_resolve_cn_or_raise,
+        force_full_reeval=force_full_reeval,
+        analysis_mode="auto",
     )
     for msg in errors:
         st.warning(f"⚠️ 已跳过 {msg}")
@@ -674,6 +683,16 @@ def render_sidebar() -> None:
         key="input_date",
     )
 
+    force_full_reeval = st.checkbox(
+        "强制重新评估（忽略校准锚点，全量分析）",
+        value=False,
+        key="force_full_reeval",
+        help=(
+            "勾选后本次一律全量重跑并重置校准锚点。"
+            "不勾选时由系统自动决定：无异常走伪增量，硬闸/不确定则全量。"
+        ),
+    )
+
     # 模型配置：仅 admin 可修改，其他用户只读
     user = st.session_state.get("auth_user")
     is_admin = bool(user and getattr(user, "role", None) == "admin")
@@ -708,6 +727,7 @@ def render_sidebar() -> None:
         _submit_analysis_jobs(
             ticker_input or "",
             trade_date.strftime("%Y-%m-%d"),
+            force_full_reeval=bool(force_full_reeval),
         )
 
     _render_analysis_controls(ticker_input or "", trade_date)
@@ -741,6 +761,35 @@ def render_sidebar() -> None:
     if not history:
         st.caption("暂无历史记录")
         return
+
+    search_raw = st.text_input(
+        "搜索历史",
+        placeholder="代码或中文名，如 300750 / 宁德时代 / AAPL",
+        key="history_search_query",
+        help="按 A 股代码、中文名或美股代码过滤；留空显示全部。",
+        label_visibility="collapsed",
+    )
+    filter_ticker, filter_err = resolve_history_search_query(search_raw or "")
+    if filter_err:
+        st.caption(f"⚠️ {filter_err}")
+        st.markdown("---")
+        st.caption("⚠️ 仅供学习研究，不构成投资建议")
+        return
+    if filter_ticker:
+        history = filter_history_by_ticker(history, filter_ticker)
+        # 搜索条件变化时回到第一页，避免停在空页
+        prev = st.session_state.get("_history_filter_ticker")
+        if prev != filter_ticker:
+            st.session_state["_history_filter_ticker"] = filter_ticker
+            for tab_key in ("all", "buy", "sell", "hold"):
+                st.session_state[f"_hist_page_{tab_key}"] = 0
+        if not history:
+            st.caption(f"未找到 {filter_ticker} 的历史报告")
+            st.markdown("---")
+            st.caption("⚠️ 仅供学习研究，不构成投资建议")
+            return
+    else:
+        st.session_state.pop("_history_filter_ticker", None)
 
     # 按信号分组
     groups = group_history_by_signal(history)

@@ -14,6 +14,54 @@ def _clean_stock_name(name: str) -> str:
     return "".join(ch for ch in str(name) if ch.isprintable()).strip()
 
 
+# Well-known Chinese ADRs / US listings — overlay Chinese display names.
+_US_CN_ALIASES: dict[str, str] = {
+    "MNSO": "名创优品",
+    "BABA": "阿里巴巴",
+    "JD": "京东",
+    "PDD": "拼多多",
+    "BIDU": "百度",
+    "NIO": "蔚来",
+    "XPEV": "小鹏汽车",
+    "LI": "理想汽车",
+    "BILI": "哔哩哔哩",
+    "TME": "腾讯音乐",
+    "NTES": "网易",
+    "IQ": "爱奇艺",
+    "ZTO": "中通快递",
+    "YUMC": "百胜中国",
+    "HTHT": "华住集团",
+    "TCOM": "携程",
+    "BEKE": "贝壳",
+    "FUTU": "富途",
+    "TIGR": "老虎证券",
+}
+
+
+_EXCHANGE_LABEL_MARKERS: tuple[str, ...] = (
+    "纽约证券交易所",
+    "纽约证券",
+    "纳斯达克",
+    "纽交所",
+    "美交所",
+    "港交所",
+    "上交所",
+    "深交所",
+    "北交所",
+    "证券交易所",
+    "交易所",
+    "NYSE",
+    "NASDAQ",
+    "AMEX",
+    "NYQ",
+    "NMS",
+    "HKEX",
+    "SSE",
+    "SZSE",
+    "BSE",
+)
+
+
 class StockNameCache:
     """代码→中文名本地 JSON 缓存（默认 ~/.tradingagents/stock_names.json）。"""
 
@@ -100,21 +148,47 @@ def lookup_code_by_cached_name(name: str) -> str | None:
     return _NAME_CACHE.find_code_by_name(name)
 
 
-def remember_resolved_name(code: str, raw_name: str) -> None:
-    """Backfill local cache after a slow resolve so next click is instant."""
-    if not _looks_like_stock_name(raw_name):
-        return
-    _NAME_CACHE.set(code, raw_name)
+def _has_chinese(value: str) -> bool:
+    return any("一" <= ch <= "鿿" for ch in str(value or ""))
 
 
 def _looks_like_stock_name(value: str) -> bool:
-    return bool(value and any("一" <= ch <= "鿿" for ch in str(value)))
+    """Chinese company names, or English issuer names for US tickers."""
+    text = _clean_stock_name(value)
+    if not text:
+        return False
+    if _has_chinese(text):
+        return True
+    # English issuer names: letters/digits/spaces/&., at least one letter.
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9&.,'\- ]{1,60}", text):
+        return True
+    return False
+
+
+def _is_exchange_or_market_label(value: str) -> bool:
+    text = _clean_stock_name(value)
+    if not text:
+        return False
+    compact = re.sub(r"[\s　]+", "", text)
+    upper = compact.upper()
+    for marker in _EXCHANGE_LABEL_MARKERS:
+        if marker.isascii():
+            if upper == marker.upper() or upper.startswith(marker.upper()):
+                return True
+        elif marker in compact:
+            return True
+    return False
 
 
 def _is_plausible_stock_name(value: str, code: str) -> bool:
-    if not value or value == code or not _looks_like_stock_name(value):
+    text = _clean_stock_name(value)
+    if not text or text.upper() == str(code or "").strip().upper():
         return False
-    # Avoid treating report headings such as "技术面分析报告" as a stock name
+    if not _looks_like_stock_name(text):
+        return False
+    if _is_exchange_or_market_label(text):
+        return False
+    # Avoid treating report headings / price action phrases as a stock name
     # when older states only contain the plain code in stock_input.
     non_name_markers = (
         "技术面",
@@ -132,8 +206,79 @@ def _is_plausible_stock_name(value: str, code: str) -> bool:
         "报告",
         "当前",
         "最新",
+        "走势",
+        "偏弱",
+        "偏强",
+        "上涨",
+        "下跌",
+        "行业",
+        "评级",
+        "报收",
+        "计价",
+        "汇率",
+        "情绪",
+        "差距",
+        "压力",
+        "指标",
+        "相对",
+        "强弱",
+        "低配",
+        "高配",
+        "构成",
+        "影响",
+        "美元",
+        "倍",
     )
-    return not any(marker in value for marker in non_name_markers)
+    if any(marker in text for marker in non_name_markers):
+        return False
+    # Numeric / ratio fragments: "7.5倍PE的差距"
+    if re.search(r"\d", text) and not text.lstrip().startswith(("*", "ST", "*ST")):
+        return False
+
+    if not _has_chinese(text):
+        banned_en = {
+            "LIMITED",
+            "LTD",
+            "INC",
+            "CORP",
+            "GROUP",
+            "HOLDING",
+            "HOLDINGS",
+            "ADR",
+            "THE",
+            "AND",
+            "OF",
+            "CLASS",
+            "STOCK",
+            "SHARE",
+            "EQUITY",
+            "COMPANY",
+        }
+        if text.upper() in banned_en:
+            return False
+        # Prefer multi-word issuer names; reject tiny generic tokens.
+        words = [w for w in re.split(r"\s+", text) if w]
+        if len(words) == 1 and len(text) < 4:
+            return False
+    else:
+        # Company names are usually short; long Chinese phrases are prose.
+        compact = re.sub(r"[\s　]+", "", text)
+        cn_chars = sum(1 for ch in compact if "一" <= ch <= "鿿")
+        if cn_chars > 8:
+            return False
+    return True
+
+
+def _is_a_share_code(code: str) -> bool:
+    return bool(re.match(r"^[036]\d{5}$", str(code or "").strip()))
+
+
+def _is_us_style_ticker(code: str) -> bool:
+    text = str(code or "").strip().upper()
+    if not text or _is_a_share_code(text):
+        return False
+    # US / international equity tickers: letters, optional .-/^ (BRK.B, ^GSPC)
+    return bool(re.fullmatch(r"[A-Z][A-Z0-9.\-^]{0,14}", text))
 
 
 def _normalize_display_code(ticker: str) -> str:
@@ -196,24 +341,67 @@ def _mootdx_name_if_cached(code: str) -> str | None:
 
 
 @lru_cache(maxsize=1024)
-def resolve_stock_name(ticker: str) -> str | None:
-    """Return the A-share name for a ticker code when local market data can resolve it.
+def _yfinance_name(code: str) -> str | None:
+    """Resolve a US-style ticker's issuer name via yfinance (cached)."""
+    if not _is_us_style_ticker(code):
+        return None
+    try:
+        import yfinance as yf
+        from tradingagents.dataflows.stockstats_utils import yf_retry
 
-    顺序：本地 JSON 缓存 → 腾讯行情（命中后回写）→ 已在内存的 mootdx 映射。
-    列表 UI 多数时候只需读本地文件，不再每次联网。
+        ticker_obj = yf.Ticker(code.upper())
+        info = yf_retry(lambda: ticker_obj.info) or {}
+        for key in ("displayName", "shortName", "longName"):
+            name = _clean_stock_name(str(info.get(key) or ""))
+            if name and _looks_like_stock_name(name) and not _is_exchange_or_market_label(name):
+                return name
+    except Exception:
+        return None
+    return None
+
+
+@lru_cache(maxsize=1024)
+def resolve_stock_name(ticker: str) -> str | None:
+    """Return a display name for a ticker when local/market data can resolve it.
+
+    A股顺序：本地 JSON 缓存 → 腾讯行情（命中后回写）→ 已在内存的 mootdx 映射。
+    美股顺序：本地 JSON 缓存 → 中文别名表 → yfinance short/long name。
     """
     code = _resolve_display_code(ticker)
-    if not re.match(r"^[036]\d{5}$", code):
+    if not code:
         return None
 
     cached = _NAME_CACHE.get(code)
     if cached:
         return cached
 
-    name = _tencent_name(code) or _mootdx_name_if_cached(code)
-    if name:
-        _NAME_CACHE.set(code, name)
-    return name or None
+    if _is_a_share_code(code):
+        name = _tencent_name(code) or _mootdx_name_if_cached(code)
+        if name:
+            _NAME_CACHE.set(code, name)
+        return name or None
+
+    if _is_us_style_ticker(code):
+        alias = _US_CN_ALIASES.get(code.upper())
+        if alias:
+            _NAME_CACHE.set(code, alias)
+            return alias
+        name = _yfinance_name(code)
+        if name:
+            _NAME_CACHE.set(code, name)
+        return name or None
+
+    return None
+
+
+def remember_resolved_name(code: str, raw_name: str) -> None:
+    """Backfill local cache after a slow resolve so next click is instant."""
+    clean = _clean_stock_name(raw_name)
+    if not clean or _is_exchange_or_market_label(clean):
+        return
+    if not (_looks_like_stock_name(clean) or _has_chinese(clean)):
+        return
+    _NAME_CACHE.set(code, clean)
 
 
 def _iter_text_values(value: Any):
@@ -241,13 +429,15 @@ def _clean_extracted_name(name: str) -> str:
         "政策",
         "风险",
         "投资",
-        "交易",
         "最终",
         "报告",
         "评级",
     ):
         if marker in cleaned:
             cleaned = cleaned.split(marker, 1)[0]
+    # 「交易」曾误切「纽约证券交易所」→「纽约证券」；仅在非交易所语境下裁切。
+    if "交易" in cleaned and "交易所" not in cleaned and "证券交易所" not in cleaned:
+        cleaned = cleaned.split("交易", 1)[0]
     return cleaned.strip("，。；：:、（）()")
 
 
@@ -257,13 +447,42 @@ def _extract_stock_name_from_text(code: str, text: str) -> str | None:
         rf"(?<!\d){code_pattern}\s*[（(]\s*([^\s，。；：:、（）()|]{{2,16}})\s*[）)]",
         rf"(?:标的\s*[：:]\s*)?(?<!\d){code_pattern}\s+([^\s，。；：:、（）()|]{{2,16}})",
         rf"([^\s，。；：:、（）()|]{{2,16}})\s*[（(]\s*{code_pattern}\s*[）)]",
+        # English issuer + Chinese alias: MINISO（名创优品）
+        rf"[A-Za-z][A-Za-z0-9&.,'\- ]{{1,40}}[（(]\s*([\u4e00-\u9fff*ST·]{{2,8}})\s*[）)]",
     )
+    chinese_hits: list[str] = []
+    english_hits: list[str] = []
     for pattern in patterns:
         for match in re.finditer(pattern, text):
             name = _clean_extracted_name(match.group(1))
-            if _is_plausible_stock_name(name, code):
-                return name
-    return None
+            if not _is_plausible_stock_name(name, code):
+                continue
+            if _has_chinese(name):
+                chinese_hits.append(name)
+            else:
+                english_hits.append(name)
+    if chinese_hits:
+        # Prefer compact company names (e.g. 名创优品) over longer prose fragments.
+        chinese_hits.sort(key=lambda n: (len(re.sub(r"[\s　]+", "", n)), n))
+        return chinese_hits[0]
+    return english_hits[0] if english_hits else None
+
+
+# Prefer company-overview sections before market reports (often carry exchange parens).
+_NAME_EXTRACT_PRIORITY_KEYS = (
+    "fundamentals_report",
+    "news_report",
+    "policy_report",
+    "hot_money_report",
+    "lockup_report",
+    "sentiment_report",
+    "investment_plan",
+    "trader_investment_plan",
+    "trader_investment_decision",
+    "final_trade_decision",
+    "data_quality_summary",
+    "market_report",
+)
 
 
 def _extract_stock_name_from_state(code: str, final_state: dict) -> str | None:
@@ -276,28 +495,62 @@ def _extract_stock_name_from_state(code: str, final_state: dict) -> str | None:
     if _is_plausible_stock_name(company, code):
         return company
 
-    for key in (*_REPORT_TEXT_KEYS, *_REPORT_DICT_KEYS):
+    english_hit: str | None = None
+    for key in (*_NAME_EXTRACT_PRIORITY_KEYS, *_REPORT_DICT_KEYS):
         if key not in final_state:
             continue
         for text in _iter_text_values(final_state[key]):
             name = _extract_stock_name_from_text(code, text)
-            if name:
+            if not name:
+                continue
+            if _has_chinese(name):
                 return name
-    return None
+            if english_hit is None:
+                english_hit = name
+    return english_hit
+
+
+def _prefer_display_name(*candidates: str | None) -> str | None:
+    """Prefer a compact Chinese company name when multiple candidates exist."""
+    chinese_company: list[str] = []
+    chinese_other: list[str] = []
+    english: list[str] = []
+    for raw in candidates:
+        name = _clean_stock_name(raw or "")
+        if not name or not _looks_like_stock_name(name) or _is_exchange_or_market_label(name):
+            continue
+        if not _is_plausible_stock_name(name, ""):
+            # still allow already-resolved English issuer names from yfinance
+            if not _has_chinese(name) and _looks_like_stock_name(name):
+                english.append(name)
+            continue
+        if _has_chinese(name):
+            compact = re.sub(r"[\s　]+", "", name)
+            if re.fullmatch(r"[*ST]*[\u4e00-\u9fff]{2,8}", compact):
+                chinese_company.append(name)
+            else:
+                chinese_other.append(name)
+        else:
+            english.append(name)
+    if chinese_company:
+        chinese_company.sort(key=lambda n: len(re.sub(r"[\s　]+", "", n)))
+        return chinese_company[0]
+    if chinese_other:
+        return chinese_other[0]
+    return english[0] if english else None
 
 
 def stock_display_label(ticker: str, final_state: dict | None = None) -> str:
     """Format a stock as 'code name', falling back to the code when the name is unknown."""
     code = _resolve_display_code(ticker)
-    name = resolve_stock_name(code)
-
-    if not name and final_state:
-        name = _extract_stock_name_from_state(code, final_state)
-
-    if name:
-        name = _clean_stock_name(name)
+    resolved = resolve_stock_name(code)
+    extracted = _extract_stock_name_from_state(code, final_state) if final_state else None
+    # resolved first so CN aliases / cache win ties over flaky report snippets
+    name = _prefer_display_name(resolved, extracted)
 
     if name and name != code:
+        if _has_chinese(name) or _is_us_style_ticker(code):
+            _NAME_CACHE.set(code, name)
         return f"{code} {name}"
     return code
 

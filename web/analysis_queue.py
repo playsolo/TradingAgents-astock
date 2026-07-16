@@ -41,6 +41,11 @@ class AnalysisJob:
     market: str  # "CN" | "US"
     fresh: bool = True
     resume_count: int = 0
+    # Mode routing: auto (router decides) | full_reeval | pseudo_incremental
+    force_full_reeval: bool = False
+    analysis_mode: str = "auto"
+    # Origin: manual sidebar vs strategy scan (scan may skip deep analysis).
+    source: str = "manual"
 
     def to_start_request(self) -> dict[str, Any]:
         return {
@@ -49,6 +54,9 @@ class AnalysisJob:
             "fresh": self.fresh,
             "market": self.market,
             "resume_count": self.resume_count,
+            "force_full_reeval": self.force_full_reeval,
+            "analysis_mode": self.analysis_mode,
+            "source": self.source,
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -66,30 +74,54 @@ class AnalysisJob:
     def from_mapping(cls, raw: Any) -> "AnalysisJob":
         if isinstance(raw, cls):
             return raw
+
+        def _resume_count(obj: Any) -> int:
+            try:
+                if isinstance(obj, (dict, MutableMapping)):
+                    return max(0, int(obj.get("resume_count", 0) or 0))
+                return max(0, int(getattr(obj, "resume_count", 0) or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        def _mode_fields(obj: Any) -> tuple[bool, str, str]:
+            if isinstance(obj, (dict, MutableMapping)):
+                force = bool(obj.get("force_full_reeval", False))
+                mode = str(obj.get("analysis_mode") or "auto").strip().lower() or "auto"
+                source = str(obj.get("source") or "manual").strip().lower() or "manual"
+            else:
+                force = bool(getattr(obj, "force_full_reeval", False))
+                mode = str(getattr(obj, "analysis_mode", None) or "auto").strip().lower() or "auto"
+                source = str(getattr(obj, "source", None) or "manual").strip().lower() or "manual"
+            if mode not in {"auto", "full_reeval", "pseudo_incremental"}:
+                mode = "auto"
+            if source not in {"manual", "scan", "filing"}:
+                source = "manual"
+            return force, mode, source
+
         # Streamlit hot-reload replaces this class; session may still hold instances
         # from the previous class object (isinstance fails, but attributes remain).
         if not isinstance(raw, (dict, MutableMapping)) and hasattr(raw, "ticker"):
-            try:
-                resume_count = int(getattr(raw, "resume_count", 0) or 0)
-            except (TypeError, ValueError):
-                resume_count = 0
+            force, mode, source = _mode_fields(raw)
             return cls(
                 ticker=str(getattr(raw, "ticker")),
                 trade_date=str(getattr(raw, "trade_date", "")),
                 market=str(getattr(raw, "market", None) or "CN"),
                 fresh=bool(getattr(raw, "fresh", True)),
-                resume_count=max(0, resume_count),
+                resume_count=_resume_count(raw),
+                force_full_reeval=force,
+                analysis_mode=mode,
+                source=source,
             )
-        try:
-            resume_count = int(raw.get("resume_count", 0) or 0)
-        except (TypeError, ValueError):
-            resume_count = 0
+        force, mode, source = _mode_fields(raw)
         return cls(
             ticker=str(raw["ticker"]),
             trade_date=str(raw["trade_date"]),
             market=str(raw.get("market") or "CN"),
             fresh=bool(raw.get("fresh", True)),
-            resume_count=max(0, resume_count),
+            resume_count=_resume_count(raw),
+            force_full_reeval=force,
+            analysis_mode=mode,
+            source=source,
         )
 
 
@@ -555,6 +587,8 @@ def resolve_ticker_batch_mixed(
     *,
     trade_date: str,
     resolve_cn: Callable[[str], str],
+    force_full_reeval: bool = False,
+    analysis_mode: str = "auto",
 ) -> tuple[list[AnalysisJob], list[str]]:
     """Resolve a batch of tickers that may mix CN and US markets.
 
@@ -565,6 +599,9 @@ def resolve_ticker_batch_mixed(
     jobs: list[AnalysisJob] = []
     errors: list[str] = []
     seen: set[tuple[str, str, str]] = set()
+    mode = (analysis_mode or "auto").strip().lower() or "auto"
+    if mode not in {"auto", "full_reeval", "pseudo_incremental"}:
+        mode = "auto"
 
     for raw in raw_tickers:
         token = (raw or "").strip()
@@ -583,6 +620,8 @@ def resolve_ticker_batch_mixed(
                 trade_date=trade_date,
                 market=market,
                 fresh=True,
+                force_full_reeval=bool(force_full_reeval),
+                analysis_mode=mode,
             )
             ident = job.identity()
             if ident in seen:
@@ -600,7 +639,49 @@ def format_queue_job_caption(job: AnalysisJob, index: int) -> str:
     from web.stock_display import format_list_ticker_label
 
     market_tag = "美股" if job.market == "US" else "A股"
-    return f"{index}. {format_list_ticker_label(job.ticker, job.trade_date, market_tag)}"
+    tags = [market_tag]
+    if getattr(job, "source", "manual") == "scan":
+        tags.append("扫描")
+    if getattr(job, "force_full_reeval", False):
+        tags.append("强制全量")
+    return f"{index}. {format_list_ticker_label(job.ticker, job.trade_date, *tags)}"
+
+
+def partition_scan_jobs_for_enqueue(
+    jobs: list[AnalysisJob],
+    *,
+    as_of: str | None = None,
+) -> tuple[list[AnalysisJob], list[tuple[str, str]]]:
+    """Split scan jobs into deep-analysis vs skip-reuse (narrow_ok).
+
+    Returns ``(to_enqueue, skipped)`` where skipped is ``(ticker, reason)``.
+    """
+    from tradingagents.analysis.mode_router import (
+        SOURCE_SCAN,
+        resolve_analysis_mode,
+    )
+
+    keep: list[AnalysisJob] = []
+    skipped: list[tuple[str, str]] = []
+    for job in jobs:
+        decision = resolve_analysis_mode(
+            ticker=job.ticker,
+            trade_date=job.trade_date,
+            market=job.market,
+            force_full_reeval=bool(job.force_full_reeval),
+            analysis_mode=str(job.analysis_mode or "auto"),
+            source=SOURCE_SCAN,
+            fresh=bool(job.fresh),
+            as_of=as_of or job.trade_date,
+        )
+        if decision.skips_deep_analysis:
+            skipped.append((job.ticker, decision.reason))
+        else:
+            # Persist scan source on kept jobs.
+            if getattr(job, "source", "manual") != "scan":
+                job = replace(job, source="scan")
+            keep.append(job)
+    return keep, skipped
 
 
 def _coerce_list(session: MutableMapping[str, Any]) -> list[AnalysisJob]:

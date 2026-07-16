@@ -1,0 +1,30 @@
+# TradingAgents-Astock 美股 SEC 公告 / 财报预告巡检
+#
+# 轮询观察列表中的美股：财报日历预告 + EDGAR 新 8-K/10-Q/10-K →
+# Inbox 通知，并入队 source=filing 的强制美股深度分析（由 analyze worker 消费）。
+#
+# 安装：
+#   sudo cp deploy/tradingagents-filings.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now tradingagents-filings.service
+#
+# SEC 要求 User-Agent 含联系方式；可用 Environment 或 ~/.tradingagents 侧 env 覆盖。
+
+[Unit]
+Description=TradingAgents Astock US SEC Filings Monitor
+After=network.target
+
+[Service]
+Type=simple
+User=solo
+WorkingDirectory=/home/solo/TradingAgents-astock
+Environment="PATH=/home/solo/TradingAgents-astock/.venv/bin"
+Environment="SEC_EDGAR_USER_AGENT=TradingAgents-Astock/0.2 (solo@wcc.io)"
+Environment="FILINGS_POLL_SECONDS=900"
+Environment="FILINGS_DENSE_POLL_SECONDS=300"
+ExecStart=/home/solo/TradingAgents-astock/.venv/bin/tradingagents-filings
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

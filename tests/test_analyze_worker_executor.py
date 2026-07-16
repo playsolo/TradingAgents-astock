@@ -72,10 +72,57 @@ def test_run_one_job_delegates_to_execute_analysis_run(monkeypatch):
     def fake_execute(ticker, trade_date, config, tracker, market="CN", **kw):
         calls["ticker"] = ticker
         calls["market"] = market
+        calls["extra_past_context"] = kw.get("extra_past_context", "")
         tracker.signal = "BUY"
+        tracker.final_state = {"final_trade_decision": "Buy"}
+        tracker.is_complete = True
         return tracker
 
     monkeypatch.setattr("web.runner.execute_analysis_run", fake_execute)
+    monkeypatch.setattr(
+        "tradingagents.analysis.mode_router.resolve_analysis_mode",
+        lambda **kw: __import__(
+            "tradingagents.analysis.mode_router", fromlist=["AnalysisRouteDecision"]
+        ).AnalysisRouteDecision(mode="full_reeval", reason="force"),
+    )
+    monkeypatch.setattr(
+        "tradingagents.analysis.persist.save_calibration_from_state",
+        lambda *a, **k: None,
+    )
     job = AnalysisJob(ticker="300253", trade_date="2026-07-15", market="CN")
-    executor.run_one_job(job, {"llm_provider": "deepseek"})
-    assert calls == {"ticker": "300253", "market": "CN"}
+    executor.run_one_job(job, {"llm_provider": "deepseek", "data_cache_dir": "/tmp"})
+    assert calls["ticker"] == "300253"
+    assert calls["market"] == "CN"
+    assert "extra_past_context" in calls
+
+
+def test_run_one_job_skips_deep_for_scan_narrow(monkeypatch):
+    from tradingagents.analysis.mode_router import MODE_SKIP, AnalysisRouteDecision
+    from web.analysis_queue import AnalysisJob
+
+    calls: dict = {"execute": 0, "skipped": 0}
+
+    def fake_resolve(**kw):
+        return AnalysisRouteDecision(mode=MODE_SKIP, reason="narrow_ok_scan_skip")
+
+    def fake_execute(*a, **k):
+        calls["execute"] += 1
+
+    def fake_skip(*a, **k):
+        calls["skipped"] += 1
+        return {}
+
+    monkeypatch.setattr(
+        "tradingagents.analysis.mode_router.resolve_analysis_mode", fake_resolve
+    )
+    monkeypatch.setattr("web.runner.execute_analysis_run", fake_execute)
+    monkeypatch.setattr("tradingagents.inbox.emit_analysis_skipped", fake_skip)
+    job = AnalysisJob(
+        ticker="300253",
+        trade_date="2026-07-15",
+        market="CN",
+        source="scan",
+    )
+    executor.run_one_job(job, {"llm_provider": "deepseek", "data_cache_dir": "/tmp"})
+    assert calls["execute"] == 0
+    assert calls["skipped"] == 1

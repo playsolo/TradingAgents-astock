@@ -374,6 +374,90 @@ def _begin_analysis(start_req: dict) -> ProgressTracker:
                 start_req["trade_date"],
             )
 
+    from tradingagents.analysis.mode_router import resolve_analysis_mode
+
+    force_full = bool(start_req.get("force_full_reeval", False))
+    analysis_mode = str(start_req.get("analysis_mode") or "auto")
+    source = str(start_req.get("source") or "manual")
+    fresh = bool(start_req.get("fresh", True))
+    explicit_past = str(start_req.get("past_context") or "").strip()
+
+    if explicit_past and not force_full:
+        # Legacy / explicit injection (e.g. caller-supplied prior): keep as-is.
+        extra_past = explicit_past
+        updates_calibration = True
+        skip_deep = False
+        skip_reason = ""
+        skip_anchor = None
+    else:
+        try:
+            from web.auth_page import current_watch_store
+
+            watch_store = current_watch_store()
+        except Exception:  # noqa: BLE001
+            watch_store = None
+        decision = resolve_analysis_mode(
+            ticker=start_req["ticker"],
+            trade_date=start_req["trade_date"],
+            market=market,
+            force_full_reeval=force_full,
+            analysis_mode=analysis_mode,
+            source=source,
+            fresh=fresh,
+            watch_store=watch_store,
+        )
+        extra_past = decision.extra_past_context
+        updates_calibration = decision.updates_calibration
+        skip_deep = decision.skips_deep_analysis
+        skip_reason = decision.reason
+        skip_anchor = decision.anchor
+
+    if skip_deep:
+        from tradingagents.inbox import emit_analysis_skipped
+
+        emit_analysis_skipped(
+            start_req["ticker"],
+            start_req["trade_date"],
+            reason=skip_reason,
+            anchor_date=getattr(skip_anchor, "trade_date", "") if skip_anchor else "",
+            stance=getattr(skip_anchor, "stance", "") if skip_anchor else "",
+        )
+        try:
+            from tradingagents.analysis.skip_followup import follow_up_scan_skip
+            from web.auth_page import current_watch_store
+
+            follow_up_scan_skip(
+                start_req["ticker"],
+                trade_date=start_req["trade_date"],
+                market=market,
+                watch_store=current_watch_store(),
+                llm=None,
+                escalate=True,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        st.session_state["queue_advance_notice"] = (
+            f"{start_req['ticker']} 沿用校准锚点，已跳过深分析（见事件中心）"
+        )
+        tracker = ProgressTracker(
+            ticker=start_req["ticker"],
+            trade_date=start_req["trade_date"],
+            market=market,
+        )
+        stance = getattr(skip_anchor, "stance", None) or "Hold"
+        tracker.mark_complete(
+            {
+                "final_trade_decision": (
+                    f"Rating: {stance}\n"
+                    f"（扫描跳过深分析，沿用校准锚点"
+                    f"{(' ' + skip_anchor.trade_date) if skip_anchor else ''}）"
+                ),
+            },
+            stance,
+        )
+        add_tracker(st.session_state, tracker)
+        return tracker
+
     tracker = ProgressTracker(
         ticker=start_req["ticker"],
         trade_date=start_req["trade_date"],
@@ -392,13 +476,18 @@ def _begin_analysis(start_req: dict) -> ProgressTracker:
         }
     else:
         st.session_state["watchlist_refresh_pending"] = None
+
+    pending_key = f"{market}:{start_req['ticker']}:{start_req['trade_date']}"
+    cal_pending = st.session_state.setdefault("calibration_pending", {})
+    cal_pending[pending_key] = updates_calibration
+
     run_analysis_in_thread(
         ticker=start_req["ticker"],
         trade_date=start_req["trade_date"],
         config=_build_config(),
         tracker=tracker,
         market=market,
-        extra_past_context=str(start_req.get("past_context") or ""),
+        extra_past_context=extra_past,
     )
     return tracker
 
@@ -411,11 +500,20 @@ def _begin_analysis_from_job(job: AnalysisJob) -> ProgressTracker:
 def _enqueue_start_request(start_req: dict) -> None:
     """Worker mode: push a start request onto the disk queue instead of running it."""
     market = _infer_market(start_req["ticker"], start_req.get("market"))
+    mode = str(start_req.get("analysis_mode") or "auto").strip().lower() or "auto"
+    if mode not in {"auto", "full_reeval", "pseudo_incremental"}:
+        mode = "auto"
+    source = str(start_req.get("source") or "manual").strip().lower() or "manual"
+    if source not in {"manual", "scan"}:
+        source = "manual"
     job = AnalysisJob(
         ticker=start_req["ticker"],
         trade_date=start_req["trade_date"],
         market=market,
         fresh=bool(start_req.get("fresh", True)),
+        force_full_reeval=bool(start_req.get("force_full_reeval", False)),
+        analysis_mode=mode,
+        source=source,
     )
     added = default_store().append_atomic([job])
     st.session_state["viewing_history"] = None
@@ -463,6 +561,27 @@ viewing_history: str | None = st.session_state.get("viewing_history")
 viewing_watchlist: bool = bool(st.session_state.get("viewing_watchlist"))
 viewing_inbox: bool = bool(st.session_state.get("viewing_inbox"))
 viewing_accuracy: bool = bool(st.session_state.get("viewing_accuracy"))
+
+
+def _consume_calibration_pending(active: ProgressTracker) -> None:
+    """Persist calibration anchor after a successful full_reeval (web in-process)."""
+    market = getattr(active, "market", None) or "CN"
+    key = f"{market}:{active.ticker}:{active.trade_date}"
+    cal_pending = st.session_state.get("calibration_pending") or {}
+    should_save = bool(cal_pending.pop(key, False))
+    st.session_state["calibration_pending"] = cal_pending
+    if not should_save:
+        return
+    if active.error or not (active.is_complete and active.final_state):
+        return
+    from tradingagents.analysis.persist import save_calibration_from_state
+
+    save_calibration_from_state(
+        active.final_state,
+        ticker=active.ticker,
+        trade_date=active.trade_date,
+        market=market,
+    )
 
 
 def _consume_watchlist_refresh_pending(active: ProgressTracker) -> None:
@@ -528,6 +647,7 @@ if not is_worker_mode() and not st.session_state.get("_parallel_lifecycle_ran"):
         if t.is_complete or t.error:
             need_rerun = True
             _consume_watchlist_refresh_pending(t)
+            _consume_calibration_pending(t)
             remove_finished_tracker(st.session_state, t.ticker, t.trade_date)
 
     _fill_incomplete = None

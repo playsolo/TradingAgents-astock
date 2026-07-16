@@ -199,6 +199,25 @@ def main() -> int:
         _emit("error", message=f"无法导入美股 TradingAgents: {exc}")
         return 3
 
+    # Install EDGAR get_sec_filings into news/fundamentals (A2) before graph build.
+    bridge_dir = Path(__file__).resolve().parent
+    if str(bridge_dir) not in sys.path:
+        sys.path.insert(0, str(bridge_dir))
+    try:
+        from sec_inject import install_sec_filing_tools, prefetch_filings_into_context
+        from sec_tools import get_sec_filings_report, make_get_sec_filings_tool
+
+        sec_tool = make_get_sec_filings_tool()
+        if install_sec_filing_tools(sec_tool):
+            _emit("warn", message="已注入 get_sec_filings (EDGAR) 到美股 News/Fundamentals")
+        else:
+            _emit("warn", message="get_sec_filings 注入失败，将仅尝试 prefetch")
+    except Exception as exc:
+        _emit("warn", message=f"SEC 工具不可用: {exc}")
+        install_sec_filing_tools = None  # type: ignore
+        prefetch_filings_into_context = None  # type: ignore
+        get_sec_filings_report = None  # type: ignore
+
     config = DEFAULT_CONFIG.copy()
     # Prefer streamed progress; checkpoint resume is optional via US env.
     config.setdefault("checkpoint_enabled", False)
@@ -214,7 +233,26 @@ def main() -> int:
         )
         # Mirror US _run_graph state construction without pretty-printing.
         past_context = graph.memory_log.get_past_context(ticker)
+        filing_block = ""
+        if get_sec_filings_report:
+            try:
+                filing_block = get_sec_filings_report(
+                    ticker, form_types="10-K,10-Q,8-K", limit=2, include_excerpts=True
+                )
+            except Exception as exc:
+                _emit("warn", message=f"SEC prefetch 跳过: {exc}")
+                filing_block = ""
+        if filing_block and prefetch_filings_into_context:
+            past_context = prefetch_filings_into_context(
+                ticker, past_context, lambda *a, **k: filing_block
+            )
         instrument_context = graph.resolve_instrument_context(ticker, "stock")
+        if filing_block:
+            instrument_context = (
+                f"{instrument_context}\n\n"
+                "Latest SEC filings (EDGAR) for this run — prioritize over stale news:\n"
+                f"{filing_block}"
+            ).strip()
         init_state = graph.propagator.create_initial_state(
             ticker,
             trade_date,
@@ -222,6 +260,14 @@ def main() -> int:
             past_context=past_context,
             instrument_context=instrument_context,
         )
+        if filing_block:
+            # Ensure the first human turn also carries filing text (analysts read messages).
+            init_state["messages"] = [
+                (
+                    "human",
+                    f"{ticker}\n\nAnalyze with these latest SEC filings in mind:\n{filing_block}",
+                )
+            ]
         args = graph.propagator.get_graph_args()
 
         merged: dict[str, Any] = {}

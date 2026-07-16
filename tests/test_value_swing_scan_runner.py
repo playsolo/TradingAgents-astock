@@ -93,7 +93,13 @@ def test_run_scan_job_persists_completed_without_enqueue(
 def test_run_scan_job_enqueues_candidates_on_success(
     scan_store: ValueSwingScanStore,
     queue_store: AnalysisQueueStore,
+    monkeypatch: pytest.MonkeyPatch,
 ):
+    # Bypass calibration skip so this test only covers enqueue wiring.
+    monkeypatch.setattr(
+        "web.analysis_queue.partition_scan_jobs_for_enqueue",
+        lambda jobs, as_of=None: (list(jobs), []),
+    )
     run_scan_job(
         max_candidates=15,
         enqueue_on_success=True,
@@ -226,7 +232,14 @@ def test_candidates_to_analysis_jobs_uses_trade_date():
     assert jobs[0].fresh is True
 
 
-def test_enqueue_scan_candidates_dedupes(queue_store: AnalysisQueueStore):
+def test_enqueue_scan_candidates_dedupes(
+    queue_store: AnalysisQueueStore,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        "web.analysis_queue.partition_scan_jobs_for_enqueue",
+        lambda jobs, as_of=None: (list(jobs), []),
+    )
     first = enqueue_scan_candidates(
         [{"code": "000001"}, {"code": "600519"}],
         trade_date="2026-07-15",

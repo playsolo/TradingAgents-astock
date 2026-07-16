@@ -22,6 +22,7 @@ MAX_EVENTS = 100
 KIND_ANALYSIS_COMPLETE = "analysis.complete"
 KIND_ANALYSIS_FAILED = "analysis.failed"
 KIND_ANALYSIS_WARNING = "analysis.warning"
+KIND_ANALYSIS_SKIPPED = "analysis.skipped"
 KIND_WATCH_ALERT = "watch.alert"
 
 _VALID_SEVERITIES = frozenset({"info", "warning", "error"})
@@ -206,6 +207,34 @@ def emit_analysis_complete(
             ),
         )
     return emitted
+
+
+def emit_analysis_skipped(
+    ticker: str,
+    trade_date: str,
+    *,
+    reason: str = "",
+    anchor_date: str = "",
+    stance: str = "",
+) -> dict[str, Any]:
+    """Scan narrow-path: deep analysis skipped, reuse calibration anchor."""
+    parts = ["沿用校准锚点，跳过深分析"]
+    if anchor_date:
+        parts.append(f"锚点日 {anchor_date}")
+    if stance:
+        parts.append(f"立场 {stance}")
+    if reason:
+        parts.append(reason)
+    return emit(
+        KIND_ANALYSIS_SKIPPED,
+        f"{ticker} 扫描跳过深分析",
+        severity="info",
+        detail=" · ".join(parts),
+        ticker=ticker,
+        trade_date=trade_date,
+        link_view="history",
+        dedupe_key=f"skip:{ticker}:{trade_date}",
+    )
 
 
 def emit_analysis_failed(

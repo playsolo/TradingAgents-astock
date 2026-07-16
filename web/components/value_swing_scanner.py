@@ -29,27 +29,59 @@ def _get_code_to_name():
 
 
 def _enqueue_candidates(candidates: list[dict]):
-    """将候选代码排入分析队列。"""
+    """将候选代码排入分析队列（窄口径重叠票跳过深分析）。"""
+    from tradingagents.inbox import emit_analysis_skipped
     from web.analysis_queue import (
         AnalysisJob,
         append_jobs,
         mark_serial_queue_session,
+        partition_scan_jobs_for_enqueue,
     )
 
     today = datetime.now().strftime("%Y-%m-%d")
     jobs = [
-        AnalysisJob(ticker=c["code"], trade_date=today, market="CN", fresh=True)
+        AnalysisJob(
+            ticker=c["code"],
+            trade_date=today,
+            market="CN",
+            fresh=True,
+            source="scan",
+        )
         for c in candidates
     ]
+    keep, skipped = partition_scan_jobs_for_enqueue(jobs, as_of=today)
+    for ticker, reason in skipped:
+        emit_analysis_skipped(ticker, today, reason=reason)
+        try:
+            from tradingagents.analysis.skip_followup import follow_up_scan_skip
+            from web.auth_page import current_watch_store
+
+            follow_up_scan_skip(
+                ticker,
+                trade_date=today,
+                market="CN",
+                watch_store=current_watch_store(),
+                llm=None,
+                escalate=True,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    if not keep:
+        if skipped:
+            st.session_state["queue_advance_notice"] = (
+                f"候选均沿用校准锚点，已跳过深分析 {len(skipped)} 只（见事件中心）"
+            )
+        return 0
     added = append_jobs(
         st.session_state,
-        jobs,
+        keep,
         exclude={(None, None, None)},  # 不排除已有项
     )
     if added:
         mark_serial_queue_session(st.session_state, True)
+        skip_note = f"，另跳过 {len(skipped)} 只" if skipped else ""
         st.session_state["queue_advance_notice"] = (
-            f"已将 {added} 只候选股票加入分析队列，准备逐个深入分析"
+            f"已将 {added} 只候选加入分析队列{skip_note}"
         )
     return added
 

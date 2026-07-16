@@ -120,6 +120,9 @@ git pull origin "${REMOTE_BRANCH}"
 echo "[远程] 导入预检 ..."
 PYBIN="${REMOTE_DIR}/.venv/bin/python"
 [ -x "\$PYBIN" ] || PYBIN=python3
+# 刷新 console 入口（新增 tradingagents-filings 等）
+echo "[远程] pip install -e . ..."
+"${REMOTE_DIR}/.venv/bin/pip" install -e "${REMOTE_DIR}" -q
 "\$PYBIN" -c "
 import sys
 sys.path.insert(0, '.')
@@ -130,12 +133,25 @@ from web.components.sidebar import render_sidebar, request_clear_ticker_input
 print('  ✓ web.components.sidebar')
 from web.auth_page import render_logout_button, render_admin_panel
 print('  ✓ web.auth_page')
+from tradingagents.filings.monitor import run_filing_poll_once
+print('  ✓ tradingagents.filings.monitor')
 " 2>&1 || { echo "[远程] 导入预检失败，中止部署"; exit 1; }
 
-echo "[远程] 重启 ${SERVICE_NAME} ..."
-sudo systemctl restart "${SERVICE_NAME}"
+echo "[远程] 重启 ${SERVICE_NAME} + tradingagents-analyze.service ..."
+sudo systemctl restart "${SERVICE_NAME}" tradingagents-analyze.service
 echo "[远程] Service 状态:"
-systemctl is-active --quiet "${SERVICE_NAME}" && echo "  active" || echo "  inactive (非预期!)"
+systemctl is-active --quiet "${SERVICE_NAME}" && echo "  ${SERVICE_NAME}: active" || echo "  ${SERVICE_NAME}: inactive (非预期!)"
+systemctl is-active --quiet tradingagents-analyze.service && echo "  tradingagents-analyze: active" || echo "  tradingagents-analyze: inactive"
+
+# 美股 SEC 公告巡检（幂等安装）
+if [ -f deploy/tradingagents-filings.service ]; then
+  echo "[远程] 安装/刷新 tradingagents-filings.service ..."
+  sudo cp deploy/tradingagents-filings.service /etc/systemd/system/
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now tradingagents-filings.service
+  sudo systemctl restart tradingagents-filings.service
+  systemctl is-active --quiet tradingagents-filings.service && echo "  tradingagents-filings: active" || echo "  tradingagents-filings: inactive (非预期!)"
+fi
 
 # 信号准确率每日 21:00 timer（幂等安装 / 刷新单元文件）
 if [ -f deploy/tradingagents-accuracy.service ] && [ -f deploy/tradingagents-accuracy.timer ]; then

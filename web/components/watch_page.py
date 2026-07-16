@@ -14,7 +14,6 @@ from tradingagents.watchlist.calendar import (
     is_action_validity_expired,
 )
 from tradingagents.watchlist.models import LEAN_LABELS, WatchItem
-from tradingagents.watchlist.service import prior_context_from_baseline
 from web.auth_page import current_watch_store
 from web.stock_display import format_list_ticker_label
 
@@ -166,8 +165,9 @@ def render_watch_page() -> None:
                         "ticker": fresh.baseline.ticker,
                         "trade_date": today,
                         "fresh": True,
-                        "market": "CN",
-                        "past_context": prior_context_from_baseline(fresh.baseline),
+                        "market": getattr(fresh.baseline, "market", None) or "CN",
+                        "force_full_reeval": True,
+                        "analysis_mode": "full_reeval",
                         "watchlist_refresh": True,
                     }
                     st.session_state["viewing_watchlist"] = False

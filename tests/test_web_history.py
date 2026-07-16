@@ -74,6 +74,85 @@ def test_get_history_sorted_by_completion_mtime_desc(tmp_path, monkeypatch):
     assert [e["date"] for e in entries] == ["2026-06-01", "2026-07-14"]
 
 
+def test_filter_history_by_ticker_case_insensitive_lists_all():
+    entries = [
+        {"ticker": "300750", "date": "2026-07-14", "path": "a", "signal": "Buy"},
+        {"ticker": "AAPL", "date": "2026-07-13", "path": "b", "signal": "Hold"},
+        {"ticker": "300750", "date": "2026-06-01", "path": "c", "signal": "Sell"},
+        {"ticker": "aapl", "date": "2026-05-01", "path": "d", "signal": "Buy"},
+    ]
+    assert [e["date"] for e in history.filter_history_by_ticker(entries, "300750")] == [
+        "2026-07-14",
+        "2026-06-01",
+    ]
+    assert [e["path"] for e in history.filter_history_by_ticker(entries, "aapl")] == [
+        "b",
+        "d",
+    ]
+    assert history.filter_history_by_ticker(entries, "") == entries
+    assert history.filter_history_by_ticker(entries, "NVDA") == []
+
+
+def test_resolve_history_search_query_blank_means_no_filter():
+    assert history.resolve_history_search_query("") == (None, None)
+    assert history.resolve_history_search_query("   ") == (None, None)
+
+
+def test_resolve_history_search_query_us_ticker():
+    assert history.resolve_history_search_query("aapl") == ("AAPL", None)
+    assert history.resolve_history_search_query("BRK.B") == ("BRK.B", None)
+
+
+def test_resolve_history_search_query_cn_code():
+    assert history.resolve_history_search_query("300750") == ("300750", None)
+
+
+def test_resolve_history_search_query_cn_name_uses_cache(monkeypatch):
+    monkeypatch.setattr(
+        "web.stock_display.lookup_code_by_cached_name",
+        lambda name: "300750" if name == "宁德时代" else None,
+    )
+    assert history.resolve_history_search_query("宁德时代") == ("300750", None)
+
+
+def test_resolve_history_search_query_cn_name_falls_back_to_resolve(monkeypatch):
+    monkeypatch.setattr(
+        "web.stock_display.lookup_code_by_cached_name",
+        lambda name: None,
+    )
+
+    def _fake_resolve(raw: str) -> str:
+        if raw == "贵州茅台":
+            return "600519"
+        raise ValueError("x")
+
+    monkeypatch.setattr(
+        "tradingagents.dataflows.a_stock.resolve_ticker",
+        _fake_resolve,
+    )
+    monkeypatch.setattr("web.stock_display.remember_resolved_name", lambda code, raw: None)
+    assert history.resolve_history_search_query("贵州茅台") == ("600519", None)
+
+
+def test_resolve_history_search_query_invalid_cn_name(monkeypatch):
+    monkeypatch.setattr(
+        "web.stock_display.lookup_code_by_cached_name",
+        lambda name: None,
+    )
+
+    def _fake_resolve(raw: str) -> str:
+        raise ValueError("找不到股票")
+
+    monkeypatch.setattr(
+        "tradingagents.dataflows.a_stock.resolve_ticker",
+        _fake_resolve,
+    )
+    code, err = history.resolve_history_search_query("不存在的票")
+    assert code is None
+    assert err is not None
+    assert "找不到" in err
+
+
 def test_incomplete_task_round_trip(tmp_path, monkeypatch):
     index = tmp_path / "incomplete_tasks.json"
     logs = tmp_path / "logs"
