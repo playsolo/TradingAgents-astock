@@ -72,6 +72,30 @@ def signal_count_label(group: dict[str, list[dict[str, Any]]], total: int) -> st
     return "  ·  ".join(parts)
 
 
+def history_stamp() -> tuple[int, int]:
+    """Cheap filesystem stamp for sidebar auto-refresh: ``(count, max_mtime_ns)``.
+
+    Does not open/parse JSON — safe to poll from a Streamlit fragment while a
+    worker writes new ``full_states_log_*.json`` files out of process.
+    """
+    root = _results_dir()
+    if not root.exists():
+        return (0, 0)
+
+    count = 0
+    max_mtime_ns = 0
+    for log_file in root.rglob("full_states_log_*.json"):
+        match = re.search(r"full_states_log_(\d{4}-\d{2}-\d{2})\.json$", log_file.name)
+        if not match:
+            continue
+        count += 1
+        try:
+            max_mtime_ns = max(max_mtime_ns, log_file.stat().st_mtime_ns)
+        except OSError:
+            continue
+    return (count, max_mtime_ns)
+
+
 def get_history() -> list[dict[str, Any]]:
     """Scan saved analysis logs and return a sorted list (newest first).
 

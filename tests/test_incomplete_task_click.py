@@ -28,6 +28,21 @@ def test_incomplete_resume_buttons_not_globally_disabled_when_busy():
     assert "activate_incomplete_task(" in src
 
 
+def test_queue_fragment_reruns_when_history_stamp_changes():
+    """Worker completions write logs out-of-process; history sits outside the
+    queue fragment, so stamp change must trigger a full ``st.rerun()``.
+    """
+    src = Path("web/components/sidebar.py").read_text(encoding="utf-8")
+    assert "history_stamp()" in src
+    assert "_sidebar_history_stamp" in src
+    # Ensure the stamp watch lives inside the auto-refresh fragment.
+    frag = src.split("def _render_queue_and_incomplete")[1].split(
+        "def _render_analysis_queue_inner"
+    )[0]
+    assert "history_stamp()" in frag
+    assert "st.rerun()" in frag
+
+
 def test_activate_incomplete_focuses_live_run_instead_of_restarting():
     session: dict = {}
     live = SimpleNamespace(

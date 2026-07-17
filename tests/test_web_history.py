@@ -74,6 +74,41 @@ def test_get_history_sorted_by_completion_mtime_desc(tmp_path, monkeypatch):
     assert [e["date"] for e in entries] == ["2026-06-01", "2026-07-14"]
 
 
+def test_history_stamp_tracks_count_and_mtime(tmp_path, monkeypatch):
+    """Worker-mode sidebar polls this stamp to refresh history without F5."""
+    logs = tmp_path / "logs"
+    monkeypatch.setattr(history, "_results_dir", lambda: logs)
+
+    assert history.history_stamp() == (0, 0)
+
+    first_dir = logs / "300750" / "TradingAgentsStrategy_logs"
+    first_dir.mkdir(parents=True)
+    first = first_dir / "full_states_log_2026-07-17.json"
+    first.write_text(json.dumps({"final_trade_decision": "BUY"}), encoding="utf-8")
+    os.utime(first, (1_700_000_000, 1_700_000_000))
+
+    stamp1 = history.history_stamp()
+    assert stamp1[0] == 1
+    assert stamp1[1] > 0
+
+    second_dir = logs / "600519" / "TradingAgentsStrategy_logs"
+    second_dir.mkdir(parents=True)
+    second = second_dir / "full_states_log_2026-07-17.json"
+    second.write_text(json.dumps({"final_trade_decision": "HOLD"}), encoding="utf-8")
+    os.utime(second, (1_800_000_000, 1_800_000_000))
+
+    stamp2 = history.history_stamp()
+    assert stamp2[0] == 2
+    assert stamp2[1] > stamp1[1]
+
+    # Rewrite same path (re-analysis) must bump stamp via mtime.
+    second.write_text(json.dumps({"final_trade_decision": "SELL"}), encoding="utf-8")
+    os.utime(second, (1_900_000_000, 1_900_000_000))
+    stamp3 = history.history_stamp()
+    assert stamp3[0] == 2
+    assert stamp3[1] > stamp2[1]
+
+
 def test_filter_history_by_ticker_case_insensitive_lists_all():
     entries = [
         {"ticker": "300750", "date": "2026-07-14", "path": "a", "signal": "Buy"},

@@ -30,6 +30,7 @@ from web.history import (
     get_history,
     get_incomplete_history,
     group_history_by_signal,
+    history_stamp,
     record_incomplete_task,
     resolve_history_search_query,
     signal_count_label,
@@ -370,11 +371,21 @@ def _render_queue_and_incomplete() -> None:
 
     Both sections are grouped in one fragment so Streamlit does not need to
     manage two independent sidebar fragments with overlapping widget trees.
-    When no background work exists the fragment renders once and stops polling.
+
+    Also watches ``history_stamp()``: in worker mode completions happen in a
+    separate process, so the「历史记录」block outside this fragment would stay
+    stale until a full script rerun. When the stamp changes, trigger one.
     """
     jobs = queue_snapshot(st.session_state)
     incomplete = get_incomplete_history()
     has_work = bool(has_running(st.session_state) or jobs or incomplete)
+
+    stamp = history_stamp()
+    prev_stamp = st.session_state.get("_sidebar_history_stamp")
+    if prev_stamp is not None and prev_stamp != stamp:
+        st.session_state["_sidebar_history_stamp"] = stamp
+        st.rerun()
+    st.session_state["_sidebar_history_stamp"] = stamp
 
     if jobs:
         _render_analysis_queue_inner()
