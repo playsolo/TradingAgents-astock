@@ -214,20 +214,33 @@ def run_one_job(job: Any, config: dict[str, Any]) -> None:
                 trade_date=job.trade_date,
                 market=market,
             )
-        if source == "scan" and getattr(tracker, "final_state", None):
+        final_state = getattr(tracker, "final_state", None)
+        if final_state:
             try:
-                from tradingagents.watchlist.service import maybe_auto_watch_from_scan_analysis
+                from tradingagents.watchlist.service import (
+                    maybe_auto_watch_from_scan_analysis,
+                    refresh_watched_across_stores,
+                )
 
-                maybe_auto_watch_from_scan_analysis(
-                    tracker.final_state,
+                refresh_watched_across_stores(
+                    final_state,
                     ticker=job.ticker,
                     trade_date=job.trade_date,
                     market=market,
-                    source=source,
-                    store=_default_watch_store(),
                 )
+                if source == "scan":
+                    maybe_auto_watch_from_scan_analysis(
+                        final_state,
+                        ticker=job.ticker,
+                        trade_date=job.trade_date,
+                        market=market,
+                        source=source,
+                        store=_default_watch_store(),
+                    )
             except Exception:  # noqa: BLE001
-                logger.exception("auto-watch from scan failed for %s", job.ticker)
+                logger.exception(
+                    "watchlist sync after analysis failed for %s", job.ticker
+                )
 
 
 # Type alias for daemon injection / testing.

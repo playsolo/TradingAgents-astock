@@ -8,7 +8,7 @@ from typing import Any
 
 from tradingagents.watchlist.baseline import extract_baseline
 from tradingagents.watchlist.models import Baseline, WatchItem
-from tradingagents.watchlist.store import WatchlistStore, default_store
+from tradingagents.watchlist.store import WatchlistStore, default_store, iter_user_stores
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +151,71 @@ def resolve_log_path(ticker: str, trade_date: str) -> str:
         / f"full_states_log_{trade_date}.json"
     )
     return str(path) if path.exists() else ""
+
+
+def maybe_refresh_watched_from_analysis(
+    state: dict[str, Any],
+    *,
+    ticker: str,
+    trade_date: str,
+    log_path: str = "",
+    store: WatchlistStore | None = None,
+    market: str | None = None,
+) -> WatchItem | None:
+    """若该代码已在观察池，用本次分析覆盖基准；否则不改动、不新增。
+
+    关「自动观察」也会换绑——池内展示的基准应与最新报告一致。
+    """
+    if not state:
+        return None
+    store = store or default_store()
+    if store.get(ticker) is None:
+        return None
+    path = log_path or resolve_log_path(ticker, trade_date)
+    item = refresh_from_analysis(
+        state,
+        ticker=ticker,
+        trade_date=trade_date,
+        log_path=path,
+        store=store,
+        market=market,
+    )
+    logger.info(
+        "watchlist auto-rebind: %s -> %s stance=%s",
+        ticker,
+        trade_date,
+        item.baseline.stance,
+    )
+    return item
+
+
+def refresh_watched_across_stores(
+    state: dict[str, Any],
+    *,
+    ticker: str,
+    trade_date: str,
+    log_path: str = "",
+    market: str | None = None,
+    stores: list[WatchlistStore] | None = None,
+) -> list[WatchItem]:
+    """遍历各用户观察池，对已关注该代码的条目换绑基准（worker 无会话时用）。"""
+    if not state:
+        return []
+    path = log_path or resolve_log_path(ticker, trade_date)
+    targets = stores if stores is not None else list(iter_user_stores())
+    refreshed: list[WatchItem] = []
+    for store in targets:
+        item = maybe_refresh_watched_from_analysis(
+            state,
+            ticker=ticker,
+            trade_date=trade_date,
+            log_path=path,
+            store=store,
+            market=market,
+        )
+        if item is not None:
+            refreshed.append(item)
+    return refreshed
 
 
 # 扫描深分析后：Hold/Underweight 且带入场价 → 自动进观察池（状态机：观察→触及入场）

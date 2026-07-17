@@ -585,17 +585,19 @@ def _consume_calibration_pending(active: ProgressTracker) -> None:
 
 
 def _consume_watchlist_refresh_pending(active: ProgressTracker) -> None:
-    """Apply or clear watchlist baseline refresh before queue auto-advance."""
+    """分析完成后：已在池内则自动换绑；「完整再分析」额外给成功提示。"""
     pending = st.session_state.get("watchlist_refresh_pending")
-    if not (
+    pending_matches = (
         isinstance(pending, dict)
         and pending.get("ticker") == active.ticker
         and pending.get("trade_date") == active.trade_date
-    ):
-        return
+    )
 
     if active.is_complete and active.final_state:
-        from tradingagents.watchlist.service import refresh_from_analysis, resolve_log_path
+        from tradingagents.watchlist.service import (
+            maybe_refresh_watched_from_analysis,
+            resolve_log_path,
+        )
 
         try:
             from datetime import datetime
@@ -603,35 +605,39 @@ def _consume_watchlist_refresh_pending(active: ProgressTracker) -> None:
             from web.auth_page import current_watch_store
 
             watch_store = current_watch_store()
-            refreshed = refresh_from_analysis(
+            refreshed = maybe_refresh_watched_from_analysis(
                 active.final_state,
                 ticker=active.ticker,
                 trade_date=active.trade_date,
                 log_path=resolve_log_path(active.ticker, active.trade_date),
                 store=watch_store,
+                market=getattr(active, "market", None) or "CN",
             )
-            stance = refreshed.baseline.stance
-            summary = (
-                f"完整再分析已完成（基准日 {active.trade_date}）| 立场 {stance}"
-                + (
-                    f" | {refreshed.baseline.thesis_summary}"
-                    if refreshed.baseline.thesis_summary
-                    else ""
+            if refreshed is not None and pending_matches:
+                stance = refreshed.baseline.stance
+                summary = (
+                    f"完整再分析已完成（基准日 {active.trade_date}）| 立场 {stance}"
+                    + (
+                        f" | {refreshed.baseline.thesis_summary}"
+                        if refreshed.baseline.thesis_summary
+                        else ""
+                    )
                 )
-            )
-            watch_store.mark_observed(
-                active.ticker,
-                datetime.now().isoformat(timespec="seconds"),
-                summary=summary,
-                briefing=None,
-            )
-            st.success(f"观察池基准已更新：{active.ticker}（完整再分析）")
+                watch_store.mark_observed(
+                    active.ticker,
+                    datetime.now().isoformat(timespec="seconds"),
+                    summary=summary,
+                    briefing=None,
+                )
+                st.success(f"观察池基准已更新：{active.ticker}（完整再分析）")
         except Exception as exc:  # noqa: BLE001
-            st.warning(f"分析完成，但更新观察池基准失败：{exc}")
-        st.session_state["watchlist_refresh_pending"] = None
+            if pending_matches:
+                st.warning(f"分析完成，但更新观察池基准失败：{exc}")
+        if pending_matches:
+            st.session_state["watchlist_refresh_pending"] = None
         return
 
-    if active.error:
+    if active.error and pending_matches:
         st.session_state["watchlist_refresh_pending"] = None
         st.warning("完整再分析失败，观察池基准未更新。可修复后从观察池重试。")
 
