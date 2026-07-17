@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from datetime import datetime
 
 from tradingagents import inbox
 from tradingagents.watchlist import observe as observe_mod
@@ -63,7 +64,13 @@ def test_light_observe_mirrors_alerts_into_inbox(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(observe_mod, "detect_changes", lambda *_a, **_k: [fake_alert])
 
-    alerts = observe_mod.observe_item(item, store=store, llm=None, force=True)
+    alerts = observe_mod.observe_item(
+        item,
+        store=store,
+        llm=None,
+        force=True,
+        now=datetime(2026, 7, 14, 9, 36),
+    )
 
     assert alerts
     events = inbox.list_events()
@@ -89,6 +96,12 @@ def test_light_observe_without_alerts_emits_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr(observe_mod, "judge_vs_baseline", lambda *_a, **_k: _judgment())
     monkeypatch.setattr(observe_mod, "detect_changes", lambda *_a, **_k: [])
 
-    observe_mod.observe_item(item, store=store, llm=None, force=True)
+    observe_mod.observe_item(
+        item,
+        store=store,
+        llm=None,
+        force=True,
+        now=datetime(2026, 7, 14, 9, 36),
+    )
 
     assert inbox.list_events() == []

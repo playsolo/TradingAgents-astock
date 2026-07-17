@@ -106,6 +106,7 @@ def run_slot_once(
                 slot_key=key,
                 analysis_config=cfg or None,
                 market=market,
+                now=dt,
             )
             observed.update(batch.alerts)
     return {"slot_key": ",".join(keys), "observed": observed}
