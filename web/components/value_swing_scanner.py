@@ -29,8 +29,12 @@ def _get_code_to_name():
 
 
 def _enqueue_candidates(candidates: list[dict]):
-    """将候选代码排入分析队列（窄口径重叠票跳过深分析）。"""
+    """将候选代码排入分析队列（窄口径重叠票跳过深分析）。
+
+    默认只入队 ``lane=analyze``（未明显超涨）；``watch`` 道留给回撤观察。
+    """
     from tradingagents.inbox import emit_analysis_skipped
+    from tradingagents.strategies.value_swing import is_analyze_lane
     from web.analysis_queue import (
         AnalysisJob,
         append_jobs,
@@ -39,6 +43,8 @@ def _enqueue_candidates(candidates: list[dict]):
     )
 
     today = datetime.now().strftime("%Y-%m-%d")
+    analyze_pool = [c for c in candidates if is_analyze_lane(c)]
+    watch_skipped = len(candidates) - len(analyze_pool)
     jobs = [
         AnalysisJob(
             ticker=c["code"],
@@ -47,7 +53,8 @@ def _enqueue_candidates(candidates: list[dict]):
             fresh=True,
             source="scan",
         )
-        for c in candidates
+        for c in analyze_pool
+        if c.get("code")
     ]
     keep, skipped = partition_scan_jobs_for_enqueue(jobs, as_of=today)
     for ticker, reason in skipped:
@@ -67,10 +74,13 @@ def _enqueue_candidates(candidates: list[dict]):
         except Exception:  # noqa: BLE001
             pass
     if not keep:
-        if skipped:
-            st.session_state["queue_advance_notice"] = (
-                f"候选均沿用校准锚点，已跳过深分析 {len(skipped)} 只（见事件中心）"
-            )
+        if skipped or watch_skipped:
+            parts = []
+            if watch_skipped:
+                parts.append(f"回撤观察道跳过入队 {watch_skipped} 只")
+            if skipped:
+                parts.append(f"校准复用跳过 {len(skipped)} 只")
+            st.session_state["queue_advance_notice"] = "；".join(parts) + "（见事件中心）"
         return 0
     added = append_jobs(
         st.session_state,
@@ -78,11 +88,11 @@ def _enqueue_candidates(candidates: list[dict]):
         exclude={(None, None, None)},  # 不排除已有项
     )
     if added:
-        mark_serial_queue_session(st.session_state, True)
-        skip_note = f"，另跳过 {len(skipped)} 只" if skipped else ""
-        st.session_state["queue_advance_notice"] = (
-            f"已将 {added} 只候选加入分析队列{skip_note}"
-        )
+        mark_serial_queue_session(st.session_state)
+        note = f"已加入分析队列 {added} 只"
+        if watch_skipped:
+            note += f"（另有 {watch_skipped} 只回撤观察道未入队）"
+        st.session_state["queue_advance_notice"] = note
     return added
 
 
@@ -410,9 +420,13 @@ def render_scan_results(
     strong_buy: list[dict] = []
     buy: list[dict] = []
     watch: list[dict] = []
+    pullback: list[dict] = []
     other: list[dict] = []
 
     for c in candidates:
+        if str(c.get("lane") or "").strip().lower() == "watch":
+            pullback.append(c)
+            continue
         label, _, _ = _build_recommendation_bar(c)
         if label == "强烈推荐":
             strong_buy.append(c)
@@ -443,6 +457,13 @@ def render_scan_results(
         with st.expander(f"展开 {len(watch)} 只关注股票", expanded=False):
             _render_candidate_grid(watch)
 
+    # 回撤观察道（超涨，默认不自动入队）
+    if pullback:
+        st.subheader("⏳ 回撤观察")
+        st.caption("近5日涨幅偏高，默认不入深分析队列；等回撤后再分析/触发入场。")
+        with st.expander(f"展开 {len(pullback)} 只回撤观察", expanded=False):
+            _render_candidate_grid(pullback)
+
     # 其他
     if other:
         with st.expander(f"待观察 ({len(other)} 只)", expanded=False):
@@ -460,9 +481,9 @@ def render_scan_results(
     with col2:
         total = len(strong_buy) + len(buy) + len(watch)
         st.caption(
-            f"共 {len(candidates)} 只候选，其中 {total} 只有明确推荐信号；"
+            f"共 {len(candidates)} 只候选（可分析 {total} / 回撤观察 {len(pullback)}）；"
             f"已回填操作建议 {analyzed} 只。"
-            "点击「全部入分析队列」自动排队进行深度多 Agent 分析。"
+            "「全部入分析队列」默认只入未超涨的 analyze 道。"
         )
 
 

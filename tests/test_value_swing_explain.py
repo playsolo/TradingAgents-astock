@@ -60,7 +60,7 @@ def test_l2_factor_hits_accepts_dict_candidate():
     hit_labels = [h["label"] for h in hits if h["hit"]]
     assert "站上MA20" in hit_labels
     assert "接近年线" in hit_labels
-    assert "概念活跃" in hit_labels
+    assert any("概念活跃" in label for label in hit_labels)
     assert "北向" not in "".join(hit_labels) or all(
         not h["hit"] for h in hits if h["key"] == "northbound"
     )

@@ -57,6 +57,9 @@ def test_growth_result_dict_shape():
     assert d["candidates"][0]["np_ttm_yoy"] == 120.0
     assert d["candidates"][0]["track"] == "profit"
     assert "why" in d["candidates"][0]
+    assert "lane" in d["candidates"][0]
+    assert "overextend_delta" in d["candidates"][0]
+    assert "ret_5d" in d["candidates"][0]
     assert d["rules"]["strategy"] == STRATEGY_GROWTH_ACCEL
 
 

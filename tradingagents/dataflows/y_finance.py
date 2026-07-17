@@ -66,7 +66,17 @@ def get_YFin_data_online(
     header += f"# Total records: {len(data)}\n"
     header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
 
-    return header + csv_string
+    body = header + csv_string
+    # Regular-session bars omit pre/post prints — attach live quote when available.
+    try:
+        from .us_session_quote import format_us_session_quote_block
+
+        quote_block = format_us_session_quote_block(symbol)
+        if quote_block:
+            body = f"{body.rstrip()}\n\n{quote_block}\n"
+    except Exception:
+        pass
+    return body
 
 def get_stock_stats_indicators_window(
     symbol: Annotated[str, "ticker symbol of the company"],
@@ -283,6 +293,13 @@ def get_fundamentals(
             ("Sector", info.get("sector")),
             ("Industry", info.get("industry")),
             ("Market Cap", info.get("marketCap")),
+            ("Market State", info.get("marketState")),
+            ("Regular Market Price", info.get("regularMarketPrice")),
+            ("Previous Close", info.get("regularMarketPreviousClose")),
+            ("Post Market Price", info.get("postMarketPrice")),
+            ("Post Market Change %", info.get("postMarketChangePercent")),
+            ("Pre Market Price", info.get("preMarketPrice")),
+            ("Pre Market Change %", info.get("preMarketChangePercent")),
             ("PE Ratio (TTM)", info.get("trailingPE")),
             ("Forward PE", info.get("forwardPE")),
             ("PEG Ratio", info.get("pegRatio")),

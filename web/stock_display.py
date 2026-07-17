@@ -180,6 +180,142 @@ def _is_exchange_or_market_label(value: str) -> bool:
     return False
 
 
+# Report / valuation jargon that must never be treated as an issuer name.
+# Includes common A-share and US fundamentals phrasing (静态市盈率、稀释EPS…).
+_NON_NAME_MARKERS: tuple[str, ...] = (
+    "技术面",
+    "技术分析",
+    "市场情绪",
+    "新闻舆情",
+    "基本面",
+    "政策分析",
+    "游资追踪",
+    "风险评估",
+    "投资建议",
+    "交易决策",
+    "最终决策",
+    "分析报告",
+    "报告",
+    "当前",
+    "最新",
+    "走势",
+    "偏弱",
+    "偏强",
+    "上涨",
+    "下跌",
+    "行业",
+    "评级",
+    "报收",
+    "计价",
+    "汇率",
+    "情绪",
+    "差距",
+    "压力",
+    "指标",
+    "相对",
+    "强弱",
+    "低配",
+    "高配",
+    "构成",
+    "影响",
+    "美元",
+    "倍",
+    # Valuation / accounting fragments often glued after ticker in reports
+    "静态",
+    "动态",
+    "年化",
+    "年华",
+    "稀释",
+    "摊薄",
+    "市盈",
+    "市净",
+    "估值",
+    "换手",
+    "涨停",
+    "跌停",
+    "每股",
+    "同比",
+    "环比",
+    "毛利",
+    "净利",
+    "营收",
+    "利润",
+    "现金流",
+    "资产负债",
+    "净资产",
+    "总市值",
+    "流通",
+    "主力",
+    "净流入",
+    "净流出",
+    "开盘",
+    "收盘",
+    "成交",
+    "买入",
+    "卖出",
+    "持有",
+    "加仓",
+    "减仓",
+    "止损",
+    "止盈",
+    # Capital-return / dividend prose often glued after ticker (e.g. "ISRG 不派发股息")
+    "股息",
+    "派发",
+    "不派发",
+    "分红",
+    "分红率",
+    "股票回购",
+    "回购股份",
+    "回报股东",
+)
+
+_BANNED_EN_NAME_TOKENS: frozenset[str] = frozenset(
+    {
+        "LIMITED",
+        "LTD",
+        "INC",
+        "CORP",
+        "GROUP",
+        "HOLDING",
+        "HOLDINGS",
+        "ADR",
+        "THE",
+        "AND",
+        "OF",
+        "CLASS",
+        "STOCK",
+        "SHARE",
+        "EQUITY",
+        "COMPANY",
+        "DILUTED",
+        "DILUTION",
+        "STATIC",
+        "DYNAMIC",
+        "ANNUALIZED",
+        "REVENUE",
+        "EARNINGS",
+        "PROFIT",
+        "MARGIN",
+        "VALUATION",
+        "FORWARD",
+        "TRAILING",
+        "BUY",
+        "SELL",
+        "HOLD",
+        "EPS",
+        "PE",
+        "PB",
+        "ROE",
+        "ROA",
+        "TTM",
+        "YOY",
+        "QOQ",
+        "GAAP",
+        "NON-GAAP",
+    }
+)
+
+
 def _is_plausible_stock_name(value: str, code: str) -> bool:
     text = _clean_stock_name(value)
     if not text or text.upper() == str(code or "").strip().upper():
@@ -190,71 +326,14 @@ def _is_plausible_stock_name(value: str, code: str) -> bool:
         return False
     # Avoid treating report headings / price action phrases as a stock name
     # when older states only contain the plain code in stock_input.
-    non_name_markers = (
-        "技术面",
-        "技术分析",
-        "市场情绪",
-        "新闻舆情",
-        "基本面",
-        "政策分析",
-        "游资追踪",
-        "风险评估",
-        "投资建议",
-        "交易决策",
-        "最终决策",
-        "分析报告",
-        "报告",
-        "当前",
-        "最新",
-        "走势",
-        "偏弱",
-        "偏强",
-        "上涨",
-        "下跌",
-        "行业",
-        "评级",
-        "报收",
-        "计价",
-        "汇率",
-        "情绪",
-        "差距",
-        "压力",
-        "指标",
-        "相对",
-        "强弱",
-        "低配",
-        "高配",
-        "构成",
-        "影响",
-        "美元",
-        "倍",
-    )
-    if any(marker in text for marker in non_name_markers):
+    if any(marker in text for marker in _NON_NAME_MARKERS):
         return False
     # Numeric / ratio fragments: "7.5倍PE的差距"
     if re.search(r"\d", text) and not text.lstrip().startswith(("*", "ST", "*ST")):
         return False
 
     if not _has_chinese(text):
-        banned_en = {
-            "LIMITED",
-            "LTD",
-            "INC",
-            "CORP",
-            "GROUP",
-            "HOLDING",
-            "HOLDINGS",
-            "ADR",
-            "THE",
-            "AND",
-            "OF",
-            "CLASS",
-            "STOCK",
-            "SHARE",
-            "EQUITY",
-            "COMPANY",
-        }
-        if text.upper() in banned_en:
+        if text.upper() in _BANNED_EN_NAME_TOKENS:
             return False
         # Prefer multi-word issuer names; reject tiny generic tokens.
         words = [w for w in re.split(r"\s+", text) if w]
@@ -372,13 +451,14 @@ def resolve_stock_name(ticker: str) -> str | None:
         return None
 
     cached = _NAME_CACHE.get(code)
-    if cached:
+    if cached and _is_cache_worthy_name(cached, code):
         return cached
 
     if _is_a_share_code(code):
         name = _tencent_name(code) or _mootdx_name_if_cached(code)
-        if name:
+        if name and _is_cache_worthy_name(name, code):
             _NAME_CACHE.set(code, name)
+            return name
         return name or None
 
     if _is_us_style_ticker(code):
@@ -394,10 +474,27 @@ def resolve_stock_name(ticker: str) -> str | None:
     return None
 
 
+def _is_cache_worthy_name(name: str, code: str) -> bool:
+    """Reject finance-jargon cache pollution; allow English issuer names from yfinance."""
+    text = _clean_stock_name(name)
+    if not text or _is_exchange_or_market_label(text):
+        return False
+    if any(marker in text for marker in _NON_NAME_MARKERS):
+        return False
+    if not _has_chinese(text):
+        return _looks_like_stock_name(text) and text.upper() not in _BANNED_EN_NAME_TOKENS
+    # Trusted market short names may be 2 chars; only block known jargon markers above.
+    return _looks_like_stock_name(text)
+
+
 def remember_resolved_name(code: str, raw_name: str) -> None:
     """Backfill local cache after a slow resolve so next click is instant."""
     clean = _clean_stock_name(raw_name)
     if not clean or _is_exchange_or_market_label(clean):
+        return
+    # Trusted user/LLM input may be a 2-char A-share short name; allow those
+    # when they look like a name and are not finance jargon.
+    if any(marker in clean for marker in _NON_NAME_MARKERS):
         return
     if not (_looks_like_stock_name(clean) or _has_chinese(clean)):
         return
@@ -463,7 +560,9 @@ def _extract_stock_name_from_text(code: str, text: str) -> str | None:
                 english_hits.append(name)
     if chinese_hits:
         # Prefer compact company names (e.g. 名创优品) over longer prose fragments.
-        chinese_hits.sort(key=lambda n: (len(re.sub(r"[\s　]+", "", n)), n))
+        # Do not prefer ultra-short hits — 「静态」「稀释」 are filtered by markers,
+        # but length-asc sort previously let them beat real names when both slipped through.
+        chinese_hits.sort(key=lambda n: (len(re.sub(r"[\s　]+", "", n)) < 3, len(re.sub(r"[\s　]+", "", n)), n))
         return chinese_hits[0]
     return english_hits[0] if english_hits else None
 
@@ -511,7 +610,12 @@ def _extract_stock_name_from_state(code: str, final_state: dict) -> str | None:
 
 
 def _prefer_display_name(*candidates: str | None) -> str | None:
-    """Prefer a compact Chinese company name when multiple candidates exist."""
+    """Pick a display name from candidates in call order (resolved before extracted).
+
+    Chinese company-style names still beat English issuer names so US tickers can
+    show a CN alias from fundamentals — but never re-sort by shortness (that let
+    「静态」「稀释」 override 「紫金矿业」 / 「Micron Technology」).
+    """
     chinese_company: list[str] = []
     chinese_other: list[str] = []
     english: list[str] = []
@@ -519,25 +623,45 @@ def _prefer_display_name(*candidates: str | None) -> str | None:
         name = _clean_stock_name(raw or "")
         if not name or not _looks_like_stock_name(name) or _is_exchange_or_market_label(name):
             continue
-        if not _is_plausible_stock_name(name, ""):
-            # still allow already-resolved English issuer names from yfinance
-            if not _has_chinese(name) and _looks_like_stock_name(name):
-                english.append(name)
-            continue
         if _has_chinese(name):
+            if not _is_plausible_stock_name(name, ""):
+                continue
             compact = re.sub(r"[\s　]+", "", name)
             if re.fullmatch(r"[*ST]*[\u4e00-\u9fff]{2,8}", compact):
                 chinese_company.append(name)
             else:
                 chinese_other.append(name)
-        else:
+            continue
+        # English: allow yfinance issuer names even when single-token checks are strict
+        if _is_plausible_stock_name(name, "") or _looks_like_stock_name(name):
+            if name.upper() in _BANNED_EN_NAME_TOKENS:
+                continue
             english.append(name)
     if chinese_company:
-        chinese_company.sort(key=lambda n: len(re.sub(r"[\s　]+", "", n)))
         return chinese_company[0]
     if chinese_other:
         return chinese_other[0]
     return english[0] if english else None
+
+
+def _should_cache_display_name(code: str, name: str, resolved: str | None) -> bool:
+    """Only persist trusted resolve hits or a CN upgrade of an English resolve."""
+    if not name or name == code:
+        return False
+    if resolved and name == resolved:
+        return _has_chinese(name) or _is_us_style_ticker(code)
+    # Allow caching CN alias that upgraded an English yfinance/cache name.
+    if (
+        resolved
+        and not _has_chinese(resolved)
+        and _has_chinese(name)
+        and _is_plausible_stock_name(name, code)
+    ):
+        return True
+    # No trusted resolve yet — only cache solid CN / US issuer names.
+    if not resolved and (_has_chinese(name) or _is_us_style_ticker(code)):
+        return _is_plausible_stock_name(name, code)
+    return False
 
 
 def stock_display_label(ticker: str, final_state: dict | None = None) -> str:
@@ -549,7 +673,7 @@ def stock_display_label(ticker: str, final_state: dict | None = None) -> str:
     name = _prefer_display_name(resolved, extracted)
 
     if name and name != code:
-        if _has_chinese(name) or _is_us_style_ticker(code):
+        if _should_cache_display_name(code, name, resolved):
             _NAME_CACHE.set(code, name)
         return f"{code} {name}"
     return code

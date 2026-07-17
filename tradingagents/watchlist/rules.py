@@ -80,6 +80,19 @@ def detect_changes(
             )
         )
 
+    if baseline.entry_price is not None and snapshot.price > 0 and snapshot.price <= baseline.entry_price:
+        alerts.append(
+            Alert(
+                kind="entry",
+                title="触及入场价",
+                detail=(
+                    f"现价 {snapshot.price:g} ≤ 入场价 {baseline.entry_price:g}，"
+                    "可复核是否执行买入"
+                ),
+                observed_at=now,
+            )
+        )
+
     known = {r.strip() for r in baseline.major_risks if r and r.strip()}
     fresh = [r.strip() for r in new_major_risks if r and r.strip() and r.strip() not in known]
     if fresh:

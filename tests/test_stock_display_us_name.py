@@ -115,3 +115,48 @@ def test_rejects_prose_parentheticals_and_english_suffixes(monkeypatch):
     assert stock_display.stock_display_label("MNSO", state) == "MNSO 名创优品"
     assert not stock_display._is_plausible_stock_name("以美元计价", "MNSO")
     assert not stock_display._is_plausible_stock_name("Limited", "MNSO")
+
+
+def test_us_english_resolve_beats_diluted_eps_jargon(monkeypatch):
+    monkeypatch.setattr(
+        stock_display, "resolve_stock_name", lambda ticker: "Micron Technology"
+    )
+    state = {
+        "fundamentals_report": "MU 稀释 每股收益同比改善，Micron Technology 库存去化",
+    }
+    assert stock_display._extract_stock_name_from_text(
+        "MU", "MU 稀释 每股收益同比改善"
+    ) is None
+    assert stock_display.stock_display_label("MU", state) == "MU Micron Technology"
+
+
+def test_us_english_resolve_beats_dividend_prose_as_fake_name(monkeypatch):
+    """Hero regression: 'ISRG 不派发股息' must not become the display name."""
+    monkeypatch.setattr(
+        stock_display, "resolve_stock_name", lambda ticker: "Intuitive Surgical"
+    )
+    prose = "ISRG 不派发股息，但通过积极的股票回购来回报股东。"
+    state = {"fundamentals_report": prose, "company_of_interest": "ISRG"}
+    assert stock_display._extract_stock_name_from_text("ISRG", prose) is None
+    assert not stock_display._is_plausible_stock_name("不派发股息", "ISRG")
+    assert stock_display.stock_display_label("ISRG", state) == "ISRG Intuitive Surgical"
+
+
+def test_resolve_skips_polluted_jargon_cache(monkeypatch, tmp_path):
+    cache = stock_display.StockNameCache(tmp_path / "names.json")
+    cache.set("601899", "静态")
+    cache.set("MU", "稀释")
+    monkeypatch.setattr(stock_display, "_NAME_CACHE", cache)
+    stock_display.resolve_stock_name.cache_clear()
+    stock_display._tencent_name.cache_clear()
+    stock_display._yfinance_name.cache_clear()
+
+    monkeypatch.setattr(stock_display, "_tencent_name", lambda code: "紫金矿业")
+    monkeypatch.setattr(stock_display, "_mootdx_name_if_cached", lambda code: None)
+    monkeypatch.setattr(stock_display, "_yfinance_name", lambda code: "Micron Technology")
+    monkeypatch.setattr(stock_display, "_US_CN_ALIASES", {})
+
+    assert stock_display.resolve_stock_name("601899") == "紫金矿业"
+    assert cache.get("601899") == "紫金矿业"
+    assert stock_display.resolve_stock_name("MU") == "Micron Technology"
+    assert cache.get("MU") == "Micron Technology"

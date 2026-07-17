@@ -151,3 +151,64 @@ def resolve_log_path(ticker: str, trade_date: str) -> str:
         / f"full_states_log_{trade_date}.json"
     )
     return str(path) if path.exists() else ""
+
+
+# 扫描深分析后：Hold/Underweight 且带入场价 → 自动进观察池（状态机：观察→触及入场）
+_AUTO_WATCH_STANCES = frozenset({"Hold", "Underweight"})
+
+
+def maybe_auto_watch_from_scan_analysis(
+    state: dict[str, Any],
+    *,
+    ticker: str,
+    trade_date: str,
+    market: str = "CN",
+    source: str = "manual",
+    store: WatchlistStore | None = None,
+    log_path: str = "",
+) -> WatchItem | None:
+    """扫描来源的分析若结论为「等回撤再买」，自动加入/刷新观察池。
+
+    仅 ``source=scan`` 且立场为 Hold/Underweight、且解析到入场价时生效。
+    Buy/Overweight 视为可立即执行，不自动进池；Sell 无入场价则跳过。
+    """
+    if str(source or "").strip().lower() != "scan":
+        return None
+    if not state:
+        return None
+    store = store or default_store()
+    resolved = _infer_market(ticker, market)
+    price = _current_price(ticker, market=resolved)
+    path = log_path or resolve_log_path(ticker, trade_date)
+    baseline = extract_baseline(
+        state,
+        ticker=ticker,
+        trade_date=trade_date,
+        price=price,
+        log_path=path,
+        market=resolved,
+    )
+    if baseline.stance not in _AUTO_WATCH_STANCES:
+        return None
+    if baseline.entry_price is None:
+        return None
+    existing = store.get(ticker)
+    if existing is not None:
+        return refresh_from_analysis(
+            state,
+            ticker=ticker,
+            trade_date=trade_date,
+            log_path=path,
+            store=store,
+            price=price,
+            market=resolved,
+        )
+    item = WatchItem(baseline=baseline, enabled=True)
+    store.add(item)
+    logger.info(
+        "auto-watch from scan: %s stance=%s entry=%s",
+        ticker,
+        baseline.stance,
+        baseline.entry_price,
+    )
+    return item

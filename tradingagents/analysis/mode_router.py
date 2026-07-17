@@ -32,7 +32,7 @@ MODE_AUTO = "auto"
 SOURCE_MANUAL = "manual"
 SOURCE_SCAN = "scan"
 
-HIGH_PRIORITY_ALERT_KINDS = frozenset({"stop_loss", "stance", "risk"})
+HIGH_PRIORITY_ALERT_KINDS = frozenset({"stop_loss", "stance", "risk", "entry"})
 
 
 @dataclass(frozen=True)

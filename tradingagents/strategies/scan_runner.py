@@ -119,6 +119,11 @@ def result_dict_from_scan(result: Any, *, strategy: str = STRATEGY_VALUE_SWING) 
                     ),
                     "exp_analysts": c.exp_analysts,
                     "exp_low_coverage": c.exp_low_coverage,
+                    "ret_5d": (
+                        round(c.ret_5d, 4) if getattr(c, "ret_5d", None) is not None else None
+                    ),
+                    "overextend_delta": getattr(c, "overextend_delta", 0),
+                    "lane": getattr(c, "lane", "analyze"),
                     "factor_hits": l2_factor_hits(c),
                     "why": why_selected_line(c),
                 }
@@ -170,6 +175,8 @@ def result_dict_from_scan(result: Any, *, strategy: str = STRATEGY_VALUE_SWING) 
                 "exp_fwd_pe": round(c.exp_fwd_pe, 1) if c.exp_fwd_pe is not None else None,
                 "exp_analysts": c.exp_analysts,
                 "exp_low_coverage": c.exp_low_coverage,
+                "overextend_delta": getattr(c, "overextend_delta", 0),
+                "lane": getattr(c, "lane", "analyze"),
                 "factor_hits": l2_factor_hits(c),
                 "why": why_selected_line(c),
             }
@@ -193,10 +200,13 @@ def candidates_to_analysis_jobs(
     *,
     trade_date: str,
 ):
+    from tradingagents.strategies.value_swing import is_analyze_lane
     from web.analysis_queue import AnalysisJob
 
     jobs = []
     for c in candidates:
+        if not is_analyze_lane(c):
+            continue
         code = str(c.get("code") or "").strip()
         if not code:
             continue

@@ -69,6 +69,12 @@ _TENCENT_BATCH_SIZE = 800
 _L1B_BATCH_SIZE = 30                    # L1b 验证的候选上限（防耗时过长）
 # 近 5 日涨幅 ≥ 该阈值时，个股新闻不再计催化剂分（利好可能已兑现）
 _NEWS_RET_5D_MAX: float = 0.10
+# 超涨门控：与深度分析「利好兑现」对齐——动量题材不计分，并扣信号分
+_OVEREXTEND_SOFT: float = 0.08          # ≥8%：题材/概念不计分，信号 −1 → 分道 watch
+_OVEREXTEND_HARD: float = 0.15          # ≥15%：信号再 −1（合计 −2）
+
+LANE_ANALYZE = "analyze"                # 可优先深分析（未明显超涨）
+LANE_WATCH = "watch"                    # 回撤观察（超涨，默认不自动入队）
 
 # L2 因子口径：active=当前生产路径会采集并计入；dormant=逻辑仍评分但暂未拉数。
 # （UI / 快照用公开结构；改名时同步 tests/test_value_swing_explain.py）
@@ -79,8 +85,8 @@ L2_FACTOR_SPECS: tuple[tuple[str, str, bool], ...] = (
     ("above_ma20", "站上MA20", True),
     ("near_ma250", "接近年线", True),
     ("news_found", "近3日新闻且涨幅/预期未透支", True),
-    ("hot_topic_match", "热点题材", True),
-    ("concept_active", "概念活跃", True),
+    ("hot_topic_match", "热点题材且未超涨", True),
+    ("concept_active", "概念活跃且未超涨", True),
     ("exp_hit", "远期估值更便宜", True),
 )
 
@@ -120,8 +126,12 @@ def selection_rules_snapshot() -> dict[str, Any]:
             "note": (
                 "每命中一项 +1；个股新闻仅在近5日涨幅<"
                 f"{_NEWS_RET_5D_MAX * 100:.0f}% 且一致预期未透支时计分；"
+                f"热点题材/概念仅在近5日涨幅<{_OVEREXTEND_SOFT * 100:.0f}% 时计分；"
+                f"近5日涨幅≥{_OVEREXTEND_SOFT * 100:.0f}% 扣1分、"
+                f"≥{_OVEREXTEND_HARD * 100:.0f}% 扣2分，并标为回撤观察道(watch)；"
                 "一致预期闸门：覆盖≥3 家时 "
-                "FwdPE 相对 TTM 更便宜 +1 / 暗示盈利下滑 −1；取信号分最高的 top N"
+                "FwdPE 相对 TTM 更便宜 +1 / 暗示盈利下滑 −1；取信号分最高的 top N；"
+                "自动入队默认仅 analyze 道"
             ),
         },
     }
@@ -131,6 +141,43 @@ def _cand_get(candidate: StockInfo | dict[str, Any], key: str, default: Any = No
     if isinstance(candidate, dict):
         return candidate.get(key, default)
     return getattr(candidate, key, default)
+
+
+def _parse_ret_5d(candidate: StockInfo | dict[str, Any]) -> float | None:
+    ret = _cand_get(candidate, "ret_5d", None)
+    if ret is None:
+        return None
+    try:
+        return float(ret)
+    except (TypeError, ValueError):
+        return None
+
+
+def overextend_score_delta(ret_5d: float | None) -> int:
+    """超涨扣分：软阈值 −1，硬阈值再 −1（合计 −2）。"""
+    if ret_5d is None:
+        return 0
+    if ret_5d >= _OVEREXTEND_HARD:
+        return -2
+    if ret_5d >= _OVEREXTEND_SOFT:
+        return -1
+    return 0
+
+
+def assign_scan_lane(candidate: StockInfo | dict[str, Any]) -> str:
+    """未明显超涨 → analyze；否则 → watch（回撤观察，默认不自动深分析）。"""
+    ret = _parse_ret_5d(candidate)
+    if ret is not None and ret >= _OVEREXTEND_SOFT:
+        return LANE_WATCH
+    return LANE_ANALYZE
+
+
+def is_analyze_lane(candidate: StockInfo | dict[str, Any]) -> bool:
+    """入队过滤：无 lane 字段时视为 analyze（兼容成长加速等旧载荷）。"""
+    lane = _cand_get(candidate, "lane", None)
+    if lane is None or lane == "":
+        return True
+    return str(lane).strip().lower() == LANE_ANALYZE
 
 
 def _l2_factor_hit(key: str, candidate: StockInfo | dict[str, Any]) -> bool:
@@ -147,6 +194,8 @@ def _l2_factor_hit(key: str, candidate: StockInfo | dict[str, Any]) -> bool:
         return bool(_cand_get(candidate, "exp_hit", False))
     if key == "news_found":
         return news_catalyst_hit(candidate)
+    if key in ("hot_topic_match", "concept_active"):
+        return momentum_catalyst_hit(candidate, key=key)
     return bool(_cand_get(candidate, key, False))
 
 
@@ -160,14 +209,33 @@ def news_catalyst_hit(candidate: StockInfo | dict[str, Any]) -> bool:
         delta = 0
     if delta < 0:
         return False
-    ret = _cand_get(candidate, "ret_5d", None)
-    if ret is not None:
-        try:
-            if float(ret) >= _NEWS_RET_5D_MAX:
-                return False
-        except (TypeError, ValueError):
-            pass
+    ret = _parse_ret_5d(candidate)
+    if ret is not None and ret >= _NEWS_RET_5D_MAX:
+        return False
     return True
+
+
+def momentum_catalyst_hit(
+    candidate: StockInfo | dict[str, Any],
+    *,
+    key: str | None = None,
+) -> bool:
+    """热点题材/概念：仅在未软超涨时计分（与兑现门控对齐）。
+
+    ``key`` 为 ``hot_topic_match`` / ``concept_active`` 时检查对应字段；
+    省略时任一命中即可（测试/汇总用）。
+    """
+    ret = _parse_ret_5d(candidate)
+    if ret is not None and ret >= _OVEREXTEND_SOFT:
+        return False
+    if key == "hot_topic_match":
+        return bool(_cand_get(candidate, "hot_topic_match", False))
+    if key == "concept_active":
+        return bool(_cand_get(candidate, "concept_active", False))
+    return bool(
+        _cand_get(candidate, "hot_topic_match", False)
+        or _cand_get(candidate, "concept_active", False)
+    )
 
 
 def l2_factor_hits(candidate: StockInfo | dict[str, Any]) -> list[dict[str, Any]]:
@@ -184,7 +252,7 @@ def l2_factor_hits(candidate: StockInfo | dict[str, Any]) -> list[dict[str, Any]
 
 
 def why_selected_line(candidate: StockInfo | dict[str, Any]) -> str:
-    """入选原因一行：仅列出当前生效且命中的因子；预期减分单独标注。"""
+    """入选原因一行：仅列出当前生效且命中的因子；预期/超涨减分单独标注。"""
     hits = [
         h["label"]
         for h in l2_factor_hits(candidate)
@@ -197,6 +265,15 @@ def why_selected_line(candidate: StockInfo | dict[str, Any]) -> str:
     if delta < 0:
         label = str(_cand_get(candidate, "exp_label", "") or "一致预期偏弱")
         hits.append(label)
+    try:
+        ox = int(_cand_get(candidate, "overextend_delta", 0) or 0)
+    except (TypeError, ValueError):
+        ox = 0
+    if ox < 0:
+        hits.append(f"近5日超涨({ox})")
+    lane = str(_cand_get(candidate, "lane", "") or "").strip().lower()
+    if lane == LANE_WATCH:
+        hits.append("回撤观察道")
     return " · ".join(hits) if hits else "无生效催化剂命中（低分进池或仅靠同分排序）"
 
 
@@ -297,7 +374,7 @@ class StockInfo:
     near_ma250: bool = False
     # L2 消息催化剂（新增）
     news_found: bool = False          # 近期是否有重大个股新闻
-    ret_5d: float | None = None       # 近 5 日涨跌幅（新闻计分用）
+    ret_5d: float | None = None       # 近 5 日涨跌幅（超涨门控 / 新闻计分）
     hot_topic_match: bool = False     # 是否属于热点题材
     concept_active: bool = False      # 概念板块近期活跃
     # L2 一致预期质量闸门
@@ -308,6 +385,8 @@ class StockInfo:
     exp_fwd_pe: float | None = None
     exp_implied_cagr: float | None = None
     exp_analysts: int = 0
+    overextend_delta: int = 0         # 超涨扣分（0 / −1 / −2）
+    lane: str = LANE_ANALYZE          # analyze | watch
     signal_score: int = 0
     exclude_reason: str = ""
 
@@ -806,7 +885,7 @@ def _check_concept_catalyst(code: str, global_news: list[str], hot_stocks: dict[
 
 
 def run_l2_filter_impl(stocks: list[StockInfo], max_candidates: int = _MAX_CANDIDATES) -> list[StockInfo]:
-    """L2 纯逻辑评分。"""
+    """L2 纯逻辑评分（含超涨扣分与 analyze/watch 分道）。"""
     scored: list[StockInfo] = []
     for info in stocks:
         s = 0
@@ -820,15 +899,19 @@ def run_l2_filter_impl(stocks: list[StockInfo], max_candidates: int = _MAX_CANDI
             s += 1
         if info.near_ma250:
             s += 1
-        # 消息催化剂
+        # 消息催化剂（新闻 / 题材 / 概念均有兑现门控）
         if news_catalyst_hit(info):
             s += 1
-        if info.hot_topic_match:
+        if momentum_catalyst_hit(info, key="hot_topic_match"):
             s += 1
-        if info.concept_active:
+        if momentum_catalyst_hit(info, key="concept_active"):
             s += 1
         # 一致预期质量闸门（可为 −1）
         s += int(info.exp_score_delta or 0)
+        # 超涨扣分
+        info.overextend_delta = overextend_score_delta(info.ret_5d)
+        s += int(info.overextend_delta)
+        info.lane = assign_scan_lane(info)
         info.signal_score = max(0, s)
         scored.append(info)
     scored.sort(key=lambda x: x.signal_score, reverse=True)
@@ -897,10 +980,9 @@ def run_l2_filter(
         info.northbound_net_3d = northbound_val
         info.above_ma20, info.near_ma250 = _safe_call(_check_ma_support, info.code, default=(False, False))
 
-        # 消息催化剂
+        # 近5日涨幅：超涨门控与新闻计分共用（始终拉取）
+        info.ret_5d = _safe_call(_calc_ret_nd, info.code, default=None)
         info.news_found = _safe_call(_check_news_catalyst, info.code, default=False)
-        if info.news_found:
-            info.ret_5d = _safe_call(_calc_ret_nd, info.code, default=None)
         info.hot_topic_match = _check_hot_topic_match(info.code, hot_stocks)
         info.concept_active = _check_concept_catalyst(info.code, global_news, hot_stocks)
 
@@ -1029,4 +1111,6 @@ def build_scan_summary_row(info: StockInfo, recommendation: str) -> dict[str, An
         "exp_score_delta": info.exp_score_delta,
         "exp_fwd_pe": round(info.exp_fwd_pe, 1) if info.exp_fwd_pe is not None else None,
         "exp_analysts": info.exp_analysts,
+        "overextend_delta": info.overextend_delta,
+        "lane": info.lane,
     }

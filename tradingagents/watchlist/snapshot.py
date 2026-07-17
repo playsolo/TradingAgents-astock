@@ -84,23 +84,43 @@ def _fetch_us_snapshot(ticker: str, *, max_headlines: int = 8) -> MarketSnapshot
     pe_ttm = None
 
     try:
+        from tradingagents.dataflows.us_session_quote import (
+            fetch_us_session_quote,
+            last_tradable_price,
+        )
+
+        quote = fetch_us_session_quote(symbol)
+        last, _src = last_tradable_price(quote)
+        regular = quote.get("regular_market_price")
+        previous = quote.get("previous_close")
+        if last is not None:
+            price = float(last)
+        if previous and float(previous) > 0 and price > 0:
+            change_pct = (price - float(previous)) / float(previous) * 100.0
+        elif regular and previous and float(previous) > 0:
+            change_pct = (float(regular) - float(previous)) / float(previous) * 100.0
+        name = str(quote.get("short_name") or symbol)
+
         stock = yf.Ticker(symbol)
-        hist = yf_retry(lambda: stock.history(period="5d"))
-        if hist is not None and not hist.empty and "Close" in hist.columns:
-            closes = hist["Close"].dropna()
-            if len(closes) >= 1:
-                price = float(closes.iloc[-1])
-            if len(closes) >= 2 and float(closes.iloc[-2]) > 0:
-                prev = float(closes.iloc[-2])
-                change_pct = (price - prev) / prev * 100.0
         try:
             info = yf_retry(lambda: stock.info) or {}
-            name = str(info.get("shortName") or info.get("longName") or symbol)
+            name = str(info.get("shortName") or info.get("longName") or name)
             trailing = info.get("trailingPE")
             if trailing is not None:
                 pe_ttm = float(trailing)
         except Exception:
             pass
+
+        # Fallback to recent daily closes when live quote is unavailable.
+        if price <= 0:
+            hist = yf_retry(lambda: stock.history(period="5d"))
+            if hist is not None and not hist.empty and "Close" in hist.columns:
+                closes = hist["Close"].dropna()
+                if len(closes) >= 1:
+                    price = float(closes.iloc[-1])
+                if len(closes) >= 2 and float(closes.iloc[-2]) > 0:
+                    prev = float(closes.iloc[-2])
+                    change_pct = (price - prev) / prev * 100.0
     except Exception as e:
         logger.warning("watchlist US quote failed for %s: %s", symbol, e)
 

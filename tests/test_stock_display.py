@@ -96,6 +96,31 @@ def test_stock_display_label_falls_back_to_code(monkeypatch):
     assert stock_display.stock_display_label("600370") == "600370"
 
 
+def test_rejects_valuation_jargon_as_stock_name():
+    for junk in ("静态", "动态", "年化", "年华", "稀释", "摊薄", "静态市盈率约"):
+        assert not stock_display._is_plausible_stock_name(junk, "601899")
+
+
+def test_a_share_resolved_name_beats_jargon_extract(monkeypatch):
+    monkeypatch.setattr(stock_display, "resolve_stock_name", lambda ticker: "紫金矿业")
+
+    state = {"fundamentals_report": "601899 静态 市盈率约 15 倍，紫金矿业现金流稳健"}
+    assert stock_display.stock_display_label("601899", state) == "601899 紫金矿业"
+    assert stock_display._extract_stock_name_from_text(
+        "601899", "601899 静态 市盈率约 15 倍"
+    ) is None
+
+
+def test_prefer_display_name_keeps_resolved_over_shorter_extract():
+    assert (
+        stock_display._prefer_display_name("紫金矿业", "静态") == "紫金矿业"
+    )
+    assert (
+        stock_display._prefer_display_name("Micron Technology", "稀释")
+        == "Micron Technology"
+    )
+
+
 def test_normalize_stock_mentions_adds_name_without_duplicates(monkeypatch):
     monkeypatch.setattr(stock_display, "resolve_stock_name", lambda ticker: "*ST三房")
 

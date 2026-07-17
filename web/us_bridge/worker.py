@@ -253,6 +253,31 @@ def main() -> int:
                 "Latest SEC filings (EDGAR) for this run — prioritize over stale news:\n"
                 f"{filing_block}"
             ).strip()
+
+        quote_block = ""
+        try:
+            from us_quote import format_us_session_quote_block
+
+            quote_block = format_us_session_quote_block(ticker) or ""
+            if quote_block:
+                _emit("warn", message="已注入美股盘前/盘后最新价到分析上下文")
+        except Exception as exc:
+            _emit("warn", message=f"美股盘前/盘后报价跳过: {exc}")
+            quote_block = ""
+        if quote_block:
+            instrument_context = f"{instrument_context}\n\n{quote_block}".strip()
+            # Survive message clears between stages; PM also reads past_context.
+            quote_past = (
+                "=== LIVE US SESSION QUOTE (injected) ===\n"
+                f"{quote_block}\n"
+                "=== END SESSION QUOTE ==="
+            )
+            past_context = (
+                f"{quote_past}\n\n{past_context}".strip()
+                if past_context
+                else quote_past
+            )
+
         init_state = graph.propagator.create_initial_state(
             ticker,
             trade_date,
@@ -260,14 +285,20 @@ def main() -> int:
             past_context=past_context,
             instrument_context=instrument_context,
         )
+        bootstrap_parts: list[str] = [ticker]
         if filing_block:
-            # Ensure the first human turn also carries filing text (analysts read messages).
-            init_state["messages"] = [
-                (
-                    "human",
-                    f"{ticker}\n\nAnalyze with these latest SEC filings in mind:\n{filing_block}",
-                )
-            ]
+            bootstrap_parts.append(
+                f"Analyze with these latest SEC filings in mind:\n{filing_block}"
+            )
+        if quote_block:
+            bootstrap_parts.append(
+                "Use this live session quote when setting current price / entry levels "
+                "(regular-session OHLCV alone is not enough after hours):\n"
+                f"{quote_block}"
+            )
+        if len(bootstrap_parts) > 1:
+            # Ensure the first human turn also carries filing + session quote.
+            init_state["messages"] = [("human", "\n\n".join(bootstrap_parts))]
         args = graph.propagator.get_graph_args()
 
         merged: dict[str, Any] = {}

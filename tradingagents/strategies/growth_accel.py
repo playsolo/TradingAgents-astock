@@ -24,14 +24,21 @@ from tradingagents.strategies.expectation_gate import (
     score_growth_expectation,
 )
 from tradingagents.strategies.value_swing import (
+    LANE_ANALYZE,
     _MIN_LISTED_MONTHS,
+    _OVEREXTEND_HARD,
+    _OVEREXTEND_SOFT,
     _TENCENT_BATCH_SIZE,
+    _calc_ret_nd,
     _estimate_listed_months,
     _get_all_cn_codes,
     _is_stock_code,
     _is_stock_excluded_by_prefix,
     _load_hot_stocks,
+    _safe_call,
     _tencent_volume_wan,
+    assign_scan_lane,
+    overextend_score_delta,
 )
 
 logger = logging.getLogger(__name__)
@@ -117,6 +124,10 @@ class GrowthStockInfo:
     exp_fwd_pe: float | None = None
     exp_implied_cagr: float | None = None
     exp_analysts: int = 0
+    # 与价值波段对齐的超涨分道
+    ret_5d: float | None = None
+    overextend_delta: int = 0
+    lane: str = LANE_ANALYZE
     signal_score: int = 0
     exclude_reason: str = ""
 
@@ -169,16 +180,21 @@ def selection_rules_snapshot() -> dict[str, Any]:
                 "强增速≥100%",
                 "亏损拐点/收窄",
                 "近季加速(+2)",
-                "成长题材",
+                "成长题材且未超涨",
                 "高流动性",
                 "扣非/OCF质量调整",
                 "一致预期差/透支闸门(±1)",
+                "近5日超涨扣分/分道",
             ],
             "dormant": [],
             "top_n": _MAX_CANDIDATES,
             "note": (
                 "偏进攻：加速+2；主排序信号分→利润TTM增速；不设估值硬顶；"
-                "覆盖≥3 家时：实际≫隐含 +1，预期透支 −1"
+                "覆盖≥3 家时：实际≫隐含 +1，预期透支 −1；"
+                f"成长题材仅在近5日涨幅<{_OVEREXTEND_SOFT * 100:.0f}% 时计分；"
+                f"近5日≥{_OVEREXTEND_SOFT * 100:.0f}% 扣1分、"
+                f"≥{_OVEREXTEND_HARD * 100:.0f}% 扣2分并标 watch；"
+                "自动入队默认仅 analyze 道"
             ),
         },
     }
@@ -349,7 +365,15 @@ def evaluate_growth_track(
     return False, track, "亏损未明显收窄"
 
 
+def _growth_theme_scores(info: GrowthStockInfo) -> bool:
+    """成长题材仅在未软超涨时计分（对齐价值波段动量门控）。"""
+    if not info.growth_theme:
+        return False
+    return overextend_score_delta(info.ret_5d) == 0
+
+
 def compute_growth_signal_score(info: GrowthStockInfo) -> int:
+    """计算信号分，并回写 ``overextend_delta`` / ``lane``（地板为 0）。"""
     s = 0
     if info.track == "profit":
         if info.np_ttm_yoy is not None and info.np_ttm_yoy >= _STRONG_NP_YOY:
@@ -368,7 +392,7 @@ def compute_growth_signal_score(info: GrowthStockInfo) -> int:
     accel = info.profit_accel or info.revenue_accel
     if accel:
         s += _ACCEL_EXTRA_SCORE
-    if info.growth_theme:
+    if _growth_theme_scores(info):
         s += 1
     if info.high_liquidity:
         s += 1
@@ -376,7 +400,10 @@ def compute_growth_signal_score(info: GrowthStockInfo) -> int:
         s -= 1
     s += int(info.ocf_score_delta)
     s += int(info.exp_score_delta or 0)
-    return s
+    info.overextend_delta = overextend_score_delta(info.ret_5d)
+    s += int(info.overextend_delta)
+    info.lane = assign_scan_lane(info)
+    return max(0, s)
 
 
 def why_selected_line(candidate: GrowthStockInfo | dict[str, Any]) -> str:
@@ -400,7 +427,14 @@ def why_selected_line(candidate: GrowthStockInfo | dict[str, Any]) -> str:
         bits.append("由亏转盈")
     if _get("profit_accel") or _get("revenue_accel"):
         bits.append("近季加速")
-    if _get("growth_theme"):
+    # 题材仅在未超涨时展示为命中（与计分一致）
+    theme = bool(_get("growth_theme"))
+    ret = _get("ret_5d")
+    try:
+        ret_f = float(ret) if ret is not None else None
+    except (TypeError, ValueError):
+        ret_f = None
+    if theme and overextend_score_delta(ret_f) == 0:
         bits.append("成长题材")
     if _get("high_liquidity"):
         bits.append("高流动性")
@@ -422,6 +456,17 @@ def why_selected_line(candidate: GrowthStockInfo | dict[str, Any]) -> str:
         bits.append(str(_get("exp_label") or "实际高于一致预期"))
     elif exp_d < 0:
         bits.append(str(_get("exp_label") or "一致预期透支"))
+    try:
+        ox = int(_get("overextend_delta") or 0)
+    except (TypeError, ValueError):
+        ox = 0
+    if ox == 0 and ret_f is not None:
+        ox = overextend_score_delta(ret_f)
+    if ox < 0:
+        bits.append(f"近5日超涨({ox})")
+    lane = str(_get("lane") or "").strip().lower()
+    if lane == "watch":
+        bits.append("回撤观察道")
     return " · ".join(bits) if bits else "成长加速入池"
 
 
@@ -440,6 +485,12 @@ def l2_factor_hits(candidate: GrowthStockInfo | dict[str, Any]) -> list[dict[str
             yoy_f = yoy_f / 100.0
     except (TypeError, ValueError):
         yoy_f = None
+    ret_raw = _get("ret_5d", None)
+    try:
+        ret_f = float(ret_raw) if ret_raw is not None else None
+    except (TypeError, ValueError):
+        ret_f = None
+    theme_hit = bool(_get("growth_theme")) and overextend_score_delta(ret_f) == 0
     return [
         {
             "key": "np_growth",
@@ -467,9 +518,9 @@ def l2_factor_hits(candidate: GrowthStockInfo | dict[str, Any]) -> list[dict[str
         },
         {
             "key": "growth_theme",
-            "label": "成长题材",
+            "label": "成长题材且未超涨",
             "active": True,
-            "hit": bool(_get("growth_theme")),
+            "hit": theme_hit,
         },
         {
             "key": "high_liquidity",
@@ -852,6 +903,7 @@ def run_l2_filter(
     for idx, info in enumerate(stocks, 1):
         if on_item is not None:
             on_item(info.code, info.name, idx, total)
+        info.ret_5d = _safe_call(_calc_ret_nd, info.code, default=None)
         info.growth_theme = _check_growth_theme(info.code, hot)
         info.high_liquidity = info.volume_wan >= mid
         # 一致预期质量闸门（L1b 窄池；东财限流）

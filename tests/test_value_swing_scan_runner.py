@@ -232,6 +232,18 @@ def test_candidates_to_analysis_jobs_uses_trade_date():
     assert jobs[0].fresh is True
 
 
+def test_candidates_to_analysis_jobs_skips_watch_lane():
+    jobs = candidates_to_analysis_jobs(
+        [
+            {"code": "000001", "lane": "analyze"},
+            {"code": "600519", "lane": "watch"},
+            {"code": "300750"},  # 无 lane → 兼容旧载荷，仍入队
+        ],
+        trade_date="2026-07-16",
+    )
+    assert [j.ticker for j in jobs] == ["000001", "300750"]
+
+
 def test_enqueue_scan_candidates_dedupes(
     queue_store: AnalysisQueueStore,
     monkeypatch: pytest.MonkeyPatch,
