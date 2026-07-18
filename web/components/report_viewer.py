@@ -43,6 +43,88 @@ def _signal_style(signal: str) -> tuple[str, str]:
     return "#fbbf24", "持有"
 
 
+def signal_card_html(
+    signal: str,
+    ticker_label: str,
+    trade_date: str,
+    *,
+    elapsed: float | None = None,
+    final_state: dict[str, Any] | None = None,
+) -> str:
+    """Build the TRADING SIGNAL banner HTML.
+
+    Returned as a single continuous HTML string (no leading indentation /
+    blank lines between child tags). Streamlit's markdown parser treats a
+    blank line followed by an indented ``<div>`` as a fenced code block, which
+    previously caused the LLM provenance line to render as raw HTML source
+    whenever ``elapsed`` was absent.
+    """
+    color, _ = _signal_style(signal)
+    parts: list[str] = [
+        '<div style="'
+        "background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);"
+        "border: 1px solid #333;"
+        "border-radius: 16px;"
+        "padding: 2rem;"
+        "text-align: center;"
+        'margin: 1rem 0 2rem;">',
+        '<div style="font-size:0.9rem; color:#888; letter-spacing:2px;">'
+        "TRADING SIGNAL</div>",
+        f'<div style="font-size:3.5rem; font-weight:900; color:{color}; '
+        f'margin:0.3rem 0;">{html.escape(signal.upper())}</div>',
+        f'<div style="font-size:1.2rem; color:#f5f1eb;">'
+        f"{html.escape(ticker_label)} · {html.escape(str(trade_date))}</div>",
+    ]
+
+    if elapsed is not None:
+        m, s = divmod(int(elapsed), 60)
+        parts.append(
+            f'<div style="font-size:0.9rem; color:#888; margin-top:0.3rem;">'
+            f"耗时 {m}:{s:02d}</div>"
+        )
+
+    provenance = _provenance_html(final_state or {})
+    if provenance:
+        parts.append(provenance)
+
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def _provenance_html(final_state: dict[str, Any]) -> str:
+    """LLM provenance line under the signal card (provider / model / fallback)."""
+    provenance_parts: list[str] = []
+    prov_provider = final_state.get("llm_provider")
+    prov_deep = final_state.get("deep_think_llm")
+    prov_quick = final_state.get("quick_think_llm")
+    if prov_provider:
+        provenance_parts.append(f"🤖 {prov_provider}")
+    if prov_deep or prov_quick:
+        if prov_deep and prov_quick and prov_deep == prov_quick:
+            provenance_parts.append(f"模型 {prov_deep}")
+        else:
+            bits = []
+            if prov_quick:
+                bits.append(f"快速 {prov_quick}")
+            if prov_deep:
+                bits.append(f"深度 {prov_deep}")
+            provenance_parts.append(" / ".join(bits))
+    prov_chain = final_state.get("llm_fallback_chain") or []
+    if prov_chain:
+        prov_labels = ", ".join(
+            f"{c.get('provider', '?')}/{c.get('model', '?')}" for c in prov_chain
+        )
+        provenance_parts.append(f"兜底 {prov_labels}")
+
+    if not provenance_parts:
+        return ""
+    prov_text = html.escape(" · ".join(str(p) for p in provenance_parts))
+    return (
+        f'<div style="font-size:0.85rem; color:#9aa; margin-top:0.6rem;">'
+        f"{prov_text}</div>"
+    )
+
+
 _ANALYST_SECTIONS = [
     ("market_report", "📊 技术分析"),
     ("sentiment_report", "💬 市场情绪"),
@@ -410,73 +492,19 @@ def render_report(
 ) -> None:
     """Render the full analysis report."""
 
-    color, cn_signal = _signal_style(signal)
     ticker_label = stock_display_label(ticker, final_state)
 
-    stats_html = ""
-    if elapsed is not None:
-        m, s = divmod(int(elapsed), 60)
-        stats_html = f'<div style="font-size:0.9rem; color:#888; margin-top:0.3rem;">耗时 {m}:{s:02d}</div>'
-
-    # LLM provenance line — surfaces "this report was produced by X / Y"
-    # directly under the signal card so the operator can confirm at a
-    # glance that the desired model was actually used. Provenance comes
-    # from ``final_state`` (persisted by ``_log_state`` / ``_finalize_us_run``)
-    # rather than the live ``llm_config`` so historical reports keep
-    # showing the model that *did* the work at run-time, even after the
-    # admin updates the global config.
-    provenance_parts: list[str] = []
-    prov_provider = final_state.get("llm_provider")
-    prov_deep = final_state.get("deep_think_llm")
-    prov_quick = final_state.get("quick_think_llm")
-    if prov_provider:
-        provenance_parts.append(f"🤖 {prov_provider}")
-    if prov_deep or prov_quick:
-        if prov_deep and prov_quick and prov_deep == prov_quick:
-            provenance_parts.append(f"模型 {prov_deep}")
-        else:
-            bits = []
-            if prov_quick:
-                bits.append(f"快速 {prov_quick}")
-            if prov_deep:
-                bits.append(f"深度 {prov_deep}")
-            provenance_parts.append(" / ".join(bits))
-    prov_chain = final_state.get("llm_fallback_chain") or []
-    if prov_chain:
-        prov_labels = ", ".join(
-            f"{c.get('provider', '?')}/{c.get('model', '?')}" for c in prov_chain
-        )
-        provenance_parts.append(f"兜底 {prov_labels}")
-
-    provenance_html = ""
-    if provenance_parts:
-        prov_text = " · ".join(provenance_parts)
-        provenance_html = (
-            f'<div style="font-size:0.85rem; color:#9aa; margin-top:0.6rem;">'
-            f'{prov_text}</div>'
-        )
-
+    # Provenance is read from ``final_state`` (persisted at run-time) so
+    # historical reports keep showing the model that *did* the work even
+    # after the admin updates the global config.
     st.markdown(
-        f"""
-        <div style="
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-            border: 1px solid #333;
-            border-radius: 16px;
-            padding: 2rem;
-            text-align: center;
-            margin: 1rem 0 2rem;
-        ">
-            <div style="font-size:0.9rem; color:#888; letter-spacing:2px;">TRADING SIGNAL</div>
-            <div style="font-size:3.5rem; font-weight:900; color:{color}; margin:0.3rem 0;">
-                {signal.upper()}
-            </div>
-            <div style="font-size:1.2rem; color:#f5f1eb;">
-                {ticker_label} · {trade_date}
-            </div>
-            {stats_html}
-            {provenance_html}
-        </div>
-        """,
+        signal_card_html(
+            signal,
+            ticker_label,
+            trade_date,
+            elapsed=elapsed,
+            final_state=final_state,
+        ),
         unsafe_allow_html=True,
     )
 
