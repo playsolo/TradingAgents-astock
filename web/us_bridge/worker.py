@@ -15,7 +15,21 @@ from typing import Any
 
 
 def _prefer_us_on_sys_path() -> Path:
-    """Ensure the US checkout's ``tradingagents`` package wins over A-stock editable installs."""
+    """Ensure the US checkout's ``tradingagents`` package wins over A-stock editable installs.
+
+    We must NOT filter by the literal ``tradingagents-astock`` substring
+    because the A-stock project's virtualenv site-packages lives under a
+    path like:
+
+        tradingagents-astock/.venv/lib/python3.11/site-packages/
+
+    Removing that entry would drop all third-party dependencies
+    (langchain-core, langgraph, …) from ``sys.path``.  Instead we only
+    strip the ``__editable__`` finder hook that ``pip install -e`` uses to
+    redirect imports — the A-stock ``tradingagents`` package has no
+    third-party deps that the US worker needs, so leaving its editable
+    hook alive only risks namespace confusion.
+    """
     us_root = Path(
         os.environ.get("US_BRIDGE_PROJECT_ROOT")
         or os.environ.get("US_TRADINGAGENTS_ROOT")
@@ -26,9 +40,15 @@ def _prefer_us_on_sys_path() -> Path:
         if not entry:
             continue
         resolved = str(Path(entry).resolve()) if entry not in {".", ""} else entry
-        if "tradingagents-astock" in resolved.replace("\\", "/"):
-            continue
         if resolved == str(us_root):
+            continue
+        # Strip only the ``pip install -e .`` editable finder hook — it is
+        # the mechanism that makes the A-stock ``tradingagents`` package
+        # importable from the astock source tree.  Removing it forces
+        # Python to find ``tradingagents`` via the US checkout prepended
+        # above.  Crucially this does NOT affect the virtualenv
+        # site-packages entry (which contains langchain etc.).
+        if isinstance(entry, str) and entry.startswith("__editable__"):
             continue
         cleaned.append(entry)
     sys.path[:] = cleaned

@@ -197,6 +197,11 @@ def _run_us(ticker: str, trade_date: str, config: dict, tracker: ProgressTracker
         "output_language": config.get("output_language") or "Chinese",
         "max_debate_rounds": config.get("max_debate_rounds"),
         "max_risk_discuss_rounds": config.get("max_risk_discuss_rounds"),
+        # Bug D: forward the fallback chain so the US bridge can degrade
+        # to deepseek when the primary provider (e.g. minimax) is
+        # unhealthy. The upstream TradingAgents does not understand
+        # fallback_chain on its own — see ``web.us_bridge.health``.
+        "fallback_chain": list(config.get("fallback_chain") or []),
     }
     run_us_analysis(
         ticker=ticker,

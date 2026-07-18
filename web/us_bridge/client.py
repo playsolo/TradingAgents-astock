@@ -156,10 +156,41 @@ def run_us_analysis(
         completed_stages=tracker.completed_stages,
     )
 
+    # Bug D: pre-flight provider health check. The upstream TradingAgents
+    # does not understand our ``fallback_chain``; if the operator's
+    # primary provider is unhealthy (e.g. expired key) we'd otherwise
+    # spawn a subprocess that immediately 401s. Probe here and swap the
+    # primary to the first healthy fallback *before* we build the cmd.
+    from web.us_bridge.health import choose_provider_for_us_bridge
+
+    chosen = choose_provider_for_us_bridge(
+        llm_provider=llm_config.get("llm_provider") or "",
+        api_key=None,  # let health module read from the daemon's env
+        base_url=llm_config.get("backend_url"),
+        deep_think_llm=llm_config.get("deep_think_llm") or "",
+        quick_think_llm=llm_config.get("quick_think_llm") or "",
+        fallback_chain=llm_config.get("fallback_chain") or [],
+    )
+    if chosen["fell_back"]:
+        logger.warning(
+            "US bridge fell back: %s -> %s/%s for %s",
+            llm_config.get("llm_provider"),
+            chosen["llm_provider"],
+            chosen["deep_think_llm"],
+            ticker,
+        )
+    # Mutate a copy of llm_config so build_worker_command sees the chosen
+    # provider; downstream report provenance (Bug C) reads from this same
+    # dict via config passed in by the runner.
+    effective_llm_config = dict(llm_config)
+    effective_llm_config["llm_provider"] = chosen["llm_provider"]
+    effective_llm_config["deep_think_llm"] = chosen["deep_think_llm"]
+    effective_llm_config["quick_think_llm"] = chosen["quick_think_llm"]
+
     cmd, env, cwd = build_worker_command(
         ticker=ticker,
         trade_date=trade_date,
-        llm_config=llm_config,
+        llm_config=effective_llm_config,
     )
 
     popen_kwargs: dict[str, Any] = {
