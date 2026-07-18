@@ -52,7 +52,15 @@ def load_model_config() -> dict[str, Any]:
         required = {"llm_provider", "deep_think_llm", "quick_think_llm"}
         if not required.issubset(data):
             return _defaults()
-        chain = _sanitize_chain(data.get("fallback_chain") or [])
+        # ``fallback_chain`` was added in a later version; older configs on
+        # disk don't have the field. Treat absence / explicit ``null`` as
+        # "operator hasn't opted in" and inject the project default. An
+        # explicit empty list ``[]`` means "I don't want fallback" and is
+        # preserved (use ``save_model_config(..., fallback_chain=[])``).
+        if "fallback_chain" in data and data["fallback_chain"] is not None:
+            chain = _sanitize_chain(data["fallback_chain"])
+        else:
+            chain = list(_defaults()["fallback_chain"])
         return {
             "llm_provider": str(data["llm_provider"]),
             "deep_think_llm": str(data["deep_think_llm"]),

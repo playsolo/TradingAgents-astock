@@ -84,11 +84,14 @@ class TestFallbackChainPersistence:
         ]
 
     def test_load_handles_missing_chain(self, tmp_path: Path, monkeypatch):
+        """A legacy config without the field gets the project default — this
+        is the regression test for the deploy bug where fresh wrapper code
+        saw an empty chain and silently disabled failover on existing
+        installs."""
         from tradingagents.auth import model_config
 
         cfg_file = tmp_path / "model_config.json"
         monkeypatch.setattr(model_config, "_MODEL_CONFIG_FILE", cfg_file)
-        # Simulate an older config file without the field.
         cfg_file.write_text(json.dumps({
             "llm_provider": "deepseek",
             "deep_think_llm": "deepseek-chat",
@@ -97,7 +100,7 @@ class TestFallbackChainPersistence:
         }))
 
         loaded = model_config.load_model_config()
-        assert loaded["fallback_chain"] == []
+        assert loaded["fallback_chain"] == model_config._defaults()["fallback_chain"]
 
     def test_load_drops_malformed_chain_entries(
         self, tmp_path: Path, monkeypatch
@@ -122,6 +125,64 @@ class TestFallbackChainPersistence:
         assert loaded["fallback_chain"] == [
             {"provider": "deepseek", "model": "deepseek-chat"}
         ]
+
+    def test_legacy_config_without_chain_gets_default_injected(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """Regression: an old model_config.json saved before the
+        ``fallback_chain`` field existed must still get a default chain at
+        load time, otherwise the freshly-deployed wrapper sees an empty
+        list and silently disables failover."""
+        from tradingagents.auth import model_config
+
+        cfg_file = tmp_path / "model_config.json"
+        monkeypatch.setattr(model_config, "_MODEL_CONFIG_FILE", cfg_file)
+        cfg_file.write_text(json.dumps({
+            "llm_provider": "minimax",
+            "deep_think_llm": "MiniMax-M3",
+            "quick_think_llm": "MiniMax-M3",
+            "backend_url": None,
+            # No fallback_chain field at all.
+        }))
+
+        loaded = model_config.load_model_config()
+        assert loaded["fallback_chain"] == model_config._defaults()["fallback_chain"]
+        # And it must be a non-empty list so the wrapper actually wraps.
+        assert len(loaded["fallback_chain"]) >= 1
+
+    def test_explicit_null_chain_is_treated_as_default(self, tmp_path, monkeypatch):
+        from tradingagents.auth import model_config
+
+        cfg_file = tmp_path / "model_config.json"
+        monkeypatch.setattr(model_config, "_MODEL_CONFIG_FILE", cfg_file)
+        cfg_file.write_text(json.dumps({
+            "llm_provider": "minimax",
+            "deep_think_llm": "MiniMax-M3",
+            "quick_think_llm": "MiniMax-M3",
+            "backend_url": None,
+            "fallback_chain": None,
+        }))
+
+        loaded = model_config.load_model_config()
+        assert loaded["fallback_chain"] == model_config._defaults()["fallback_chain"]
+
+    def test_explicit_empty_list_chain_is_preserved(self, tmp_path, monkeypatch):
+        """An operator who actively turns off fallback (``[]``) must be
+        respected, not silently overridden by the default."""
+        from tradingagents.auth import model_config
+
+        cfg_file = tmp_path / "model_config.json"
+        monkeypatch.setattr(model_config, "_MODEL_CONFIG_FILE", cfg_file)
+        cfg_file.write_text(json.dumps({
+            "llm_provider": "minimax",
+            "deep_think_llm": "MiniMax-M3",
+            "quick_think_llm": "MiniMax-M3",
+            "backend_url": None,
+            "fallback_chain": [],
+        }))
+
+        loaded = model_config.load_model_config()
+        assert loaded["fallback_chain"] == []
 
 
 # ---------------------------------------------------------------------------
