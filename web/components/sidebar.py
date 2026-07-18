@@ -556,17 +556,23 @@ def _render_analysis_controls(raw_tickers: str, trade_date_value: date) -> None:
         st.rerun()
 
 
-def _on_sidebar_provider_change() -> None:
-    """When the LLM provider selectbox changes, drop the cached model
-    widget values so the quick/deep selectboxes re-render against the new
-    provider's catalog instead of holding the previous provider's options.
-    """
-    for key in ("quick_model_idx", "deep_model_idx"):
-        st.session_state.pop(key, None)
-
-
 def _render_llm_config() -> None:
     """Render LLM provider and model selection controls."""
+
+    # Detect provider change *before* instantiating the quick/deep widgets so
+    # their cached values are dropped and the selectbox rerenders against the
+    # new provider's catalog. Done here (rather than via ``on_change``) so the
+    # logic is identical to the admin form in ``web/auth_page.py`` and works
+    # whether or not the caller wraps us in a ``st.form``.
+    _FORM_PROVIDER_KEY = "_sidebar_llm_provider"
+    chosen_idx = st.session_state.get(
+        "llm_provider_idx", _default_provider_index()
+    )
+    if chosen_idx != st.session_state.get(_FORM_PROVIDER_KEY):
+        for stale_key in ("quick_model_idx", "deep_model_idx"):
+            st.session_state.pop(stale_key, None)
+        st.session_state[_FORM_PROVIDER_KEY] = chosen_idx
+        st.rerun()
 
     provider_idx = st.selectbox(
         "LLM 供应商",
@@ -574,7 +580,6 @@ def _render_llm_config() -> None:
         index=_default_provider_index(),
         format_func=lambda i: _PROVIDER_DISPLAY[i],
         key="llm_provider_idx",
-        on_change=_on_sidebar_provider_change,
         help="选择你配置了 API Key 的供应商（默认项可用环境变量 DEFAULT_LLM_PROVIDER 固定）",
     )
     provider_key = _PROVIDER_KEYS[provider_idx]

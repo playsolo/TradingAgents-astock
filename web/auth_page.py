@@ -459,6 +459,22 @@ def _render_admin_model_config() -> None:
     current_provider = admin_config.get("llm_provider", "deepseek")
     prov_idx = provider_keys.index(current_provider) if current_provider in provider_keys else 0
 
+    # Streamlit keeps the prior provider's options cached against the same
+    # ``admin_quick_model`` / ``admin_deep_model`` widget keys across reruns,
+    # so when the operator picks a different provider here the quick/deep
+    # selectboxes would keep showing the previous provider's model list.
+    # Streamlit forbids ``on_change`` on widgets inside a ``st.form``, so we
+    # detect the change here by comparing session_state against the form's
+    # intent, drop the stale widget state, and rerun — on the next pass the
+    # quick/deep selectboxes are rebuilt against the new provider's catalog.
+    _FORM_PROVIDER_KEY = "_admin_model_form_provider"
+    chosen = st.session_state.get("admin_llm_provider", provider_keys[prov_idx])
+    if chosen != st.session_state.get(_FORM_PROVIDER_KEY):
+        for stale_key in ("admin_quick_model", "admin_deep_model"):
+            st.session_state.pop(stale_key, None)
+        st.session_state[_FORM_PROVIDER_KEY] = chosen
+        st.rerun()
+
     with st.form("admin_model_config_form", clear_on_submit=False):
         selected_provider = st.selectbox(
             "LLM 供应商",
