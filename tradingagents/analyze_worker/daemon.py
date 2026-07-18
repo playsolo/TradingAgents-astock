@@ -284,14 +284,32 @@ class AnalyzeWorker:
         self,
         *,
         store: AnalysisQueueStore,
-        config: dict[str, Any],
+        config: dict[str, Any] | None = None,
+        config_provider: Callable[[], dict[str, Any]] | None = None,
         max_workers: int = 3,
         run_fn: RunFn = run_one_job,
         lease_ttl_seconds: float | None = None,
         max_auto_resume: int | None = None,
     ) -> None:
         self.store = store
-        self.config = config
+        # ``config_provider`` is preferred: it is called per-job so an
+        # admin saving a new ``model_config.json`` mid-flight takes effect
+        # on the *next* job without a daemon restart. ``config`` (the
+        # frozen-at-startup dict) is kept for backward compatibility — it
+        # becomes a constant provider that always returns the same dict.
+        if config_provider is not None and config is not None:
+            raise ValueError(
+                "Pass either config= or config_provider=, not both — "
+                "their semantics are mutually exclusive."
+            )
+        if config_provider is None:
+            frozen = config if config is not None else {}
+            self.config_provider = lambda: frozen
+        else:
+            self.config_provider = config_provider
+        # Back-compat: legacy callers/tests reach for ``self.config`` and
+        # expect a dict. Expose the latest provider result.
+        self.config = self.config_provider()
         self.max_workers = max(1, int(max_workers))
         self.run_fn = run_fn
         self.lease_ttl_seconds = (
@@ -378,7 +396,15 @@ class AnalyzeWorker:
 
     def _run_safe(self, job: AnalysisJob) -> None:
         try:
-            self.run_fn(job, self.config)
+            # Refresh from disk so admin-config changes between jobs take
+            # effect on this job. The provider is a single in-process
+            # function (cheap), and run_one_job is non-idempotent only with
+            # respect to its ``config`` argument — keeping the dict
+            # constant *for this job* preserves any downstream invariants
+            # (e.g. checkpoint paths derived from config["data_cache_dir"]).
+            current_config = self.config_provider()
+            self.config = current_config
+            self.run_fn(job, current_config)
         except Exception:  # noqa: BLE001 - run_fn should not raise; guard the pool
             logger.exception("run_fn crashed for %s", getattr(job, "ticker", "?"))
         finally:
@@ -561,7 +587,13 @@ def main(argv: list[str] | None = None) -> int:
             )
         worker = AnalyzeWorker(
             store=store,
-            config=build_worker_config(),
+            # ``config_provider`` re-reads model_config.json on every job
+            # so an admin saving a new provider/model/fallback chain in
+            # the Web UI takes effect on the next claimed job without a
+            # daemon restart. The provider is called once per job inside
+            # ``_run_safe``, not per stage, so each individual job sees a
+            # constant config throughout its lifetime.
+            config_provider=build_worker_config,
             max_workers=_max_workers(),
         )
         if args.once:

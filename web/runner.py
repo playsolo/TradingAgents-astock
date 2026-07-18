@@ -340,6 +340,14 @@ def _finalize_us_run(
         "risk_debate_state": serialized.get("risk_debate_state", {}),
         "investment_plan": serialized.get("investment_plan", ""),
         "final_trade_decision": serialized.get("final_trade_decision", ""),
+        # LLM provenance for audit + UI display — same shape as the CN
+        # ``trading_graph._log_state`` entry so a single history loader
+        # can show "this analysis used X / Y" regardless of market.
+        "llm_provider": config.get("llm_provider"),
+        "deep_think_llm": config.get("deep_think_llm"),
+        "quick_think_llm": config.get("quick_think_llm"),
+        "llm_backend_url": config.get("backend_url"),
+        "llm_fallback_chain": list(config.get("fallback_chain") or []),
     }
     if action_plan:
         log_entry["action_plan"] = action_plan

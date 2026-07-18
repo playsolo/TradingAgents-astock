@@ -418,6 +418,44 @@ def render_report(
         m, s = divmod(int(elapsed), 60)
         stats_html = f'<div style="font-size:0.9rem; color:#888; margin-top:0.3rem;">耗时 {m}:{s:02d}</div>'
 
+    # LLM provenance line — surfaces "this report was produced by X / Y"
+    # directly under the signal card so the operator can confirm at a
+    # glance that the desired model was actually used. Provenance comes
+    # from ``final_state`` (persisted by ``_log_state`` / ``_finalize_us_run``)
+    # rather than the live ``llm_config`` so historical reports keep
+    # showing the model that *did* the work at run-time, even after the
+    # admin updates the global config.
+    provenance_parts: list[str] = []
+    prov_provider = final_state.get("llm_provider")
+    prov_deep = final_state.get("deep_think_llm")
+    prov_quick = final_state.get("quick_think_llm")
+    if prov_provider:
+        provenance_parts.append(f"🤖 {prov_provider}")
+    if prov_deep or prov_quick:
+        if prov_deep and prov_quick and prov_deep == prov_quick:
+            provenance_parts.append(f"模型 {prov_deep}")
+        else:
+            bits = []
+            if prov_quick:
+                bits.append(f"快速 {prov_quick}")
+            if prov_deep:
+                bits.append(f"深度 {prov_deep}")
+            provenance_parts.append(" / ".join(bits))
+    prov_chain = final_state.get("llm_fallback_chain") or []
+    if prov_chain:
+        prov_labels = ", ".join(
+            f"{c.get('provider', '?')}/{c.get('model', '?')}" for c in prov_chain
+        )
+        provenance_parts.append(f"兜底 {prov_labels}")
+
+    provenance_html = ""
+    if provenance_parts:
+        prov_text = " · ".join(provenance_parts)
+        provenance_html = (
+            f'<div style="font-size:0.85rem; color:#9aa; margin-top:0.6rem;">'
+            f'{prov_text}</div>'
+        )
+
     st.markdown(
         f"""
         <div style="
@@ -436,6 +474,7 @@ def render_report(
                 {ticker_label} · {trade_date}
             </div>
             {stats_html}
+            {provenance_html}
         </div>
         """,
         unsafe_allow_html=True,

@@ -41,6 +41,12 @@ def build_worker_config() -> dict[str, Any]:
         config["quick_think_llm"] = persisted["quick_think_llm"]
         backend_url = (persisted.get("backend_url") or os.getenv("BACKEND_URL") or "").strip()
         config["backend_url"] = backend_url or None
+        # Mirror the admin-configured fallback chain so the analyze worker
+        # gets the same failover semantics as web/runner. ``load_model_config``
+        # already injects the default chain when the field is missing on
+        # legacy installs, so ``persisted.get`` here can be empty list
+        # (operator-disabled) or the default — either way it must propagate.
+        config["fallback_chain"] = list(persisted.get("fallback_chain") or [])
     else:
         # No admin config yet: fall back to env so a fresh install still runs.
         config["llm_provider"] = os.getenv("DEFAULT_LLM_PROVIDER", "deepseek").strip() or "deepseek"
@@ -50,6 +56,7 @@ def build_worker_config() -> dict[str, Any]:
         )
         backend_url = (os.getenv("BACKEND_URL") or "").strip()
         config["backend_url"] = backend_url or None
+        config["fallback_chain"] = []
 
     config["data_vendors"] = {
         "core_stock_apis": "a_stock",

@@ -535,6 +535,16 @@ class TradingAgentsGraph:
             },
             "investment_plan": final_state["investment_plan"],
             "final_trade_decision": final_state["final_trade_decision"],
+            # LLM provenance: capture exactly which provider / model / chain
+            # this analysis used so audit logs can prove which model produced
+            # a given decision. Read from ``self.config`` (the graph's frozen
+            # snapshot) so the values reflect the config at run-time, not at
+            # some later point in the lifecycle.
+            "llm_provider": self.config.get("llm_provider"),
+            "deep_think_llm": self.config.get("deep_think_llm"),
+            "quick_think_llm": self.config.get("quick_think_llm"),
+            "llm_backend_url": self.config.get("backend_url"),
+            "llm_fallback_chain": list(self.config.get("fallback_chain") or []),
         }
         if final_state.get("action_plan"):
             self.log_states_dict[str(trade_date)]["action_plan"] = final_state[

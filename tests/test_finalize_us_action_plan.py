@@ -91,3 +91,112 @@ def test_finalize_us_run_skips_extract_when_plan_already_present(tmp_path, monke
     _finalize_us_run("AAPL", "2026-07-16", {"results_dir": str(tmp_path)}, tracker)
     assert called["n"] == 0
     assert tracker.final_state["action_plan"]["rating"] == "Hold"
+
+
+# ---------------------------------------------------------------------------
+# Bug C regression: persisted log entries must carry LLM provenance so
+# report cards can answer "which model produced this decision?" and audit
+# logs can prove a given analysis used a specific provider. Previously the
+# log_entry dict omitted llm_provider/deep_think_llm/quick_think_llm/
+# llm_backend_url/llm_fallback_chain — the data was available in ``config``
+# but thrown away before write.
+# ---------------------------------------------------------------------------
+
+
+def test_finalize_us_run_persists_llm_provenance(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "tradingagents.agents.utils.action_plan.extract_action_plan",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "web.runner._build_quick_llm_from_config",
+        lambda _cfg: MagicMock(name="llm"),
+    )
+
+    tracker = ProgressTracker(ticker="NVDA", trade_date="2026-07-16", market="US")
+    tracker.mark_complete(
+        {
+            "company_of_interest": "NVDA",
+            "trade_date": "2026-07-16",
+            "final_trade_decision": "Hold",
+            "market_report": "",
+            "sentiment_report": "",
+            "news_report": "",
+            "fundamentals_report": "",
+            "investment_plan": "",
+            "trader_investment_plan": "",
+            "investment_debate_state": {},
+            "risk_debate_state": {},
+        },
+        "Hold",
+    )
+
+    config = {
+        "results_dir": str(tmp_path),
+        "llm_provider": "minimax",
+        "deep_think_llm": "MiniMax-M3",
+        "quick_think_llm": "MiniMax-M3",
+        "backend_url": "https://api.minimaxi.com/v1",
+        "fallback_chain": [{"provider": "deepseek", "model": "deepseek-chat"}],
+    }
+    _finalize_us_run("NVDA", "2026-07-16", config, tracker)
+
+    import json
+    log_path = (
+        tmp_path / "NVDA" / "TradingAgentsStrategy_logs" / "full_states_log_2026-07-16.json"
+    )
+    saved = json.loads(log_path.read_text(encoding="utf-8"))
+
+    assert saved["llm_provider"] == "minimax", saved
+    assert saved["deep_think_llm"] == "MiniMax-M3", saved
+    assert saved["quick_think_llm"] == "MiniMax-M3", saved
+    assert saved["llm_backend_url"] == "https://api.minimaxi.com/v1", saved
+    assert saved["llm_fallback_chain"] == [
+        {"provider": "deepseek", "model": "deepseek-chat"}
+    ], saved
+
+
+def test_finalize_us_run_provenance_handles_missing_keys(tmp_path, monkeypatch):
+    """A legacy config (no llm_* fields at all) must still write the entry
+    — the provenance fields default to None / empty rather than crashing
+    on KeyError or skipping the write."""
+    monkeypatch.setattr(
+        "tradingagents.agents.utils.action_plan.extract_action_plan",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "web.runner._build_quick_llm_from_config",
+        lambda _cfg: MagicMock(name="llm"),
+    )
+
+    tracker = ProgressTracker(ticker="ORCL", trade_date="2026-07-16", market="US")
+    tracker.mark_complete(
+        {
+            "company_of_interest": "ORCL",
+            "trade_date": "2026-07-16",
+            "final_trade_decision": "Hold",
+            "market_report": "",
+            "sentiment_report": "",
+            "news_report": "",
+            "fundamentals_report": "",
+            "investment_plan": "",
+            "trader_investment_plan": "",
+            "investment_debate_state": {},
+            "risk_debate_state": {},
+        },
+        "Hold",
+    )
+
+    config = {"results_dir": str(tmp_path)}  # no llm_* keys at all
+    _finalize_us_run("ORCL", "2026-07-16", config, tracker)
+
+    import json
+    log_path = (
+        tmp_path / "ORCL" / "TradingAgentsStrategy_logs" / "full_states_log_2026-07-16.json"
+    )
+    saved = json.loads(log_path.read_text(encoding="utf-8"))
+    assert saved["llm_provider"] is None
+    assert saved["deep_think_llm"] is None
+    assert saved["quick_think_llm"] is None
+    assert saved["llm_backend_url"] is None
+    assert saved["llm_fallback_chain"] == []

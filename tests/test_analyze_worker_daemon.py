@@ -121,3 +121,89 @@ def test_default_run_fn_is_executor_run_one_job():
 
 def test_daemon_worker_lock_path():
     assert daemon_mod.WORKER_LOCK_PATH.name == "analyze.worker.lock"
+
+
+# ---------------------------------------------------------------------------
+# Bug B regression: AnalyzeWorker must pick up admin-config changes
+# (provider / model / fallback_chain) on every job, not freeze the config
+# dict at startup. Previously ``main()`` passed ``config=build_worker_config()``
+# once and re-used the same dict for the lifetime of the process, which
+# meant an admin saving a new model_config.json while jobs were already in
+# flight kept using the *old* model until the daemon restarted.
+# ---------------------------------------------------------------------------
+
+
+def test_worker_uses_fresh_config_per_job(store: AnalysisQueueStore):
+    """Each job must see the config returned by ``config_provider`` at
+    *run-time*, not the value captured at worker construction. We swap the
+    provider between two jobs to prove the second job sees the new provider.
+    """
+    store.save([_job("A"), _job("B")])
+
+    captured: list[dict] = []
+    job_ticker_to_provider = {
+        "A": "deepseek",  # what the provider returns when job A claims
+        "B": "minimax",   # admin "saves" between A and B; provider now returns minimax
+    }
+
+    def provider():
+        # Decide based on the most-recently-claimed job: the worker
+        # signals ``current_job`` via an event. We keep it simple by
+        # returning based on a mutable state set by run_fn.
+        target = current_target["ticker"]
+        p = job_ticker_to_provider[target]
+        return {"llm_provider": p, "deep_think_llm": f"{p}-model"}
+
+    current_target = {"ticker": "A"}
+
+    def run_fn(job, config):
+        # Simulate "admin saves between A and B": the run_fn for A records
+        # what it got, then flips the target for the next claim.
+        captured.append({"ticker": job.ticker, "provider": config["llm_provider"]})
+        current_target["ticker"] = "B"
+
+    worker = AnalyzeWorker(
+        store=store,
+        config_provider=provider,
+        max_workers=1,
+        run_fn=run_fn,
+    )
+
+    t = threading.Thread(target=worker.run_until_drained, kwargs={"poll_seconds": 0.02})
+    t.start()
+    t.join(5.0)
+
+    assert not t.is_alive()
+    assert captured == [
+        {"ticker": "A", "provider": "deepseek"},
+        {"ticker": "B", "provider": "minimax"},
+    ], (
+        "Worker must call config_provider for each job so admin-config "
+        "changes between jobs take effect immediately."
+    )
+
+
+def test_worker_legacy_config_kwarg_still_supported(store: AnalysisQueueStore):
+    """Existing callers that pass a plain ``config`` dict (tests, ad-hoc
+    scripts) must keep working — they get a provider that always returns
+    the same dict. This guards against a refactor breaking every test
+    that constructs ``AnalyzeWorker(store=..., config={...})``."""
+    store.save([_job("A")])
+
+    captured: list[dict] = []
+
+    def run_fn(job, config):
+        captured.append(config)
+
+    worker = AnalyzeWorker(
+        store=store,
+        config={"llm_provider": "deepseek"},
+        max_workers=1,
+        run_fn=run_fn,
+    )
+    t = threading.Thread(target=worker.run_until_drained, kwargs={"poll_seconds": 0.02})
+    t.start()
+    t.join(5.0)
+
+    assert len(captured) == 1
+    assert captured[0]["llm_provider"] == "deepseek"

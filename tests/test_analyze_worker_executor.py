@@ -58,6 +58,59 @@ def test_build_worker_config_env_fallback(monkeypatch):
     assert cfg["deep_think_llm"] == "deepseek-chat"
 
 
+def test_build_worker_config_reads_fallback_chain(monkeypatch):
+    """Worker must honour the admin-configured fallback_chain so a primary
+    provider outage degrades to deepseek instead of crashing. Previously
+    build_worker_config only copied provider/deep/quick/backend and dropped
+    fallback_chain on the floor, silently disabling the entire fallback
+    mechanism for the analyze-worker entry point."""
+    monkeypatch.setattr(
+        "tradingagents.auth.model_config.model_config_exists", lambda: True
+    )
+    monkeypatch.setattr(
+        "tradingagents.auth.model_config.load_model_config",
+        lambda: {
+            "llm_provider": "minimax",
+            "deep_think_llm": "MiniMax-M3",
+            "quick_think_llm": "MiniMax-M3",
+            "backend_url": None,
+            "fallback_chain": [
+                {"provider": "deepseek", "model": "deepseek-chat"},
+            ],
+        },
+    )
+    cfg = executor.build_worker_config()
+    assert cfg.get("fallback_chain") == [
+        {"provider": "deepseek", "model": "deepseek-chat"}
+    ], (
+        "build_worker_config must mirror fallback_chain from model_config.json "
+        "so the analyze worker gets the same failover semantics as web/runner."
+    )
+
+
+def test_build_worker_config_fallback_chain_default_when_missing(monkeypatch):
+    """When the persisted config has no fallback_chain key at all (legacy
+    installs), build_worker_config should still produce a working chain —
+    an empty list preserves the operator's intent to disable fallback."""
+    monkeypatch.setattr(
+        "tradingagents.auth.model_config.model_config_exists", lambda: True
+    )
+    monkeypatch.setattr(
+        "tradingagents.auth.model_config.load_model_config",
+        lambda: {
+            "llm_provider": "deepseek",
+            "deep_think_llm": "deepseek-chat",
+            "quick_think_llm": "deepseek-chat",
+            "backend_url": None,
+        },
+    )
+    cfg = executor.build_worker_config()
+    assert cfg.get("fallback_chain") == [], (
+        "fallback_chain must default to an empty list (operator intent to "
+        "disable fallback is preserved); never raise KeyError."
+    )
+
+
 def test_executor_module_is_streamlit_free():
     src = Path("tradingagents/analyze_worker/executor.py").read_text(encoding="utf-8")
     assert "import streamlit" not in src
