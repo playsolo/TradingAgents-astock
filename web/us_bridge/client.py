@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import selectors
 import signal
 import subprocess
 import time
 from typing import Any, Iterable, TextIO
+
+logger = logging.getLogger(__name__)
 
 from web.history import clear_incomplete_task, record_incomplete_task
 from web.progress import ProgressTracker
