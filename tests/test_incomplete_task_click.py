@@ -26,7 +26,26 @@ def test_incomplete_resume_buttons_not_globally_disabled_when_busy():
     # The incomplete tasks section may live inside a fragment, so search more broadly.
     assert "def _render_incomplete_tasks" in src
     assert "activate_incomplete_task(" in src
+    assert "dismiss_incomplete_task(" in src
+    assert "dismiss_incomplete_" in src
 
+
+def test_dismiss_incomplete_task_removes_row(incomplete_index, monkeypatch):
+    monkeypatch.setattr(
+        "web.components.sidebar.clear_checkpoint",
+        lambda *_a, **_k: None,
+    )
+    history.record_incomplete_task(
+        "NETFLIX", "2026-07-18", status="error", error="no data"
+    )
+    assert any(e["ticker"] == "NETFLIX" for e in history.get_incomplete_history())
+
+    sidebar.dismiss_incomplete_task("NETFLIX", "2026-07-18")
+
+    assert history.get_incomplete_history() == []
+    assert not any(
+        e["ticker"] == "NETFLIX" for e in history.list_active_incomplete_tasks()
+    )
 
 def test_queue_fragment_reruns_when_history_stamp_changes():
     """Worker completions write logs out-of-process; history sits outside the

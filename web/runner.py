@@ -209,6 +209,18 @@ def _run_us(ticker: str, trade_date: str, config: dict, tracker: ProgressTracker
         llm_config=llm_config,
         tracker=tracker,
     )
+    # Bridge may rewrite provider/model after preflight health check — copy
+    # the effective provenance back onto the runner config used by finalize.
+    for key in (
+        "llm_provider",
+        "deep_think_llm",
+        "quick_think_llm",
+        "llm_providers_used",
+        "llm_models_used",
+        "llm_provider_configured",
+    ):
+        if key in llm_config:
+            config[key] = llm_config[key]
 
 
 def _setup_tracker_for_run(
@@ -329,6 +341,8 @@ def _finalize_us_run(
     directory.mkdir(parents=True, exist_ok=True)
 
     # Build a log entry compatible with history.py's _load_state() expectations.
+    from tradingagents.llm_clients.provenance import provenance_fields_from_config
+
     log_entry: dict[str, Any] = {
         "company_of_interest": serialized.get("company_of_interest", ticker),
         "trade_date": serialized.get("trade_date", trade_date),
@@ -345,17 +359,26 @@ def _finalize_us_run(
         "risk_debate_state": serialized.get("risk_debate_state", {}),
         "investment_plan": serialized.get("investment_plan", ""),
         "final_trade_decision": serialized.get("final_trade_decision", ""),
-        # LLM provenance for audit + UI display — same shape as the CN
-        # ``trading_graph._log_state`` entry so a single history loader
-        # can show "this analysis used X / Y" regardless of market.
-        "llm_provider": config.get("llm_provider"),
-        "deep_think_llm": config.get("deep_think_llm"),
-        "quick_think_llm": config.get("quick_think_llm"),
-        "llm_backend_url": config.get("backend_url"),
-        "llm_fallback_chain": list(config.get("fallback_chain") or []),
+        # LLM provenance for audit + UI — actual providers when preflight
+        # swapped the primary (see us_bridge.client).
+        **provenance_fields_from_config(config),
     }
     if action_plan:
         log_entry["action_plan"] = action_plan
+
+    # Keep the live tracker in sync with disk for the signal-card line.
+    if isinstance(tracker.final_state, dict):
+        for key in (
+            "llm_provider",
+            "deep_think_llm",
+            "quick_think_llm",
+            "llm_backend_url",
+            "llm_fallback_chain",
+            "llm_providers_used",
+            "llm_models_used",
+        ):
+            if key in log_entry:
+                tracker.final_state[key] = log_entry[key]
 
     log_path = directory / f"full_states_log_{trade_date}.json"
     with open(log_path, "w", encoding="utf-8") as f:

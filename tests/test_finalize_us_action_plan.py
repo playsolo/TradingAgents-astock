@@ -154,6 +154,63 @@ def test_finalize_us_run_persists_llm_provenance(tmp_path, monkeypatch):
     assert saved["llm_fallback_chain"] == [
         {"provider": "deepseek", "model": "deepseek-chat"}
     ], saved
+    assert saved["llm_providers_used"] == ["minimax"], saved
+    assert saved["llm_models_used"] == ["MiniMax-M3"], saved
+
+
+def test_finalize_us_run_persists_effective_providers_after_fallback(
+    tmp_path, monkeypatch
+):
+    """When US preflight swapped minimax → deepseek, log the actual provider."""
+    monkeypatch.setattr(
+        "tradingagents.agents.utils.action_plan.extract_action_plan",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "web.runner._build_quick_llm_from_config",
+        lambda _cfg: MagicMock(name="llm"),
+    )
+
+    tracker = ProgressTracker(ticker="NFLX", trade_date="2026-07-18", market="US")
+    tracker.mark_complete(
+        {
+            "company_of_interest": "NFLX",
+            "trade_date": "2026-07-18",
+            "final_trade_decision": "Buy",
+            "market_report": "",
+            "sentiment_report": "",
+            "news_report": "",
+            "fundamentals_report": "",
+            "investment_plan": "",
+            "trader_investment_plan": "",
+            "investment_debate_state": {},
+            "risk_debate_state": {},
+        },
+        "Buy",
+    )
+
+    config = {
+        "results_dir": str(tmp_path),
+        "llm_provider": "deepseek",
+        "deep_think_llm": "deepseek-chat",
+        "quick_think_llm": "deepseek-chat",
+        "fallback_chain": [{"provider": "deepseek", "model": "deepseek-chat"}],
+        "llm_providers_used": ["deepseek"],
+        "llm_models_used": ["deepseek-chat"],
+        "llm_provider_configured": "minimax",
+    }
+    _finalize_us_run("NFLX", "2026-07-18", config, tracker)
+
+    import json
+
+    log_path = (
+        tmp_path / "NFLX" / "TradingAgentsStrategy_logs" / "full_states_log_2026-07-18.json"
+    )
+    saved = json.loads(log_path.read_text(encoding="utf-8"))
+    assert saved["llm_provider"] == "deepseek"
+    assert saved["llm_providers_used"] == ["deepseek"]
+    assert saved["llm_models_used"] == ["deepseek-chat"]
+    assert tracker.final_state["llm_providers_used"] == ["deepseek"]
 
 
 def test_finalize_us_run_provenance_handles_missing_keys(tmp_path, monkeypatch):

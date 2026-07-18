@@ -112,6 +112,11 @@ class TradingAgentsGraph:
             **llm_kwargs,
         )
 
+        # Keep client wrappers so finalize can read which providers actually
+        # answered (including mid-run fallback switches).
+        self._deep_client = deep_client
+        self._quick_client = quick_client
+
         self.deep_thinking_llm = deep_client.get_llm()
         self.quick_thinking_llm = quick_client.get_llm()
         
@@ -535,17 +540,13 @@ class TradingAgentsGraph:
             },
             "investment_plan": final_state["investment_plan"],
             "final_trade_decision": final_state["final_trade_decision"],
-            # LLM provenance: capture exactly which provider / model / chain
-            # this analysis used so audit logs can prove which model produced
-            # a given decision. Read from ``self.config`` (the graph's frozen
-            # snapshot) so the values reflect the config at run-time, not at
-            # some later point in the lifecycle.
-            "llm_provider": self.config.get("llm_provider"),
-            "deep_think_llm": self.config.get("deep_think_llm"),
-            "quick_think_llm": self.config.get("quick_think_llm"),
-            "llm_backend_url": self.config.get("backend_url"),
-            "llm_fallback_chain": list(self.config.get("fallback_chain") or []),
         }
+        provenance = self._llm_provenance_fields()
+        self.log_states_dict[str(trade_date)].update(provenance)
+        # Mirror provenance onto the in-memory state so the live report card
+        # (tracker.final_state) matches what was written to disk.
+        final_state.update(provenance)
+
         if final_state.get("action_plan"):
             self.log_states_dict[str(trade_date)]["action_plan"] = final_state[
                 "action_plan"
@@ -560,6 +561,18 @@ class TradingAgentsGraph:
         log_path = directory / f"full_states_log_{trade_date}.json"
         with open(log_path, "w", encoding="utf-8") as f:
             json.dump(self.log_states_dict[str(trade_date)], f, indent=4)
+
+    def _llm_provenance_fields(self) -> dict:
+        from tradingagents.llm_clients.provenance import (
+            collect_used_providers,
+            provenance_fields_from_config,
+        )
+
+        used = collect_used_providers(
+            getattr(self, "_deep_client", None),
+            getattr(self, "_quick_client", None),
+        )
+        return provenance_fields_from_config(self.config, used_providers=used)
 
     def process_signal(self, full_signal):
         """Process a signal to extract the core decision."""

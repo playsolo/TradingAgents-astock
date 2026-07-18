@@ -92,29 +92,49 @@ def signal_card_html(
 
 
 def _provenance_html(final_state: dict[str, Any]) -> str:
-    """LLM provenance line under the signal card (provider / model / fallback)."""
+    """LLM provenance line: providers/models that actually answered.
+
+    Prefer ``llm_providers_used`` / ``llm_models_used`` (Plan A). Legacy
+    reports without those fields fall back to configured provider/model and
+    intentionally omit the old "兜底 …" line (configured fallback is not
+    "actually used").
+    """
+    used = [
+        str(p)
+        for p in (final_state.get("llm_providers_used") or [])
+        if p
+    ]
+    models = [
+        str(m)
+        for m in (final_state.get("llm_models_used") or [])
+        if m
+    ]
+
     provenance_parts: list[str] = []
-    prov_provider = final_state.get("llm_provider")
-    prov_deep = final_state.get("deep_think_llm")
-    prov_quick = final_state.get("quick_think_llm")
-    if prov_provider:
-        provenance_parts.append(f"🤖 {prov_provider}")
-    if prov_deep or prov_quick:
-        if prov_deep and prov_quick and prov_deep == prov_quick:
-            provenance_parts.append(f"模型 {prov_deep}")
-        else:
-            bits = []
-            if prov_quick:
-                bits.append(f"快速 {prov_quick}")
-            if prov_deep:
-                bits.append(f"深度 {prov_deep}")
-            provenance_parts.append(" / ".join(bits))
-    prov_chain = final_state.get("llm_fallback_chain") or []
-    if prov_chain:
-        prov_labels = ", ".join(
-            f"{c.get('provider', '?')}/{c.get('model', '?')}" for c in prov_chain
-        )
-        provenance_parts.append(f"兜底 {prov_labels}")
+    if used:
+        provenance_parts.append(f"🤖 {'+'.join(used)}")
+        if models:
+            if len(models) == 1:
+                provenance_parts.append(f"模型 {models[0]}")
+            else:
+                provenance_parts.append(" → ".join(models))
+    else:
+        # Legacy / incomplete logs: configured provider only.
+        prov_provider = final_state.get("llm_provider")
+        prov_deep = final_state.get("deep_think_llm")
+        prov_quick = final_state.get("quick_think_llm")
+        if prov_provider:
+            provenance_parts.append(f"🤖 {prov_provider}")
+        if prov_deep or prov_quick:
+            if prov_deep and prov_quick and prov_deep == prov_quick:
+                provenance_parts.append(f"模型 {prov_deep}")
+            else:
+                bits = []
+                if prov_quick:
+                    bits.append(f"快速 {prov_quick}")
+                if prov_deep:
+                    bits.append(f"深度 {prov_deep}")
+                provenance_parts.append(" / ".join(bits))
 
     if not provenance_parts:
         return ""

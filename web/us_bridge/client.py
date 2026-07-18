@@ -182,18 +182,23 @@ def run_us_analysis(
             chosen["deep_think_llm"],
             ticker,
         )
-    # Mutate a copy of llm_config so build_worker_command sees the chosen
-    # provider; downstream report provenance (Bug C) reads from this same
-    # dict via config passed in by the runner.
-    effective_llm_config = dict(llm_config)
-    effective_llm_config["llm_provider"] = chosen["llm_provider"]
-    effective_llm_config["deep_think_llm"] = chosen["deep_think_llm"]
-    effective_llm_config["quick_think_llm"] = chosen["quick_think_llm"]
+    # Write effective provider back into llm_config so finalize / report
+    # provenance reflect what the US worker actually ran (Plan A).
+    configured_provider = llm_config.get("llm_provider")
+    llm_config["llm_provider"] = chosen["llm_provider"]
+    llm_config["deep_think_llm"] = chosen["deep_think_llm"]
+    llm_config["quick_think_llm"] = chosen["quick_think_llm"]
+    llm_config["llm_providers_used"] = [chosen["llm_provider"]]
+    llm_config["llm_models_used"] = [
+        chosen["deep_think_llm"] or chosen["quick_think_llm"] or chosen["llm_provider"]
+    ]
+    if chosen["fell_back"] and configured_provider:
+        llm_config["llm_provider_configured"] = configured_provider
 
     cmd, env, cwd = build_worker_command(
         ticker=ticker,
         trade_date=trade_date,
-        llm_config=effective_llm_config,
+        llm_config=llm_config,
     )
 
     popen_kwargs: dict[str, Any] = {

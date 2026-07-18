@@ -230,6 +230,10 @@ class FallbackLLMClient:
             )
             for label in self._provider_labels
         }
+        # Ordered unique providers that returned a successful response.
+        # Surfaced in report provenance as "actual models used".
+        self._used_providers: list[str] = []
+        self._used_lock = threading.Lock()
 
     @staticmethod
     def _label_for(client: Any, idx: int) -> str:
@@ -239,6 +243,18 @@ class FallbackLLMClient:
             if value:
                 return str(value)
         return f"client-{idx}"
+
+    def _record_used(self, label: str) -> None:
+        if not label:
+            return
+        with self._used_lock:
+            if label not in self._used_providers:
+                self._used_providers.append(label)
+
+    def used_providers(self) -> list[str]:
+        """Providers that successfully answered at least one call, in order."""
+        with self._used_lock:
+            return list(self._used_providers)
 
     @property
     def enabled(self) -> bool:
@@ -255,6 +271,7 @@ class FallbackLLMClient:
             labels=self._provider_labels,
             breakers=self._breakers,
             primary=primary,
+            on_success=self._record_used,
         )
         return proxy
 
@@ -289,11 +306,13 @@ class _FallbackLLMProxy:
         labels: list[str],
         breakers: dict[str, CircuitBreaker],
         primary: Any,
+        on_success: Any | None = None,
     ) -> None:
         self._llm_getters = llm_getters
         self._labels = labels
         self._breakers = breakers
         self._primary = primary
+        self._on_success = on_success
 
     # Forward attribute access on the proxy to the primary LLM so that callers
     # inspecting ``llm.model_name`` / ``llm.temperature`` see sensible values.
@@ -318,6 +337,8 @@ class _FallbackLLMProxy:
                 result = method(*args, **kwargs)
                 if breaker is not None:
                     breaker.record_success()
+                if self._on_success is not None:
+                    self._on_success(label)
                 if idx > 0:
                     logger.info(
                         "fallback succeeded on provider %r (after %d prior failure(s))",
@@ -376,6 +397,7 @@ class _FallbackLLMProxy:
             labels=self._labels,
             breakers=self._breakers,
             primary=self._primary.bind_tools(tools, **kwargs),
+            on_success=self._on_success,
         )
 
     def with_structured_output(self, schema, **kwargs):
@@ -395,6 +417,7 @@ class _FallbackLLMProxy:
             labels=self._labels,
             breakers=self._breakers,
             primary=self._primary.with_structured_output(schema, **kwargs),
+            on_success=self._on_success,
         )
 
 

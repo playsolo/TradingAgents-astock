@@ -114,6 +114,15 @@ def _clear_analysis_artifacts(ticker: str, trade_date: str) -> None:
     clear_checkpoint(DEFAULT_CONFIG["data_cache_dir"], ticker, trade_date)
 
 
+def dismiss_incomplete_task(ticker: str, trade_date: str) -> None:
+    """Remove an incomplete task from the sidebar list (and its checkpoint).
+
+    Does not stop a still-running worker process; a live run may re-record the
+    entry on the next status write. Intended for error / abandoned rows.
+    """
+    _clear_analysis_artifacts(ticker.strip().upper(), trade_date.strip())
+
+
 def _infer_market_for_ticker(ticker: str, market: str | None = None) -> str:
     if market in {"CN", "US"}:
         return market
@@ -347,22 +356,33 @@ def _render_incomplete_tasks() -> None:
         step = entry.get("checkpoint_step")
         step_label = f"step {step}" if step is not None else ""
         label = format_list_ticker_label(t, d, status_label, step_label)
-        if st.button(
-            label,
-            key=f"resume_{t}_{d}",
-            use_container_width=True,
-        ):
-            activate_incomplete_task(
-                st.session_state,
-                t,
-                d,
-                market=(
-                    "CN" if t.isdigit() and len(t) == 6 else "US"
-                ),
-            )
-            st.query_params.clear()
-            st.query_params["view"] = "home"
-            st.rerun()
+        main_col, del_col = st.columns([5, 1])
+        with main_col:
+            if st.button(
+                label,
+                key=f"resume_{t}_{d}",
+                use_container_width=True,
+            ):
+                activate_incomplete_task(
+                    st.session_state,
+                    t,
+                    d,
+                    market=(
+                        "CN" if t.isdigit() and len(t) == 6 else "US"
+                    ),
+                )
+                st.query_params.clear()
+                st.query_params["view"] = "home"
+                st.rerun()
+        with del_col:
+            if st.button(
+                "✕",
+                key=f"dismiss_incomplete_{t}_{d}",
+                use_container_width=True,
+                help="从列表中删除此未完成任务",
+            ):
+                dismiss_incomplete_task(t, d)
+                st.rerun()
 
 
 @st.fragment(run_every=2.0)
