@@ -459,42 +459,37 @@ def _render_admin_model_config() -> None:
     current_provider = admin_config.get("llm_provider", "deepseek")
     prov_idx = provider_keys.index(current_provider) if current_provider in provider_keys else 0
 
-    # Streamlit keeps the prior provider's options cached against the same
-    # ``admin_quick_model`` / ``admin_deep_model`` widget keys across reruns,
-    # so when the operator picks a different provider here the quick/deep
-    # selectboxes would keep showing the previous provider's model list.
-    # Streamlit forbids ``on_change`` on widgets inside a ``st.form``, so we
-    # detect the change here by comparing session_state against the form's
-    # intent, drop the stale widget state, and rerun — on the next pass the
-    # quick/deep selectboxes are rebuilt against the new provider's catalog.
-    _FORM_PROVIDER_KEY = "_admin_model_form_provider"
-    chosen = st.session_state.get("admin_llm_provider", provider_keys[prov_idx])
-    if chosen != st.session_state.get(_FORM_PROVIDER_KEY):
-        for stale_key in ("admin_quick_model", "admin_deep_model"):
-            st.session_state.pop(stale_key, None)
-        st.session_state[_FORM_PROVIDER_KEY] = chosen
-        st.rerun()
+    # The provider selectbox MUST live outside ``st.form`` for the admin
+    # panel to work correctly. Inside a form, widget values are not
+    # committed to ``session_state`` until the user clicks the form's
+    # submit button, which means a dynamic ``options`` list driven by the
+    # selected provider (i.e. the per-provider model catalog) would be
+    # frozen against the *first* provider the user picked, no matter how
+    # many times they switch providers before saving. Putting the provider
+    # selectbox above the form lets every rerun pick up the new value,
+    # which in turn rebuilds the quick/deep model selectboxes below with
+    # the right catalog.
+    selected_provider = st.selectbox(
+        "LLM 供应商",
+        options=provider_keys,
+        index=prov_idx,
+        format_func=lambda k: provider_labels.get(k, k),
+        key="admin_llm_provider",
+        help="切换后下方模型下拉会自动刷新为该供应商的可用模型。",
+    )
+
+    quick_models: list[str] = []
+    deep_models: list[str] = []
+    if selected_provider in MODEL_OPTIONS:
+        quick_models = [v for _, v in MODEL_OPTIONS[selected_provider]["quick"]]
+        deep_models = [v for _, v in MODEL_OPTIONS[selected_provider]["deep"]]
+
+    current_quick = admin_config.get("quick_think_llm", "deepseek-chat")
+    current_deep = admin_config.get("deep_think_llm", "deepseek-chat")
+    quick_idx = quick_models.index(current_quick) if current_quick in quick_models else 0
+    deep_idx = deep_models.index(current_deep) if current_deep in deep_models else 0
 
     with st.form("admin_model_config_form", clear_on_submit=False):
-        selected_provider = st.selectbox(
-            "LLM 供应商",
-            options=provider_keys,
-            index=prov_idx,
-            format_func=lambda k: provider_labels.get(k, k),
-            key="admin_llm_provider",
-        )
-
-        quick_models: list[str] = []
-        deep_models: list[str] = []
-        if selected_provider in MODEL_OPTIONS:
-            quick_models = [v for _, v in MODEL_OPTIONS[selected_provider]["quick"]]
-            deep_models = [v for _, v in MODEL_OPTIONS[selected_provider]["deep"]]
-
-        current_quick = admin_config.get("quick_think_llm", "deepseek-chat")
-        current_deep = admin_config.get("deep_think_llm", "deepseek-chat")
-        quick_idx = quick_models.index(current_quick) if current_quick in quick_models else 0
-        deep_idx = deep_models.index(current_deep) if current_deep in deep_models else 0
-
         if quick_models:
             quick_val = st.selectbox(
                 "快速思考模型",
