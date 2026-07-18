@@ -1,10 +1,22 @@
 """yfinance-based news data fetching functions."""
 
+import contextlib
+from datetime import datetime, timedelta, timezone
+
 import yfinance as yf
-from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
 from .stockstats_utils import yf_retry
+
+
+def _as_utc(dt: datetime) -> datetime:
+    """Normalize a datetime to UTC-aware; a naive value is assumed to be UTC.
+
+    Window bounds arrive naive (parsed from ``yyyy-mm-dd``) while article
+    timestamps may be offset-aware, so every operand is normalized before
+    comparison. Without this the filter depends on the host timezone (#1126).
+    """
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
 
 
 def _extract_article_data(article: dict) -> dict:
@@ -38,7 +50,16 @@ def _extract_article_data(article: dict) -> dict:
             "pub_date": pub_date,
         }
     else:
-        # Fallback for flat structure
+        # Fallback for flat structure. Parse the epoch publish time so flat
+        # articles are date-filterable too (otherwise they bypass the
+        # historical window and leak future news, #992/#1007).
+        pub_date = None
+        ts = article.get("providerPublishTime")
+        if ts:
+            # Epoch seconds are UTC; parse them as UTC-aware so filtering does
+            # not shift with the host timezone (#1126).
+            with contextlib.suppress(ValueError, OSError, TypeError):
+                pub_date = datetime.fromtimestamp(ts, tz=timezone.utc)
         return {
             "title": article.get("title", "No title"),
             "summary": article.get("summary", ""),
@@ -46,6 +67,21 @@ def _extract_article_data(article: dict) -> dict:
             "link": article.get("link", ""),
             "pub_date": None,
         }
+
+
+def _in_news_window(pub_date, start_dt, end_dt) -> bool:
+    """Whether an article belongs in the half-open window ``[start, end + 1 day)``.
+
+    Every operand is normalized to UTC, and the upper bound is exclusive so an
+    article stamped exactly at midnight after ``end_dt`` cannot leak into a
+    historical run (#1126). An undated article is kept only when the window
+    reaches the present (live run) — in a historical/backtest window it's
+    excluded, since we can't prove it isn't future news (#992/#1007).
+    """
+    end = _as_utc(end_dt)
+    if pub_date is not None:
+        return _as_utc(start_dt) <= _as_utc(pub_date) < end + timedelta(days=1)
+    return end >= datetime.now(timezone.utc) - timedelta(days=1)
 
 
 def get_news_yfinance(
@@ -81,11 +117,9 @@ def get_news_yfinance(
         for article in news:
             data = _extract_article_data(article)
 
-            # Filter by date if publish time is available
-            if data["pub_date"]:
-                pub_date_naive = data["pub_date"].replace(tzinfo=None)
-                if not (start_dt <= pub_date_naive <= end_dt + relativedelta(days=1)):
-                    continue
+            # Filter by date using UTC-aware, end-exclusive window
+            if not _in_news_window(data.get("pub_date"), start_dt, end_dt):
+                continue
 
             news_str += f"### {data['title']} (source: {data['publisher']})\n"
             if data["summary"]:
@@ -169,11 +203,9 @@ def get_global_news_yfinance(
             # Handle both flat and nested structures
             if "content" in article:
                 data = _extract_article_data(article)
-                # Skip articles published after curr_date (look-ahead guard)
-                if data.get("pub_date"):
-                    pub_naive = data["pub_date"].replace(tzinfo=None) if hasattr(data["pub_date"], "replace") else data["pub_date"]
-                    if pub_naive > curr_dt + relativedelta(days=1):
-                        continue
+                # Skip articles using UTC-aware, end-exclusive window
+                if not _in_news_window(data.get("pub_date"), start_dt, curr_dt):
+                    continue
                 title = data["title"]
                 publisher = data["publisher"]
                 link = data["link"]

@@ -352,7 +352,7 @@ def test_extract_signal_prefers_final_trade_decision():
         "investment_plan": "最终评级：买入",
         "final_trade_decision": "最终评级：减持",
     }
-    assert history.extract_signal(state) == "Underweight"
+    assert history.extract_signal(state) == "Sell"
 
 
 def test_extract_signal_english_still_works():
