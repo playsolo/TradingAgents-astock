@@ -431,6 +431,17 @@ def render_logout_button() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _on_admin_provider_change() -> None:
+    """When the admin switches LLM provider, clear the stale model widget
+    state so the model selectbox re-renders against the new provider's
+    catalog. Without this, Streamlit keeps the previous provider's option
+    list cached against the same widget key and the user sees deepseek
+    models even after picking MiniMax.
+    """
+    for key in ("admin_quick_model", "admin_deep_model"):
+        st.session_state.pop(key, None)
+
+
 def _render_admin_model_config() -> None:
     """Admin-only form to set the model config that all users will use.
 
@@ -466,6 +477,7 @@ def _render_admin_model_config() -> None:
             index=prov_idx,
             format_func=lambda k: provider_labels.get(k, k),
             key="admin_llm_provider",
+            on_change=_on_admin_provider_change,
         )
 
         quick_models: list[str] = []
