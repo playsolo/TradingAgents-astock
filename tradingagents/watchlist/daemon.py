@@ -34,7 +34,7 @@ _POLL_SECONDS = 30
 
 _PROVIDER_QUICK_DEFAULTS = {
     "deepseek": "deepseek-v4-flash",
-    "minimax": "MiniMax-M2.7-highspeed",
+    "minimax": "MiniMax-M3",
     "qwen": "qwen3.5-flash",
     "glm": "glm-4-flash",
     "openai": "gpt-4.1-mini",
@@ -42,7 +42,7 @@ _PROVIDER_QUICK_DEFAULTS = {
 }
 _PROVIDER_DEEP_DEFAULTS = {
     "deepseek": "deepseek-chat",
-    "minimax": "MiniMax-M2.7",
+    "minimax": "MiniMax-M3",
     "qwen": "qwen3.5-plus",
     "glm": "glm-4-plus",
     "openai": "gpt-5.4",

@@ -321,13 +321,18 @@ def _build_config() -> dict:
         config["quick_think_llm"] = persisted["quick_think_llm"]
         backend_url = (persisted.get("backend_url") or os.getenv("BACKEND_URL") or "").strip()
         config["backend_url"] = backend_url or None
+        # Carry the fallback chain so callers can wrap their LLM clients with
+        # provider-level failover. Empty by default — operators opt in via
+        # the admin panel or by editing ``model_config.json``.
+        config["fallback_chain"] = persisted.get("fallback_chain") or []
     else:
         config["llm_provider"] = st.session_state.get("llm_provider", "minimax")
-        config["deep_think_llm"] = st.session_state.get("deep_think_llm", "MiniMax-M2.7")
-        config["quick_think_llm"] = st.session_state.get("quick_think_llm", "MiniMax-M2.7-highspeed")
+        config["deep_think_llm"] = st.session_state.get("deep_think_llm", "MiniMax-M3")
+        config["quick_think_llm"] = st.session_state.get("quick_think_llm", "MiniMax-M3")
         # Optional third-party / proxy endpoint. Sidebar input wins, else .env BACKEND_URL.
         backend_url = (st.session_state.get("llm_base_url") or os.getenv("BACKEND_URL") or "").strip()
         config["backend_url"] = backend_url or None
+        config["fallback_chain"] = []
     config["data_vendors"] = {
         "core_stock_apis": "a_stock",
         "technical_indicators": "a_stock",

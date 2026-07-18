@@ -102,14 +102,11 @@ MODEL_OPTIONS: ProviderModeOptions = {
     },
     "minimax": {
         "quick": [
-            ("MiniMax-M2.7-highspeed - Latest fast model", "MiniMax-M2.7-highspeed"),
-            ("MiniMax-M2.5-highspeed - Stable fast model", "MiniMax-M2.5-highspeed"),
+            ("MiniMax-M3 - Flagship model (recommended)", "MiniMax-M3"),
             ("Custom model ID", "custom"),
         ],
         "deep": [
-            ("MiniMax-M2.7 - Latest flagship model", "MiniMax-M2.7"),
-            ("MiniMax-M2.5 - Stable flagship model", "MiniMax-M2.5"),
-            ("MiniMax-M2.7-highspeed - Fast alternative", "MiniMax-M2.7-highspeed"),
+            ("MiniMax-M3 - Flagship model (recommended)", "MiniMax-M3"),
             ("Custom model ID", "custom"),
         ],
     },

@@ -236,12 +236,13 @@ def _setup_tracker_for_run(
 
 def _build_quick_llm_from_config(config: dict) -> Any:
     """Build a quick-think LLM from a runtime config dict (worker / Streamlit)."""
-    from tradingagents.llm_clients import create_llm_client
+    from tradingagents.llm_clients import create_llm_client_with_fallback
 
-    client = create_llm_client(
+    client = create_llm_client_with_fallback(
         provider=config.get("llm_provider") or "deepseek",
         model=config.get("quick_think_llm") or "deepseek-chat",
         base_url=config.get("backend_url"),
+        fallback_chain=config.get("fallback_chain") or [],
     )
     return client.get_llm()
 

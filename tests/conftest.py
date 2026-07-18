@@ -45,5 +45,8 @@ def mock_llm_client():
     with patch(
         "tradingagents.llm_clients.factory.create_llm_client",
         return_value=client,
+    ), patch(
+        "tradingagents.llm_clients.factory.create_llm_client_with_fallback",
+        return_value=client,
     ):
         yield client

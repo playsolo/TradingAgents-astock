@@ -345,12 +345,13 @@ def save_analysis_state(
 
 
 def _build_quick_llm(config: dict[str, Any]):
-    from tradingagents.llm_clients import create_llm_client
+    from tradingagents.llm_clients import create_llm_client_with_fallback
 
-    client = create_llm_client(
+    client = create_llm_client_with_fallback(
         provider=config.get("llm_provider", "openai"),
         model=config.get("quick_think_llm", "gpt-4o-mini"),
         base_url=config.get("backend_url"),
+        fallback_chain=config.get("fallback_chain") or [],
     )
     return client.get_llm()
 
@@ -536,12 +537,13 @@ def _refresh_quality_gate(state: dict[str, Any], config: dict[str, Any]) -> str:
 
 
 def _build_deep_llm(config: dict[str, Any]):
-    from tradingagents.llm_clients import create_llm_client
+    from tradingagents.llm_clients import create_llm_client_with_fallback
 
-    client = create_llm_client(
+    client = create_llm_client_with_fallback(
         provider=config.get("llm_provider", "openai"),
         model=config.get("deep_think_llm") or config.get("quick_think_llm", "gpt-4o-mini"),
         base_url=config.get("backend_url"),
+        fallback_chain=config.get("fallback_chain") or [],
     )
     return client.get_llm()
 

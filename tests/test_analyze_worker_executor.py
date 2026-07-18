@@ -33,14 +33,14 @@ def test_build_worker_config_uses_model_config(monkeypatch):
         "tradingagents.auth.model_config.load_model_config",
         lambda: {
             "llm_provider": "minimax",
-            "deep_think_llm": "MiniMax-M2.7",
-            "quick_think_llm": "MiniMax-M2.7-highspeed",
+            "deep_think_llm": "MiniMax-M3",
+            "quick_think_llm": "MiniMax-M3",
             "backend_url": None,
         },
     )
     cfg = executor.build_worker_config()
     assert cfg["llm_provider"] == "minimax"
-    assert cfg["deep_think_llm"] == "MiniMax-M2.7"
+    assert cfg["deep_think_llm"] == "MiniMax-M3"
     assert cfg["max_debate_rounds"] == 5
     assert cfg["max_risk_discuss_rounds"] == 5
     assert cfg["checkpoint_enabled"] is True
