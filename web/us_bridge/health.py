@@ -36,14 +36,18 @@ logger = logging.getLogger(__name__)
 # Providers we know how to probe. Anthropic and ``custom`` are skipped
 # because they don't expose a models endpoint at the same path; we
 # assume they're healthy and let the upstream run fail loudly if not.
+# Paths are relative to ``_default_base_url`` (which already includes
+# ``/v1`` / ``/v4`` for OpenAI-compatible hosts). Do NOT prefix ``/v1``
+# again — that produced ``…/v1/v1/models`` (404) and falsely marked a
+# healthy MiniMax key as unhealthy, forcing every US run onto deepseek.
 _PROBE_ENDPOINTS: dict[str, str] = {
-    "minimax": "/v1/models",
+    "minimax": "/models",
     "deepseek": "/models",
-    "openai": "/v1/models",
-    "qwen": "/v1/models",
-    "glm": "/v1/models",
-    "xai": "/v1/models",
-    "openrouter": "/v1/models",
+    "openai": "/models",
+    "qwen": "/models",
+    "glm": "/models",
+    "xai": "/models",
+    "openrouter": "/models",
     "ollama": "/api/tags",
 }
 

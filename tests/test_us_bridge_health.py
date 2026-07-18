@@ -29,12 +29,32 @@ from web.us_bridge.health import (
 
 
 def test_probe_provider_minimax_success(monkeypatch):
-    """A 200 from ``/v1/models`` is healthy."""
+    """A 200 from ``/models`` (on the ``…/v1`` base) is healthy."""
     fake_resp = MagicMock(status_code=200)
-    monkeypatch.setattr(
-        "web.us_bridge.health.requests.get", lambda *_a, **_k: fake_resp
-    )
+    seen: dict[str, str] = {}
+
+    def capture(url, *args, **kwargs):
+        seen["url"] = url
+        return fake_resp
+
+    monkeypatch.setattr("web.us_bridge.health.requests.get", capture)
     assert probe_provider("minimax", api_key="sk-test", base_url="https://api.minimaxi.com/v1") is True
+    assert seen["url"] == "https://api.minimaxi.com/v1/models"
+
+
+def test_probe_provider_minimax_default_base_no_double_v1(monkeypatch):
+    """Default MiniMax base already ends in ``/v1``; path must not add another."""
+    fake_resp = MagicMock(status_code=200)
+    seen: dict[str, str] = {}
+
+    def capture(url, *args, **kwargs):
+        seen["url"] = url
+        return fake_resp
+
+    monkeypatch.setattr("web.us_bridge.health.requests.get", capture)
+    assert probe_provider("minimax", api_key="sk-test") is True
+    assert seen["url"] == "https://api.minimaxi.com/v1/models"
+    assert "/v1/v1/" not in seen["url"]
 
 
 def test_probe_provider_401_unhealthy(monkeypatch):
