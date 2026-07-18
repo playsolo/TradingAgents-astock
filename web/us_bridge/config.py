@@ -11,6 +11,35 @@ DEFAULT_US_ROOT = Path("/Users/solo/workspace/tradingAgents")
 
 _WORKER_PATH = Path(__file__).resolve().parent / "worker.py"
 
+# A-stock's provider names always mean the *China* OpenAI-compatible
+# endpoint (api.minimaxi.com / dashscope.aliyuncs.com / open.bigmodel.cn).
+# Upstream US TradingAgents split dual-region vendors (#758): ``minimax``
+# hits api.minimax.io (international) and ``minimax-cn`` hits .com. Passing
+# our ``minimax`` through unchanged makes a valid CN key look like
+# ``invalid api key (2049)`` on .io — exactly the MU failure mode.
+_US_PROVIDER_REMAP: dict[str, str] = {
+    "minimax": "minimax-cn",
+    "qwen": "qwen-cn",
+    "glm": "glm-cn",
+}
+
+# When we remap to a *-cn provider, the upstream client reads a separate
+# CN-specific env var. Mirror the A-stock key into it if unset so operators
+# only need one key in .env.
+_US_KEY_ENV_ALIAS: dict[str, tuple[str, str]] = {
+    "minimax-cn": ("MINIMAX_CN_API_KEY", "MINIMAX_API_KEY"),
+    "qwen-cn": ("DASHSCOPE_CN_API_KEY", "DASHSCOPE_API_KEY"),
+    "glm-cn": ("ZHIPU_CN_API_KEY", "ZHIPU_API_KEY"),
+}
+
+
+def remap_provider_for_us(provider: str | None) -> str | None:
+    """Map an A-stock provider id onto the US upstream dual-region id."""
+    if not provider:
+        return provider
+    key = str(provider).strip().lower()
+    return _US_PROVIDER_REMAP.get(key, str(provider).strip())
+
 
 def resolve_us_root(root: str | Path | None = None) -> Path:
     raw = root or os.getenv("US_TRADINGAGENTS_ROOT") or str(DEFAULT_US_ROOT)
@@ -62,9 +91,10 @@ def build_worker_command(
     env["US_BRIDGE_TRADE_DATE"] = trade_date
     env["US_BRIDGE_PROJECT_ROOT"] = str(us_root)
 
-    provider = llm_config.get("llm_provider")
+    provider = remap_provider_for_us(llm_config.get("llm_provider"))
     if provider:
         env["TRADINGAGENTS_LLM_PROVIDER"] = str(provider)
+        _mirror_cn_api_key(env, provider)
     if llm_config.get("deep_think_llm"):
         env["TRADINGAGENTS_DEEP_THINK_LLM"] = str(llm_config["deep_think_llm"])
     if llm_config.get("quick_think_llm"):
@@ -81,3 +111,16 @@ def build_worker_command(
 
     cmd = [str(python), "-u", str(_WORKER_PATH)]
     return cmd, env, us_root
+
+
+def _mirror_cn_api_key(env: dict[str, str], provider: str) -> None:
+    """Ensure the upstream CN key env is populated for remapped providers."""
+    alias = _US_KEY_ENV_ALIAS.get(provider.lower())
+    if not alias:
+        return
+    cn_var, shared_var = alias
+    if env.get(cn_var):
+        return
+    shared = env.get(shared_var) or os.environ.get(shared_var)
+    if shared:
+        env[cn_var] = shared

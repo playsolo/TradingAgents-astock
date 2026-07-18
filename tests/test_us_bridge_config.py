@@ -79,3 +79,30 @@ def test_build_worker_command_points_at_worker(monkeypatch, tmp_path):
     assert env["TRADINGAGENTS_LLM_PROVIDER"] == "openai"
     assert env["TRADINGAGENTS_LLM_BACKEND_URL"] == "https://example.com/v1"
     assert DEFAULT_US_ROOT.name == "tradingAgents"
+
+
+def test_build_worker_command_remaps_minimax_to_cn(monkeypatch, tmp_path):
+    """A-stock minimax is China; US upstream ``minimax`` is international (.io)."""
+    from web.us_bridge.config import remap_provider_for_us
+
+    assert remap_provider_for_us("minimax") == "minimax-cn"
+    assert remap_provider_for_us("deepseek") == "deepseek"
+
+    us_root = tmp_path / "tradingAgents"
+    (us_root / "tradingagents").mkdir(parents=True)
+    (us_root / "tradingagents" / "__init__.py").write_text("", encoding="utf-8")
+    py = tmp_path / "python"
+    py.write_text("#!/bin/sh\n", encoding="utf-8")
+    py.chmod(0o755)
+    monkeypatch.setenv("US_TRADINGAGENTS_ROOT", str(us_root))
+    monkeypatch.setenv("US_TRADINGAGENTS_PYTHON", str(py))
+    monkeypatch.setenv("MINIMAX_API_KEY", "sk-cn-test-key")
+    monkeypatch.delenv("MINIMAX_CN_API_KEY", raising=False)
+
+    _cmd, env, _cwd = build_worker_command(
+        ticker="MU",
+        trade_date="2026-07-18",
+        llm_config={"llm_provider": "minimax", "deep_think_llm": "MiniMax-M3"},
+    )
+    assert env["TRADINGAGENTS_LLM_PROVIDER"] == "minimax-cn"
+    assert env["MINIMAX_CN_API_KEY"] == "sk-cn-test-key"
