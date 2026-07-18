@@ -7,6 +7,7 @@ from tradingagents.agents.utils.agent_utils import (
     analysis_date_instruction,
     build_instrument_context,
     catalyst_pricing_instruction,
+    clock_from_state,
     get_language_instruction,
 )
 from tradingagents.agents.utils.structured import (
@@ -21,7 +22,7 @@ def create_research_manager(llm):
     def research_manager_node(state) -> dict:
         instrument_context = build_instrument_context(state["company_of_interest"])
         history = state["investment_debate_state"].get("history", "")
-        date_rule = analysis_date_instruction(state.get("trade_date", ""))
+        date_rule = analysis_date_instruction(state.get("trade_date", ""), now=clock_from_state(state))
         pricing_gate = catalyst_pricing_instruction()
 
         investment_debate_state = state["investment_debate_state"]

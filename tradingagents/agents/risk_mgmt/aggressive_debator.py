@@ -2,6 +2,7 @@
 from tradingagents.agents.utils.agent_utils import (
     analysis_date_instruction,
     catalyst_pricing_instruction,
+    clock_from_state,
 )
 
 
@@ -23,7 +24,7 @@ def create_aggressive_debator(llm):
         lockup_report = state.get("lockup_report", "")
 
         trader_decision = state["trader_investment_plan"]
-        date_rule = analysis_date_instruction(state.get("trade_date", ""))
+        date_rule = analysis_date_instruction(state.get("trade_date", ""), now=clock_from_state(state))
         pricing_gate = catalyst_pricing_instruction()
 
         prompt = f"""As the Aggressive Risk Analyst evaluating an A-share (China mainland) stock, your role is to champion high-reward opportunities and bold strategies. Focus on the potential upside, growth potential, and momentum—even when these come with elevated risk. Counter the conservative and neutral analysts with data-driven rebuttals.

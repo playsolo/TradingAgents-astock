@@ -1,6 +1,7 @@
 from tradingagents.agents.utils.agent_utils import (
     analysis_date_instruction,
     catalyst_pricing_instruction,
+    clock_from_state,
 )
 
 
@@ -19,7 +20,7 @@ def create_bear_researcher(llm):
         hot_money_report = state.get("hot_money_report", "")
         lockup_report = state.get("lockup_report", "")
         data_quality_summary = state.get("data_quality_summary", "")
-        date_rule = analysis_date_instruction(state.get("trade_date", ""))
+        date_rule = analysis_date_instruction(state.get("trade_date", ""), now=clock_from_state(state))
         pricing_gate = catalyst_pricing_instruction()
 
         prompt = f"""You are a Bear Analyst making the case against investing in this A-share (China mainland) stock. Your goal is to present a well-reasoned argument emphasizing risks, challenges, and negative indicators unique to the Chinese market. Leverage the provided research and data to highlight potential downsides and counter bullish arguments effectively.

@@ -1,4 +1,4 @@
-from tradingagents.agents.utils.agent_utils import analysis_date_instruction
+from tradingagents.agents.utils.agent_utils import analysis_date_instruction, clock_from_state
 
 
 def create_bull_researcher(llm):
@@ -16,7 +16,7 @@ def create_bull_researcher(llm):
         hot_money_report = state.get("hot_money_report", "")
         lockup_report = state.get("lockup_report", "")
         data_quality_summary = state.get("data_quality_summary", "")
-        date_rule = analysis_date_instruction(state.get("trade_date", ""))
+        date_rule = analysis_date_instruction(state.get("trade_date", ""), now=clock_from_state(state))
 
         prompt = f"""You are a Bull Analyst advocating for investing in this A-share (China mainland) stock. Your task is to build a strong, evidence-based case emphasizing growth potential, competitive advantages, and positive market indicators. Leverage the provided research and data to address concerns and counter bearish arguments effectively.
 {date_rule}

@@ -1,5 +1,5 @@
 
-from tradingagents.agents.utils.agent_utils import analysis_date_instruction
+from tradingagents.agents.utils.agent_utils import analysis_date_instruction, clock_from_state
 
 
 def create_conservative_debator(llm):
@@ -20,7 +20,7 @@ def create_conservative_debator(llm):
         lockup_report = state.get("lockup_report", "")
 
         trader_decision = state["trader_investment_plan"]
-        date_rule = analysis_date_instruction(state.get("trade_date", ""))
+        date_rule = analysis_date_instruction(state.get("trade_date", ""), now=clock_from_state(state))
 
         prompt = f"""As the Conservative Risk Analyst evaluating an A-share (China mainland) stock, your primary objective is to protect assets, minimize volatility, and ensure steady, reliable growth. Critically examine high-risk elements in the trader's plan, pointing out where it may expose the firm to undue risk.
 {date_rule}

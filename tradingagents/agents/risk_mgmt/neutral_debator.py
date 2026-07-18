@@ -1,5 +1,5 @@
 
-from tradingagents.agents.utils.agent_utils import analysis_date_instruction
+from tradingagents.agents.utils.agent_utils import analysis_date_instruction, clock_from_state
 
 
 def create_neutral_debator(llm):
@@ -20,7 +20,7 @@ def create_neutral_debator(llm):
         lockup_report = state.get("lockup_report", "")
 
         trader_decision = state["trader_investment_plan"]
-        date_rule = analysis_date_instruction(state.get("trade_date", ""))
+        date_rule = analysis_date_instruction(state.get("trade_date", ""), now=clock_from_state(state))
 
         prompt = f"""As the Neutral Risk Analyst evaluating an A-share (China mainland) stock, your role is to provide a balanced perspective, weighing both the potential benefits and risks. Factor in A-share market structure, broader trends, and diversification strategies.
 {date_rule}
