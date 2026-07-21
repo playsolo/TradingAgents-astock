@@ -497,7 +497,14 @@ def max_jobs_configured() -> int:
 def _render_watchbuy_page(entries: list[dict], *, dismiss_fn) -> None:
     """Render the 关注-待买入 tab with buy-zone signal details."""
     if not entries:
-        st.caption("当前没有待买入信号")
+        st.caption("暂无待买入信号")
+        st.markdown(
+            '<span style="font-size:0.8rem;color:#888;">'
+            "系统会在 A 股交易时段每 5 分钟自动扫描已分析股票的买入区间。"
+            "当有持仓/关注的股票价格回落至买入区间时，将在此显示提示。"
+            "</span>",
+            unsafe_allow_html=True,
+        )
         return
 
     for entry in entries:
@@ -921,11 +928,8 @@ def render_sidebar() -> None:
     st.caption(signal_count_label(groups, total))
 
     n_watch = len(groups.get("WatchBuy", []))
-    # 如果存在关注-待买入信号，将其放在 Tab 第一顺位
-    tab_labels = []
-    if n_watch:
-        tab_labels.append(("关注-待买入", "watchbuy"))
-    tab_labels += [
+    # 关注-待买入 Tab 始终显示（包括 0），让用户知道功能存在
+    tab_labels = [("关注-待买入", "watchbuy")] + [
         ("买入", "buy"),
         ("卖出", "sell"),
         ("持有", "hold"),
