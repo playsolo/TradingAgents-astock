@@ -951,3 +951,14 @@ def render_sidebar() -> None:
 
     st.markdown("---")
     st.caption("⚠️ 仅供学习研究，不构成投资建议")
+
+    # ── Auto-refresh for real-time signals ─────────────────────────
+    # 每 30 秒自动 reload 页面，确保关注-待买入信号及时刷新。
+    # 纯前端 JS 实现，每次 rerun 后重置 30s 计时器。
+    st.markdown(
+        '<script>'
+        'if (window._sbrTimer) clearTimeout(window._sbrTimer);'
+        'window._sbrTimer = setTimeout(function(){ window.location.reload(); }, 30000);'
+        '</script>',
+        unsafe_allow_html=True,
+    )
