@@ -953,12 +953,15 @@ def render_sidebar() -> None:
     st.caption("⚠️ 仅供学习研究，不构成投资建议")
 
     # ── Auto-refresh for real-time signals ─────────────────────────
-    # 每 30 秒自动 reload 页面，确保关注-待买入信号及时刷新。
-    # 纯前端 JS 实现，每次 rerun 后重置 30s 计时器。
-    st.markdown(
-        '<script>'
-        'if (window._sbrTimer) clearTimeout(window._sbrTimer);'
-        'window._sbrTimer = setTimeout(function(){ window.location.reload(); }, 30000);'
-        '</script>',
-        unsafe_allow_html=True,
-    )
+    # 每 30 秒自动 rerun，确保关注-待买入信号及时刷新。
+    # 使用 st.rerun() + session_state 节流（30s 内不重复 rerun）。
+    # Streamlit 社区的推荐做法，不影响 SSR/SEO。
+    import time as _refresh_time
+
+    _ts_key = "_sidebar_auto_refresh_ts"
+    _interval = 30
+    _now = _refresh_time.time()
+    _last = st.session_state.get(_ts_key, 0)
+    if _now - _last >= _interval:
+        st.session_state[_ts_key] = _now
+        st.rerun()
