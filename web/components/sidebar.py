@@ -932,7 +932,7 @@ def render_sidebar() -> None:
     ]
 
     tabs = st.tabs(
-        [f"{label}({len(groups[name_key.upper()])})" if name_key != "watchbuy"
+        [f"{label}({len(groups.get(name_key.capitalize(), []))})" if name_key != "watchbuy"
          else f"🛎️ 关注-待买入({n_watch})"
          for label, name_key in tab_labels]
     )
@@ -943,7 +943,7 @@ def render_sidebar() -> None:
             if name_key == "watchbuy":
                 _render_watchbuy_page(groups.get("WatchBuy", []), dismiss_fn=dismiss_signal)
             else:
-                _render_history_page(groups[name_key.upper()], page_size, tab_key=name_key)
+                _render_history_page(groups.get(name_key.capitalize(), []), page_size, tab_key=name_key)
 
     st.markdown("---")
     st.caption("⚠️ 仅供学习研究，不构成投资建议")
