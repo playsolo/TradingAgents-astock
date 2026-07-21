@@ -29,5 +29,12 @@ def test_infer_market_cn_by_cached_name():
     assert _infer_token_market("紫金矿业") == "CN"
 
 
+def test_infer_market_cn_by_chinese_even_without_cache():
+    """CJK names must be CN even when the name→code cache has never seen them."""
+    assert _infer_token_market("世纪华通") == "CN"
+    assert _infer_token_market("三七互娱") == "CN"
+    assert _infer_token_market("完美世界") == "CN"
+
+
 def test_infer_market_us_fallback_when_not_digit_not_cached():
     assert _infer_token_market("SOMETHING_NEW") == "US"

@@ -74,6 +74,11 @@ def create_portfolio_manager(llm):
 - **Underweight**: Reduce exposure, take partial profits
 - **Sell**: Exit position or avoid entry
 
+**Executive Summary guidance** — if your rating is Buy or Overweight, explicitly \
+state a price range (e.g. "12–14元") for non-holders to enter. This will be \
+tracked automatically by the price monitor and surfaced in the sidebar. \
+If Hold or Sell, you may omit the price range; the monitor will skip it.
+
 **Context:**
 - Research Manager's investment plan: **{research_plan}**
 - Trader's transaction proposal: **{trader_plan}**

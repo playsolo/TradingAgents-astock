@@ -554,9 +554,11 @@ def resolve_ticker_batch(
                     raise ValueError("看起来像 A 股代码；请切换到「A股」市场后再分析")
             else:
                 code = resolve_cn(token)
+            from tradingagents.watchlist.calendar import effective_trade_date_for_market
+
             job = AnalysisJob(
                 ticker=code,
-                trade_date=trade_date,
+                trade_date=effective_trade_date_for_market(market, trade_date),
                 market=market,
                 fresh=True,
             )
@@ -572,9 +574,17 @@ def resolve_ticker_batch(
 
 
 def _infer_token_market(token: str) -> str:
-    """Return ``"CN"`` for 6-digit codes and Chinese names, ``"US"`` otherwise."""
+    """Return ``"CN"`` for 6-digit codes and Chinese names, ``"US"`` otherwise.
+
+    Chinese company names must be CN even when the name→code cache misses;
+    otherwise they are mis-routed to the US bridge and crash on
+    ``safe_ticker_component`` (ASCII-only path components).
+    """
     code = (token or "").strip()
     if code.isdigit() and len(code) == 6:
+        return "CN"
+    # Any CJK character → A-share name (e.g. 世纪华通 / 三七互娱).
+    if any("\u4e00" <= ch <= "\u9fff" for ch in code):
         return "CN"
     from web.stock_display import lookup_code_by_cached_name
     if lookup_code_by_cached_name(code):
@@ -615,9 +625,11 @@ def resolve_ticker_batch_mixed(
                     raise ValueError("美股代码不能包含空格")
             else:
                 code = resolve_cn(token)
+            from tradingagents.watchlist.calendar import effective_trade_date_for_market
+
             job = AnalysisJob(
                 ticker=code,
-                trade_date=trade_date,
+                trade_date=effective_trade_date_for_market(market, trade_date),
                 market=market,
                 fresh=True,
                 force_full_reeval=bool(force_full_reeval),

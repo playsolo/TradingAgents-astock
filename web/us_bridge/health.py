@@ -51,6 +51,22 @@ _PROBE_ENDPOINTS: dict[str, str] = {
     "ollama": "/api/tags",
 }
 
+# Cheap chat models used when ``model`` is not passed to the probe.
+# ``GET /models`` alone is insufficient for MiniMax Token Plan quotas:
+# listing models still returns 200 while ``chat/completions`` returns 429.
+_PROBE_CHAT_MODELS: dict[str, str] = {
+    "minimax": "MiniMax-M3",
+    "deepseek": "deepseek-chat",
+    "openai": "gpt-4o-mini",
+    "qwen": "qwen-turbo",
+    "glm": "glm-4-flash",
+    "xai": "grok-2-latest",
+    "openrouter": "openai/gpt-4o-mini",
+}
+
+# Quota / billing statuses that mean "don't send a full US analysis here".
+_QUOTA_STATUS_CODES = frozenset({402, 429})
+
 _PROBE_TIMEOUT_S = 4.0
 
 
@@ -59,11 +75,15 @@ def probe_provider(
     *,
     api_key: str | None,
     base_url: str | None = None,
+    model: str | None = None,
 ) -> bool:
     """Return True if ``provider`` looks healthy enough to run an analysis.
 
     Healthy == the configured API key is non-empty AND a quick HTTP probe
-    returns 2xx. Anything else (network error, 4xx, 5xx) is unhealthy.
+    returns 2xx. For OpenAI-compatible hosts we also fire a 1-token
+    ``chat/completions`` ping: MiniMax Token Plan exhaustion still serves
+    ``GET /models`` as 200 while chat returns 429 — without the chat probe
+    the US bridge would spawn a doomed MiniMax subprocess.
     """
     if not provider:
         return False
@@ -86,7 +106,66 @@ def probe_provider(
     except requests.RequestException as exc:
         logger.warning("probe %s failed: %s", provider, exc.__class__.__name__)
         return False
-    return 200 <= resp.status_code < 300
+    if not (200 <= resp.status_code < 300):
+        return False
+
+    # Ollama uses /api/tags, not chat/completions — models list is enough.
+    if provider.lower() == "ollama":
+        return True
+
+    return _probe_chat_completions(
+        provider,
+        base=base,
+        api_key=api_key,
+        model=model,
+    )
+
+
+def _probe_chat_completions(
+    provider: str,
+    *,
+    base: str,
+    api_key: str,
+    model: str | None,
+) -> bool:
+    """1-token chat ping so Token Plan / rate-limit exhaustion is visible."""
+    chat_model = (model or "").strip() or _PROBE_CHAT_MODELS.get(provider.lower())
+    if not chat_model:
+        return True
+
+    url = f"{base.rstrip('/')}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": chat_model,
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 1,
+    }
+    try:
+        resp = requests.post(
+            url, headers=headers, json=payload, timeout=_PROBE_TIMEOUT_S
+        )
+    except requests.RequestException as exc:
+        logger.warning(
+            "chat probe %s failed: %s", provider, exc.__class__.__name__
+        )
+        return False
+
+    if resp.status_code in _QUOTA_STATUS_CODES:
+        logger.warning(
+            "chat probe %s unhealthy: HTTP %s (quota/rate-limit)",
+            provider,
+            resp.status_code,
+        )
+        return False
+    if not (200 <= resp.status_code < 300):
+        logger.warning(
+            "chat probe %s unhealthy: HTTP %s", provider, resp.status_code
+        )
+        return False
+    return True
 
 
 def _default_base_url(provider: str) -> str:
@@ -151,7 +230,12 @@ def choose_provider_for_us_bridge(
     the probe, every subsequent call would also fail and waste 401s.
     """
     primary_key = _api_key_for(llm_provider, api_key)
-    if probe_provider(llm_provider, api_key=primary_key, base_url=base_url):
+    if probe_provider(
+        llm_provider,
+        api_key=primary_key,
+        base_url=base_url,
+        model=deep_think_llm or quick_think_llm,
+    ):
         return {
             "llm_provider": llm_provider,
             "deep_think_llm": deep_think_llm,
@@ -168,7 +252,11 @@ def choose_provider_for_us_bridge(
         if not candidate_provider or not candidate_model:
             continue
         candidate_key = _api_key_for(candidate_provider, None)
-        if probe_provider(candidate_provider, api_key=candidate_key):
+        if probe_provider(
+            candidate_provider,
+            api_key=candidate_key,
+            model=candidate_model,
+        ):
             logger.info(
                 "US bridge fallback: %s -> %s/%s",
                 llm_provider,

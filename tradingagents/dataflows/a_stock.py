@@ -488,6 +488,10 @@ def _tencent_quote(codes: list[str]) -> dict[str, dict]:
     """
     prefixed = [f"{_get_prefix(c)}{c}" for c in codes]
     url = "https://qt.gtimg.cn/q=" + ",".join(prefixed)
+    # Percent-encode non-ASCII characters so Chinese ticker values (e.g.
+    # "完美世界" from an unresolveable LLM input) do not crash on
+    # http.client._encode_request which calls request.encode("ascii").
+    url = urllib.parse.quote(url, safe=":/?=&,")
     req = urllib.request.Request(url)
     req.add_header("User-Agent", "Mozilla/5.0")
     resp = urllib.request.urlopen(req, timeout=10)
@@ -527,6 +531,28 @@ def _tencent_quote(codes: list[str]) -> dict[str, dict]:
             "pe_static": _sf(vals[52]),
         }
     return result
+
+
+# ---------------------------------------------------------------------------
+# Price monitor helpers (watchlist buy-zone scanning)
+# ---------------------------------------------------------------------------
+
+def batch_get_spot_prices(tickers: list[str]) -> dict[str, float]:
+    """Fetch current prices for a batch of A-share tickers.
+
+    Returns ``{ticker: current_price}``. Uses the Tencent Finance batch API
+    (no Eastmoney throttling needed). Unresolvable tickers or API errors
+    produce no entry (caller checks ``ticker in result``).
+    """
+    codes = [str(t).strip() for t in tickers if str(t).strip()]
+    if not codes:
+        return {}
+    try:
+        quotes = _tencent_quote(codes)
+        return {code: info["price"] for code, info in quotes.items() if info.get("price", 0) > 0}
+    except Exception:
+        logger.warning("batch_get_spot_prices failed for %d tickers", len(codes), exc_info=True)
+        return {}
 
 
 # ---------------------------------------------------------------------------

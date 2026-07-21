@@ -27,6 +27,7 @@ User=solo
 WorkingDirectory=/home/solo/TradingAgents-astock
 Environment="PATH=/home/solo/TradingAgents-astock/.venv/bin"
 Environment="ARROW_DEFAULT_MEMORY_POOL=system"
+Environment="TZ=Asia/Shanghai"
 # 并发上限（与 Web 侧文案一致，默认 3）
 Environment="TRADINGAGENTS_MAX_PARALLEL=3"
 # 中断后自动续跑次数上限（lease 回收 + 启动孤儿入队共用）

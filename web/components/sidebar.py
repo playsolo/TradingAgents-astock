@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import date
 
 import streamlit as st
 
@@ -128,6 +129,8 @@ def _infer_market_for_ticker(ticker: str, market: str | None = None) -> str:
         return market
     code = (ticker or "").strip()
     if code.isdigit() and len(code) == 6:
+        return "CN"
+    if any("\u4e00" <= ch <= "\u9fff" for ch in code):
         return "CN"
     return "US"
 
@@ -385,6 +388,18 @@ def _render_incomplete_tasks() -> None:
                 st.rerun()
 
 
+def _waiting_queue_jobs(session) -> list[AnalysisJob]:
+    """Jobs waiting to run.
+
+    In worker mode the disk queue is authoritative (Web only ``append_atomic``;
+    session_state is not updated). Using ``queue_snapshot`` as a gate would hide
+    the sidebar queue after hydrate-on-empty or any out-of-process enqueue.
+    """
+    if is_worker_mode():
+        return default_store().load()
+    return queue_snapshot(session)
+
+
 @st.fragment(run_every=2.0)
 def _render_queue_and_incomplete() -> None:
     """Fragment that auto-refreshes the analysis queue and incomplete tasks.
@@ -396,7 +411,7 @@ def _render_queue_and_incomplete() -> None:
     separate process, so the「历史记录」block outside this fragment would stay
     stale until a full script rerun. When the stamp changes, trigger one.
     """
-    jobs = queue_snapshot(st.session_state)
+    jobs = _waiting_queue_jobs(st.session_state)
     incomplete = get_incomplete_history()
     has_work = bool(has_running(st.session_state) or jobs or incomplete)
 
@@ -477,6 +492,50 @@ def _render_worker_queue() -> None:
 def max_jobs_configured() -> int:
     from web.parallel_runs import max_runs
     return max_runs()
+
+
+def _render_watchbuy_page(entries: list[dict], *, dismiss_fn) -> None:
+    """Render the 关注-待买入 tab with buy-zone signal details."""
+    if not entries:
+        st.caption("当前没有待买入信号")
+        return
+
+    for entry in entries:
+        t = entry["ticker"]
+        d = entry["date"]
+        ws = entry.get("_watch_signal") or {}
+        buy_zone_low = ws.get("buy_zone_low", "?")
+        buy_zone_high = ws.get("buy_zone_high", "?")
+        current_price = ws.get("current_price", "?")
+        signaled_at = ws.get("signaled_at", "")
+        orig_signal = ws.get("signal", entry.get("signal", "N/A"))
+        sig_badge = signal_text_tag(orig_signal)
+
+        label = format_list_ticker_label(t, d)
+        st.markdown(
+            f"**{sig_badge} {label}**  "
+            f'<span style="font-size:0.8rem;color:#888;">触发于 {signaled_at}</span>',
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            f"买入区间: {buy_zone_low} ~ {buy_zone_high}  "
+            f"· 当前价: **{current_price}**  "
+            f"· 原始评级: {sig_badge}"
+        )
+        col1, col2 = st.columns([1, 4])
+        with col1:
+            if st.button("✓ 已知悉", key=f"watch_dismiss_{t}_{d}", use_container_width=True):
+                dismiss_fn(t)
+                st.rerun()
+        with col2:
+            if st.button(
+                "查看详情 →",
+                key=f"watch_view_{t}_{d}",
+                use_container_width=True,
+            ):
+                navigate("history", ticker=t, date=d, path=entry.get("path", ""))
+
+        st.divider()
 
 
 def _render_history_page(entries: list[dict], page_size: int = 20, tab_key: str = "") -> None:
@@ -562,7 +621,7 @@ def _render_analysis_controls(raw_tickers: str, trade_date_value: date) -> None:
     can_stop = (
         bool(runs)
         or bool(raw_tickers.strip())
-        or bool(queue_snapshot(st.session_state))
+        or bool(_waiting_queue_jobs(st.session_state))
     )
     if stop_col.button(
         "清空队列并停止",
@@ -570,6 +629,8 @@ def _render_analysis_controls(raw_tickers: str, trade_date_value: date) -> None:
         use_container_width=True,
         disabled=not can_stop,
     ):
+        if is_worker_mode():
+            default_store().clear_atomic()
         clear_queue(st.session_state)
         from web.parallel_runs import stop_all_runs
         stop_all_runs(st.session_state)
@@ -723,10 +784,23 @@ def render_sidebar() -> None:
         ),
     )
 
+    # Streamlit keeps widget state across days; roll a stale "yesterday"
+    # selection forward to Beijing today so overnight sessions don't keep
+    # stamping A-share jobs with the previous calendar date (which coincides
+    # with US Eastern "today" in the morning).
+    today_cn = cn_today()
+    prev = st.session_state.get("input_date")
+    if isinstance(prev, date) and prev < today_cn:
+        st.session_state["input_date"] = today_cn
+
     trade_date = st.date_input(
         "分析日期",
-        value=cn_today(),
+        value=today_cn,
         key="input_date",
+        help=(
+            "默认按北京时间今日。选「今日」时：A 股用北京日，美股自动换成美东今日；"
+            "选其他日期则两边共用该日（显式回溯）。"
+        ),
     )
 
     force_full_reeval = st.checkbox(
@@ -827,7 +901,7 @@ def render_sidebar() -> None:
         prev = st.session_state.get("_history_filter_ticker")
         if prev != filter_ticker:
             st.session_state["_history_filter_ticker"] = filter_ticker
-            for tab_key in ("all", "buy", "sell", "hold"):
+            for tab_key in ("all", "buy", "sell", "hold", "watchbuy"):
                 st.session_state[f"_hist_page_{tab_key}"] = 0
         if not history:
             st.caption(f"未找到 {filter_ticker} 的历史报告")
@@ -837,26 +911,39 @@ def render_sidebar() -> None:
     else:
         st.session_state.pop("_history_filter_ticker", None)
 
-    # 按信号分组
-    groups = group_history_by_signal(history)
+    # ── 买入区间自动监控（关注-待买入） ──────────────────────────────
+    from tradingagents.monitor.price_monitor import read_signals, dismiss_signal
+
+    watch_signals = read_signals()
+    # 按信号分组（传入 watch_signals 以填充 WatchBuy 分组）
+    groups = group_history_by_signal(history, watch_signals=watch_signals)
     total = len(history)
     st.caption(signal_count_label(groups, total))
 
-    # 分类 tab
-    tab_all, tab_buy, tab_sell, tab_hold = st.tabs(
-        ["全部", f"买入({len(groups['Buy'])})",
-         f"卖出({len(groups['Sell'])})", f"持有({len(groups['Hold'])})"]
+    n_watch = len(groups.get("WatchBuy", []))
+    # 如果存在关注-待买入信号，将其放在 Tab 第一顺位
+    tab_labels = []
+    if n_watch:
+        tab_labels.append(("关注-待买入", "watchbuy"))
+    tab_labels += [
+        ("买入", "buy"),
+        ("卖出", "sell"),
+        ("持有", "hold"),
+    ]
+
+    tabs = st.tabs(
+        [f"{label}({len(groups[name_key.upper()])})" if name_key != "watchbuy"
+         else f"🛎️ 关注-待买入({n_watch})"
+         for label, name_key in tab_labels]
     )
 
     page_size = 20
-    with tab_all:
-        _render_history_page(history, page_size, tab_key="all")
-    with tab_buy:
-        _render_history_page(groups["Buy"], page_size, tab_key="buy")
-    with tab_sell:
-        _render_history_page(groups["Sell"], page_size, tab_key="sell")
-    with tab_hold:
-        _render_history_page(groups["Hold"], page_size, tab_key="hold")
+    for i, (_label, name_key) in enumerate(tab_labels):
+        with tabs[i]:
+            if name_key == "watchbuy":
+                _render_watchbuy_page(groups.get("WatchBuy", []), dismiss_fn=dismiss_signal)
+            else:
+                _render_history_page(groups[name_key.upper()], page_size, tab_key=name_key)
 
     st.markdown("---")
     st.caption("⚠️ 仅供学习研究，不构成投资建议")

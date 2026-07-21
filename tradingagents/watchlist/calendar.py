@@ -68,6 +68,34 @@ def cn_today(dt: datetime | None = None) -> date:
     return to_cn_datetime(dt).date()
 
 
+def us_today(dt: datetime | None = None) -> date:
+    """Calendar date in America/New_York."""
+    return to_us_datetime(dt).date()
+
+
+def effective_trade_date_for_market(
+    market: str,
+    selected: datetime | date | str,
+    *,
+    now: datetime | None = None,
+) -> str:
+    """Map the sidebar analysis date onto the correct market calendar.
+
+    The UI date picker is Beijing-oriented. When the selected day equals
+    Beijing *today*, CN jobs keep that date and US jobs use Eastern today
+    instead — so a Beijing Monday morning does not stamp US runs with a
+    session that has not opened yet in New York, and CN runs never inherit
+    Eastern "yesterday". Any other selected date is an explicit override
+    (same ISO string for both markets).
+    """
+    sel = _as_date(selected)
+    if sel == cn_today(now):
+        if (market or "CN").upper() == "US":
+            return us_today(now).isoformat()
+        return cn_today(now).isoformat()
+    return sel.isoformat()
+
+
 def cn_session_phase(dt: datetime | None = None) -> CnSessionPhase:
     """Classify current moment into an A-share session phase (Beijing time)."""
     now = to_cn_datetime(dt)
@@ -185,15 +213,20 @@ def action_validity_expires_on(baseline: object) -> date:
     return add_cn_trading_days(trade_date, days)
 
 
-def slot_key_for(dt: datetime) -> str | None:
-    """若当前时刻落在某个 A 股观察窗口内，返回稳定 slot key，否则 None。"""
-    if not is_cn_trading_day(dt):
+def slot_key_for(dt: datetime | None = None) -> str | None:
+    """若当前时刻落在某个 A 股观察窗口内，返回稳定 slot key，否则 None.
+
+    Always evaluates against Asia/Shanghai wall clock so a UTC/ET-aware
+    ``dt`` (or a mis-set process TZ) cannot shift CN slots onto US hours.
+    """
+    now = to_cn_datetime(dt)
+    if not is_cn_trading_day(now):
         return None
     for hour, minute in OBSERVE_SLOTS:
         start = hour * 60 + minute
-        now = dt.hour * 60 + dt.minute
-        if start <= now < start + _SLOT_WINDOW_MINUTES:
-            return f"{dt.strftime('%Y-%m-%d')}T{hour:02d}:{minute:02d}"
+        minutes = now.hour * 60 + now.minute
+        if start <= minutes < start + _SLOT_WINDOW_MINUTES:
+            return f"{now.strftime('%Y-%m-%d')}T{hour:02d}:{minute:02d}"
     return None
 
 
@@ -233,13 +266,11 @@ def slot_key_for_us(dt: datetime | None = None) -> str | None:
 def active_observe_slots(dt: datetime | None = None) -> list[tuple[str, str]]:
     """Return currently active ``(market, slot_key)`` pairs for CN and/or US.
 
-    CN slots use the provided naive local wall clock (Beijing on production).
-    US slots always evaluate against America/New_York; a naive ``dt`` is
-    interpreted as Beijing local and converted to ET.
+    CN slots always use Asia/Shanghai. US slots always use America/New_York.
+    A naive ``dt`` is interpreted as Beijing local wall clock.
     """
-    now_local = dt if dt is not None else datetime.now()
     out: list[tuple[str, str]] = []
-    cn_key = slot_key_for(now_local)
+    cn_key = slot_key_for(dt)
     if cn_key:
         out.append(("CN", cn_key))
     if dt is None:

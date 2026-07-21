@@ -47,10 +47,13 @@ section below. Use only facts stated in the text.
 
 Rules:
 - rating must be one of Buy / Overweight / Hold / Underweight / Sell \
-(map 买入→Buy, 增持/超配→Overweight, 持有/观望→Hold, 减持→Underweight, 卖出/清仓→Sell).
+    (map 买入→Buy, 增持/超配→Overweight, 持有/观望→Hold, 减持→Underweight, 卖出/清仓→Sell).
 - Do NOT invent prices. If a level is not explicitly numeric in the text, leave it null.
 - holders_action / non_holders_action: short phrases capturing the stated guidance.
 - summary: 1–2 sentences for the operational conclusion.
+- buy_zone_low / buy_zone_high: if the text states a price range where \
+    non-holders should re-enter / buy (e.g. "回调至12-14元可分批建仓" or \
+    "re-entry zone 12-15"), extract the numeric bounds. Otherwise leave null.
 
 TEXT:
 {section}

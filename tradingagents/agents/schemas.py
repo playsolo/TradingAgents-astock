@@ -260,6 +260,17 @@ class ActionPlanLevels(BaseModel):
         default=None,
         description="Upper bound of a contingent re-entry / buy zone for non-holders.",
     )
+    buy_zone_low: Optional[float] = Field(
+        default=None,
+        description="Lower bound of the recommended buy price zone, if stated. "
+        "Used by the price monitor to detect entry opportunities.",
+    )
+    buy_zone_high: Optional[float] = Field(
+        default=None,
+        description="Upper bound of the recommended buy price zone, if stated. "
+        "When current price falls within [buy_zone_low, buy_zone_high], "
+        "the stock may be listed as a watch-buy candidate.",
+    )
 
 
 class FinalActionPlan(BaseModel):

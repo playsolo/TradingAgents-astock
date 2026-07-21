@@ -10,6 +10,8 @@ from tradingagents.watchlist.calendar import (
     OBSERVE_SLOTS,
     US_OBSERVE_SLOTS,
     action_validity_expires_on,
+    cn_today,
+    effective_trade_date_for_market,
     effective_valid_trading_days,
     is_action_validity_expired,
 )
@@ -33,8 +35,7 @@ def _fmt_observed_at(raw: str | None) -> str:
         return "尚未执行"
     try:
         dt = datetime.fromisoformat(raw)
-        today = date.today()
-        if dt.date() == today:
+        if dt.date() == cn_today():
             return f"今日 {dt.strftime('%H:%M:%S')}"
         return raw
     except (ValueError, TypeError):
@@ -161,12 +162,13 @@ def render_watch_page() -> None:
             if b1.button(observe_label, key=f"watch_now_{b.ticker}", use_container_width=True):
                 fresh = store.get(b.ticker)
                 if fresh and is_action_validity_expired(fresh.baseline):
-                    today = date.today().isoformat()
+                    market = getattr(fresh.baseline, "market", None) or "CN"
+                    today = effective_trade_date_for_market(market, cn_today())
                     st.session_state["start_analysis"] = {
                         "ticker": fresh.baseline.ticker,
                         "trade_date": today,
                         "fresh": True,
-                        "market": getattr(fresh.baseline, "market", None) or "CN",
+                        "market": market,
                         "force_full_reeval": True,
                         "analysis_mode": "full_reeval",
                         "watchlist_refresh": True,

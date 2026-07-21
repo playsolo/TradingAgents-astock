@@ -13,6 +13,7 @@ User=solo
 WorkingDirectory=/home/solo/TradingAgents-astock
 Environment="PATH=/home/solo/TradingAgents-astock/.venv/bin"
 Environment="ARROW_DEFAULT_MEMORY_POOL=system"
+Environment="TZ=Asia/Shanghai"
 # 只入队，交后台 worker 执行
 Environment="TRADINGAGENTS_ANALYSIS_EXECUTOR=worker"
 Environment="TRADINGAGENTS_MAX_PARALLEL=3"

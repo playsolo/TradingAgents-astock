@@ -56,6 +56,7 @@ tradingagents-watch = "tradingagents.watchlist.daemon:main"
 tradingagents-scan = "tradingagents.strategies.scan_cli:main"
 tradingagents-analyze = "tradingagents.analyze_worker.daemon:main"
 tradingagents-filings = "tradingagents.filings.daemon:main"
+tradingagents-refresh-names = "web.refresh_stock_names:main"
 
 [tool.setuptools.packages.find]
 include = ["tradingagents*", "cli*", "web*"]

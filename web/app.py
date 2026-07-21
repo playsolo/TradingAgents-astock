@@ -79,6 +79,7 @@ from web.parallel_runs import (
 from web.progress import ProgressTracker  # noqa: E402
 from web.runner import run_analysis_in_thread  # noqa: E402
 from tradingagents.watchlist.scheduler import start_watchlist_scheduler  # noqa: E402
+from tradingagents.monitor.price_monitor import ensure_monitor_running  # noqa: E402
 
 from web.auth_page import require_auth, get_current_user, render_logout_button, render_admin_panel  # noqa: E402
 
@@ -167,7 +168,15 @@ if os.getenv("WATCHLIST_SCHEDULER", "0").strip() not in {"0", "false", "off"}:
         "backend_url": (_watchlist_cfg.get("backend_url") or os.getenv("BACKEND_URL") or None),
     })
 
-# ── Custom CSS ───────────────────────────────────────────────────────────────
+    # ── Price Monitor (后台 A 股买入区间自动监控) ──────────────────────────
+    # 在 Web 进程启动时自启一个 daemon 线程，交易时段每 5 分钟扫描一次
+    # 已完成分析的买入区间，触发时写入 watchlist_signals.json。
+    try:
+        ensure_monitor_running()
+    except Exception:
+        pass  # 不影响 Web 启动
+
+    # ── Custom CSS ───────────────────────────────────────────────────────────────
 
 st.markdown(
     """

@@ -290,7 +290,17 @@ class FallbackLLMClient:
         }
 
 
-class _FallbackLLMProxy:
+# Attempt to inherit Runnable so LangChain pipelines (``prompt | llm.bind_tools(tools)``)
+# accept the proxy as a valid pipeline step.  langchain-core is not a hard dependency
+# of the fallback module, so we degrade gracefully when absent.
+try:
+    from langchain_core.runnables import Runnable as _RunnableBase
+except ImportError:
+    class _RunnableBase:  # type: ignore[no-redef]
+        pass
+
+
+class _FallbackLLMProxy(_RunnableBase):
     """Proxy that re-resolves the underlying LLM on each call so that
     ``with_structured_output`` / ``bind_tools`` chains compose correctly with
     the fallback wrapper.
@@ -298,6 +308,10 @@ class _FallbackLLMProxy:
     The proxy keeps a reference to the *primary* LLM so that
     ``isinstance(...)`` checks and attribute lookups that callers may do
     (e.g. ``llm.model_name``) see the primary's identity.
+
+    Inherits ``Runnable`` when langchain-core is present so that LangChain's
+    pipe operator (``|``) recognises the proxy as a valid pipeline step and
+    does not raise ``TypeError: Expected a Runnable, callable or dict``.
     """
 
     def __init__(
@@ -308,6 +322,7 @@ class _FallbackLLMProxy:
         primary: Any,
         on_success: Any | None = None,
     ) -> None:
+        super().__init__()
         self._llm_getters = llm_getters
         self._labels = labels
         self._breakers = breakers

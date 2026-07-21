@@ -29,15 +29,18 @@ from web.us_bridge.health import (
 
 
 def test_probe_provider_minimax_success(monkeypatch):
-    """A 200 from ``/models`` (on the ``…/v1`` base) is healthy."""
+    """A 200 from ``/models`` plus a 200 chat ping is healthy."""
     fake_resp = MagicMock(status_code=200)
     seen: dict[str, str] = {}
 
-    def capture(url, *args, **kwargs):
+    def capture_get(url, *args, **kwargs):
         seen["url"] = url
         return fake_resp
 
-    monkeypatch.setattr("web.us_bridge.health.requests.get", capture)
+    monkeypatch.setattr("web.us_bridge.health.requests.get", capture_get)
+    monkeypatch.setattr(
+        "web.us_bridge.health.requests.post", lambda *_a, **_k: fake_resp
+    )
     assert probe_provider("minimax", api_key="sk-test", base_url="https://api.minimaxi.com/v1") is True
     assert seen["url"] == "https://api.minimaxi.com/v1/models"
 
@@ -52,6 +55,9 @@ def test_probe_provider_minimax_default_base_no_double_v1(monkeypatch):
         return fake_resp
 
     monkeypatch.setattr("web.us_bridge.health.requests.get", capture)
+    monkeypatch.setattr(
+        "web.us_bridge.health.requests.post", lambda *_a, **_k: fake_resp
+    )
     assert probe_provider("minimax", api_key="sk-test") is True
     assert seen["url"] == "https://api.minimaxi.com/v1/models"
     assert "/v1/v1/" not in seen["url"]
@@ -112,6 +118,46 @@ def test_probe_provider_skips_request_for_unknown_provider(monkeypatch):
     monkeypatch.setattr("web.us_bridge.health.requests.get", spy)
     assert probe_provider("anthropic", api_key="sk-test") is True
     assert called["n"] == 0
+
+
+def test_probe_provider_models_ok_but_chat_429_unhealthy(monkeypatch):
+    """MiniMax Token Plan exhaustion: /models=200, chat/completions=429."""
+    monkeypatch.setattr(
+        "web.us_bridge.health.requests.get",
+        lambda *_a, **_k: MagicMock(status_code=200),
+    )
+    monkeypatch.setattr(
+        "web.us_bridge.health.requests.post",
+        lambda *_a, **_k: MagicMock(status_code=429),
+    )
+    assert probe_provider("minimax", api_key="sk-test") is False
+
+
+def test_probe_provider_chat_ping_uses_configured_model(monkeypatch):
+    """When ``model`` is passed, the chat probe must use that model name."""
+    seen: dict[str, object] = {}
+
+    def capture_post(url, *args, **kwargs):
+        seen["url"] = url
+        seen["json"] = kwargs.get("json")
+        return MagicMock(status_code=200)
+
+    monkeypatch.setattr(
+        "web.us_bridge.health.requests.get",
+        lambda *_a, **_k: MagicMock(status_code=200),
+    )
+    monkeypatch.setattr("web.us_bridge.health.requests.post", capture_post)
+    assert (
+        probe_provider(
+            "minimax",
+            api_key="sk-test",
+            model="MiniMax-M3",
+        )
+        is True
+    )
+    assert seen["url"] == "https://api.minimaxi.com/v1/chat/completions"
+    assert seen["json"]["model"] == "MiniMax-M3"
+    assert seen["json"]["max_tokens"] == 1
 
 
 # ---------------------------------------------------------------------------

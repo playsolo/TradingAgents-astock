@@ -45,13 +45,22 @@ def _signal_group_key(signal: str) -> int:
 
 def group_history_by_signal(
     entries: list[dict[str, Any]],
+    *,
+    watch_signals: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Group history entries by signal (Buy / Sell / Hold / N/A)."""
+    """Group history entries by signal (Buy / Sell / Hold / N/A / WatchBuy).
+
+    When *watch_signals* is provided (from ``read_signals()``), entries whose
+    ticker has an active buy-zone trigger also appear in the ``"WatchBuy"``
+    group alongside their original signal group (no dedupe — same entry may
+    appear in both WatchBuy and its original group).
+    """
     groups: dict[str, list[dict[str, Any]]] = {
         "Buy": [],
         "Sell": [],
         "Hold": [],
         "N/A": [],
+        "WatchBuy": [],
     }
     for entry in entries:
         sig = entry.get("signal", "N/A")
@@ -59,13 +68,21 @@ def group_history_by_signal(
             groups[sig].append(entry)
         else:
             groups["N/A"].append(entry)
+        # Also add to WatchBuy if this ticker has an active signal
+        if watch_signals:
+            ticker = entry.get("ticker", "").strip().upper()
+            ws = watch_signals.get(ticker)
+            if ws:
+                # Attach signal details to the entry for rendering
+                entry["_watch_signal"] = ws
+                groups.setdefault("WatchBuy", []).append(entry)
     return groups
 
 
 def signal_count_label(group: dict[str, list[dict[str, Any]]], total: int) -> str:
     """Build a compact summary line, e.g. '共 42 条 · 买入12 持有18 卖出8'."""
     parts = [f"共 {total} 条"]
-    for sig, display in [("Buy", "买入"), ("Sell", "卖出"), ("Hold", "持有")]:
+    for sig, display in [("Buy", "买入"), ("Sell", "卖出"), ("Hold", "持有"), ("WatchBuy", "关注-待买入")]:
         n = len(group.get(sig, []))
         if n:
             parts.append(f"{display}{n}")

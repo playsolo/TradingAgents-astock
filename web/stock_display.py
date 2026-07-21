@@ -119,6 +119,23 @@ class StockNameCache:
             mem[code] = clean
             self._save()
 
+    def delete(self, code: str) -> str | None:
+        """Remove a cached name; return the previous value if any."""
+        code = str(code or "").strip().upper()
+        if not code:
+            return None
+        with self._lock:
+            mem = self._load()
+            prev = mem.pop(code, None)
+            if prev is not None:
+                self._save()
+            return prev
+
+    def items(self) -> dict[str, str]:
+        """Return a copy of code→name entries."""
+        with self._lock:
+            return dict(self._load())
+
     def find_code_by_name(self, name: str) -> str | None:
         """Reverse lookup code from a Chinese stock name already in the local cache.
 
@@ -267,6 +284,16 @@ _NON_NAME_MARKERS: tuple[str, ...] = (
     "股票回购",
     "回购股份",
     "回报股东",
+    # Verb / sector fragments glued after ticker (e.g. 'INFQ 成为"…"', "AMPX 是一家")
+    "成为",
+    "是一家",
+    "上调",
+    "下调",
+    "公司特定",
+    "通信服务",
+    "信息技术",
+    "非必需消费",
+    "医疗保健",
 )
 
 _BANNED_EN_NAME_TOKENS: frozenset[str] = frozenset(
@@ -316,6 +343,18 @@ _BANNED_EN_NAME_TOKENS: frozenset[str] = frozenset(
 )
 
 
+def is_junk_stock_name(value: str) -> bool:
+    """True for prose/sector fragments that must never be cached as issuer names."""
+    text = _clean_stock_name(value)
+    if not text:
+        return True
+    if any(ch in text for ch in "\"'“”‘’"):
+        return True
+    if any(marker in text for marker in _NON_NAME_MARKERS):
+        return True
+    return False
+
+
 def _is_plausible_stock_name(value: str, code: str) -> bool:
     text = _clean_stock_name(value)
     if not text or text.upper() == str(code or "").strip().upper():
@@ -324,9 +363,7 @@ def _is_plausible_stock_name(value: str, code: str) -> bool:
         return False
     if _is_exchange_or_market_label(text):
         return False
-    # Avoid treating report headings / price action phrases as a stock name
-    # when older states only contain the plain code in stock_input.
-    if any(marker in text for marker in _NON_NAME_MARKERS):
+    if is_junk_stock_name(text):
         return False
     # Numeric / ratio fragments: "7.5倍PE的差距"
     if re.search(r"\d", text) and not text.lstrip().startswith(("*", "ST", "*ST")):
@@ -344,6 +381,9 @@ def _is_plausible_stock_name(value: str, code: str) -> bool:
         compact = re.sub(r"[\s　]+", "", text)
         cn_chars = sum(1 for ch in compact if "一" <= ch <= "鿿")
         if cn_chars > 8:
+            return False
+        # Chinese issuer names should be hanzi (optional *ST / middle dot), not mixed junk.
+        if not re.fullmatch(r"[*ST]*[\u4e00-\u9fff·]{2,8}", compact):
             return False
     return True
 
@@ -479,12 +519,13 @@ def _is_cache_worthy_name(name: str, code: str) -> bool:
     text = _clean_stock_name(name)
     if not text or _is_exchange_or_market_label(text):
         return False
-    if any(marker in text for marker in _NON_NAME_MARKERS):
+    if is_junk_stock_name(text):
         return False
     if not _has_chinese(text):
         return _looks_like_stock_name(text) and text.upper() not in _BANNED_EN_NAME_TOKENS
     # Trusted market short names may be 2 chars; only block known jargon markers above.
-    return _looks_like_stock_name(text)
+    compact = re.sub(r"[\s　]+", "", text)
+    return bool(re.fullmatch(r"[*ST]*[\u4e00-\u9fff·]{2,8}", compact))
 
 
 def remember_resolved_name(code: str, raw_name: str) -> None:
@@ -494,10 +535,14 @@ def remember_resolved_name(code: str, raw_name: str) -> None:
         return
     # Trusted user/LLM input may be a 2-char A-share short name; allow those
     # when they look like a name and are not finance jargon.
-    if any(marker in clean for marker in _NON_NAME_MARKERS):
+    if is_junk_stock_name(clean):
         return
     if not (_looks_like_stock_name(clean) or _has_chinese(clean)):
         return
+    if _has_chinese(clean):
+        compact = re.sub(r"[\s　]+", "", clean)
+        if not re.fullmatch(r"[*ST]*[\u4e00-\u9fff·]{2,8}", compact):
+            return
     _NAME_CACHE.set(code, clean)
 
 
@@ -645,22 +690,12 @@ def _prefer_display_name(*candidates: str | None) -> str | None:
 
 
 def _should_cache_display_name(code: str, name: str, resolved: str | None) -> bool:
-    """Only persist trusted resolve hits or a CN upgrade of an English resolve."""
-    if not name or name == code:
-        return False
-    if resolved and name == resolved:
-        return _has_chinese(name) or _is_us_style_ticker(code)
-    # Allow caching CN alias that upgraded an English yfinance/cache name.
-    if (
-        resolved
-        and not _has_chinese(resolved)
-        and _has_chinese(name)
-        and _is_plausible_stock_name(name, code)
-    ):
-        return True
-    # No trusted resolve yet — only cache solid CN / US issuer names.
-    if not resolved and (_has_chinese(name) or _is_us_style_ticker(code)):
-        return _is_plausible_stock_name(name, code)
+    """Report extraction is display-only; never persist it into stock_names.json.
+
+    Authoritative writes happen only in ``resolve_stock_name`` / ``remember_resolved_name``.
+    Kept for callers/tests that still consult this gate.
+    """
+    del code, name, resolved
     return False
 
 
@@ -673,8 +708,7 @@ def stock_display_label(ticker: str, final_state: dict | None = None) -> str:
     name = _prefer_display_name(resolved, extracted)
 
     if name and name != code:
-        if _should_cache_display_name(code, name, resolved):
-            _NAME_CACHE.set(code, name)
+        # Do not cache extracted overlays — L0/L1 resolve already writes the cache.
         return f"{code} {name}"
     return code
 
