@@ -25,7 +25,11 @@ upstream worker.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import time
+from pathlib import Path
 from typing import Any, Mapping
 
 import requests
@@ -68,6 +72,51 @@ _PROBE_CHAT_MODELS: dict[str, str] = {
 _QUOTA_STATUS_CODES = frozenset({402, 429})
 
 _PROBE_TIMEOUT_S = 4.0
+
+# Look back window for recent quota failures in incomplete_tasks.json.
+# A 1-token probe can pass while the real analysis exhausts remaining
+# quota mid-run; this window catches those cases.
+_QUOTA_FAILURE_WINDOW_S = 2700  # 45 minutes
+
+# Path to incomplete_tasks.json (same file as web/history.py).
+_INCOMPLETE_TASKS_FILE = Path.home() / ".tradingagents" / "incomplete_tasks.json"
+
+
+def _has_recent_quota_failures(provider: str, *, window_s: int = _QUOTA_FAILURE_WINDOW_S) -> bool:
+    """Check incomplete_tasks.json for recent 429/402 failures attributed to *provider*.
+
+    Looks back *window_s* seconds. The error_text field is scanned for
+    ``429``, ``402``, ``rate_limit``, and ``quota`` patterns. A match means
+    this provider exhausted its quota on a prior real analysis and should be
+    skipped in favour of the fallback.
+
+    Returns True when *any* recent quota failure exists — conservative, but
+    the cost of a false positive is just an unnecessary fallback.
+    """
+    if not _INCOMPLETE_TASKS_FILE.exists():
+        return False
+    try:
+        entries = json.loads(_INCOMPLETE_TASKS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(entries, list):
+        return False
+
+    cutoff = time.time() - window_s
+    for entry in entries:
+        updated = entry.get("updated_at", 0)
+        if not isinstance(updated, (int, float)) or updated < cutoff:
+            continue
+        error = str(entry.get("error") or "")
+        if not error:
+            continue
+        # Check for quota/rate-limit indicators in the error text
+        if "429" in error or "402" in error:
+            return True
+        err_lower = error.lower()
+        if "rate_limit" in err_lower or "quota" in err_lower or "token plan" in err_lower:
+            return True
+    return False
 
 
 def probe_provider(
@@ -230,12 +279,20 @@ def choose_provider_for_us_bridge(
     the probe, every subsequent call would also fail and waste 401s.
     """
     primary_key = _api_key_for(llm_provider, api_key)
-    if probe_provider(
+
+    # ── Probe-based health check ──────────────────────────────────
+    # A 1-token probe can succeed while the account has only a few
+    # tokens left — enough for the probe, not enough for a full analysis.
+    # If probe passes, also check for recent 429/402 from real runs.
+    probe_healthy = probe_provider(
         llm_provider,
         api_key=primary_key,
         base_url=base_url,
         model=deep_think_llm or quick_think_llm,
-    ):
+    )
+    quota_exhausted = _has_recent_quota_failures(llm_provider)
+
+    if probe_healthy and not quota_exhausted:
         return {
             "llm_provider": llm_provider,
             "deep_think_llm": deep_think_llm,
@@ -243,9 +300,15 @@ def choose_provider_for_us_bridge(
             "fell_back": False,
         }
 
-    logger.warning(
-        "primary provider %s unhealthy; attempting fallback chain", llm_provider
-    )
+    if quota_exhausted:
+        logger.warning(
+            "primary provider %s has recent quota failures; attempting fallback chain",
+            llm_provider,
+        )
+    else:
+        logger.warning(
+            "primary provider %s unhealthy; attempting fallback chain", llm_provider
+        )
     for entry in fallback_chain or []:
         candidate_provider = (entry.get("provider") or "").strip()
         candidate_model = (entry.get("model") or "").strip()

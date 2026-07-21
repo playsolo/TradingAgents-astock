@@ -13,6 +13,8 @@ so the upstream graph runs against a healthy provider instead.
 
 from __future__ import annotations
 
+import json
+
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -253,3 +255,151 @@ def test_choose_provider_skips_unhealthy_fallbacks(monkeypatch):
     )
     assert chosen["llm_provider"] == "deepseek"
     assert chosen["fell_back"] is True
+
+
+# ---------------------------------------------------------------------------
+# _has_recent_quota_failures — incomplete_tasks.json 429 guard
+# ---------------------------------------------------------------------------
+
+
+def test_has_recent_quota_failures_no_file(tmp_path):
+    """Missing incomplete_tasks.json → no quota failures."""
+    from web.us_bridge.health import _has_recent_quota_failures
+
+    assert _has_recent_quota_failures("minimax") is False
+
+
+def test_has_recent_quota_failures_empty(monkeypatch, tmp_path):
+    """Empty file → no quota failures."""
+    f = tmp_path / "incomplete_tasks.json"
+    f.write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(
+        "web.us_bridge.health._INCOMPLETE_TASKS_FILE", f
+    )
+    from web.us_bridge.health import _has_recent_quota_failures
+
+    assert _has_recent_quota_failures("minimax") is False
+
+
+def test_has_recent_quota_failures_429_found(monkeypatch, tmp_path):
+    """A recent entry with 429 in error → True."""
+    import time
+
+    f = tmp_path / "incomplete_tasks.json"
+    f.write_text(
+        json.dumps(
+            [
+                {
+                    "ticker": "MU",
+                    "trade_date": "2026-07-21",
+                    "status": "error",
+                    "error": "Error code: 429 - rate limit exceeded",
+                    "updated_at": time.time() - 60,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("web.us_bridge.health._INCOMPLETE_TASKS_FILE", f)
+    from web.us_bridge.health import _has_recent_quota_failures
+
+    assert _has_recent_quota_failures("minimax") is True
+
+
+def test_has_recent_quota_failures_old_entry(monkeypatch, tmp_path):
+    """Entry older than window → ignored."""
+    f = tmp_path / "incomplete_tasks.json"
+    f.write_text(
+        json.dumps(
+            [
+                {
+                    "ticker": "MU",
+                    "trade_date": "2026-05-01",
+                    "status": "error",
+                    "error": "Error code: 429",
+                    "updated_at": 1000000000,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("web.us_bridge.health._INCOMPLETE_TASKS_FILE", f)
+    from web.us_bridge.health import _has_recent_quota_failures
+
+    assert _has_recent_quota_failures("minimax") is False
+
+
+def test_has_recent_quota_failures_402_found(monkeypatch, tmp_path):
+    """402 (payment required) also treated as quota failure."""
+    import time
+
+    f = tmp_path / "incomplete_tasks.json"
+    f.write_text(
+        json.dumps(
+            [
+                {
+                    "ticker": "ISRG",
+                    "trade_date": "2026-07-21",
+                    "status": "error",
+                    "error": "HTTP 402 Payment Required",
+                    "updated_at": time.time() - 120,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("web.us_bridge.health._INCOMPLETE_TASKS_FILE", f)
+    from web.us_bridge.health import _has_recent_quota_failures
+
+    assert _has_recent_quota_failures("minimax") is True
+
+
+def test_has_recent_quota_failures_token_plan_text(monkeypatch, tmp_path):
+    """'Token Plan' in error text (MiniMax Chinese) → True."""
+    import time
+
+    f = tmp_path / "incomplete_tasks.json"
+    f.write_text(
+        json.dumps(
+            [
+                {
+                    "ticker": "MSFT",
+                    "trade_date": "2026-07-21",
+                    "status": "error",
+                    "error": "已达到 Token Plan 用量上限",
+                    "updated_at": time.time() - 30,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("web.us_bridge.health._INCOMPLETE_TASKS_FILE", f)
+    from web.us_bridge.health import _has_recent_quota_failures
+
+    assert _has_recent_quota_failures("minimax") is True
+
+
+def test_choose_provider_falls_back_on_quota_failures(monkeypatch):
+    """Primary probe passes but _has_recent_quota_failures True → fall back."""
+    from web.us_bridge.health import choose_provider_for_us_bridge
+
+    monkeypatch.setattr(
+        "web.us_bridge.health.probe_provider", lambda *_a, **_k: True
+    )
+    monkeypatch.setattr(
+        "web.us_bridge.health._has_recent_quota_failures", lambda *_a, **_k: True
+    )
+    chosen = choose_provider_for_us_bridge(
+        llm_provider="minimax",
+        api_key="sk-test",
+        base_url=None,
+        deep_think_llm="MiniMax-M3",
+        quick_think_llm="MiniMax-M3",
+        fallback_chain=[{"provider": "deepseek", "model": "deepseek-chat"}],
+    )
+    assert chosen == {
+        "llm_provider": "deepseek",
+        "deep_think_llm": "deepseek-chat",
+        "quick_think_llm": "deepseek-chat",
+        "fell_back": True,
+    }
