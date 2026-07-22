@@ -66,15 +66,33 @@ _TIMEOUT_PATTERNS = (
     re.compile(r"\bconnection[_ ]?(?:reset|refused|closed)\b", re.IGNORECASE),
 )
 
+# Content-safety / moderation errors. These are not quota problems, but
+# different providers have vastly different safety thresholds — MiniMax may
+# reject content that DeepSeek accepts, and the reverse can also happen
+# (some providers are stricter on financial/geopolitical topics). Falling
+# back to the next provider is better than crashing the entire analysis.
+_CONTENT_SAFETY_PATTERNS = (
+    re.compile(r"\b422\b"),
+    re.compile(r"\bunprocessable[_ ]?entity\b", re.IGNORECASE),
+    re.compile(r"\bnew[_ ]?sensitive\b", re.IGNORECASE),
+    re.compile(r"\bcontent[_ ]?moderation\b", re.IGNORECASE),
+    re.compile(r"\bsafety[_ ]?policy\b", re.IGNORECASE),
+    re.compile(r"\binappropriate\b", re.IGNORECASE),
+)
+
 
 def classify_error(exc: BaseException) -> bool:
-    """Return True if ``exc`` looks like a quota / rate-limit / timeout that
-    justifies falling back to the next provider.
+    """Return True if ``exc`` looks like a quota / rate-limit / timeout /
+    content-safety error that justifies falling back to the next provider.
 
     Only stringified message matching is used — we don't introspect exception
     types because vendor SDKs wrap their errors inconsistently (openai raises
     ``RateLimitError``; deepseek raises ``APIError`` with a 429 string; some
     others just return ``RuntimeError("HTTP 429")``).
+
+    Content-safety errors are included because providers differ wildly in
+    what they accept; MiniMax may reject financial/geopolitical content that
+    DeepSeek handles fine. Falling back beats aborting the analysis.
     """
     if isinstance(exc, QuotaLikeError):
         return True
@@ -89,6 +107,9 @@ def classify_error(exc: BaseException) -> bool:
         if pattern.search(msg):
             return True
     for pattern in _TIMEOUT_PATTERNS:
+        if pattern.search(msg):
+            return True
+    for pattern in _CONTENT_SAFETY_PATTERNS:
         if pattern.search(msg):
             return True
     return False

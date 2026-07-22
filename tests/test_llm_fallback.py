@@ -116,6 +116,14 @@ class TestClassifyError:
             RuntimeError("Error code: 402 - Payment required"),
             TimeoutError("upstream timed out"),
             ConnectionError("reset"),
+            # 422 / content-safety errors — different providers have different
+            # safety thresholds; MiniMax may reject what DeepSeek accepts.
+            RuntimeError(
+                "Error code: 422 - {'error': {'type': 'unprocessable_entity_error', "
+                "'message': 'input new_sensitive (1026)'}}"
+            ),
+            RuntimeError("HTTP 422 Unprocessable Entity"),
+            RuntimeError("content_moderation triggered"),
         ],
     )
     def test_quota_like_errors_are_fallback_eligible(self, exc):
