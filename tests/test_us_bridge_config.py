@@ -106,3 +106,59 @@ def test_build_worker_command_remaps_minimax_to_cn(monkeypatch, tmp_path):
     )
     assert env["TRADINGAGENTS_LLM_PROVIDER"] == "minimax-cn"
     assert env["MINIMAX_CN_API_KEY"] == "sk-cn-test-key"
+
+
+def test_build_worker_command_forwards_fallback_chain(monkeypatch, tmp_path):
+    """The fallback chain must be serialised into US_BRIDGE_FALLBACK_CHAIN."""
+    import json
+
+    us_root = tmp_path / "tradingAgents"
+    (us_root / "tradingagents").mkdir(parents=True)
+    (us_root / "tradingagents" / "__init__.py").write_text("", encoding="utf-8")
+    py = tmp_path / "python"
+    py.write_text("#!/bin/sh\n", encoding="utf-8")
+    py.chmod(0o755)
+    monkeypatch.setenv("US_TRADINGAGENTS_ROOT", str(us_root))
+    monkeypatch.setenv("US_TRADINGAGENTS_PYTHON", str(py))
+
+    _cmd, env, _cwd = build_worker_command(
+        ticker="AS",
+        trade_date="2026-07-21",
+        llm_config={
+            "llm_provider": "minimax",
+            "deep_think_llm": "MiniMax-M3",
+            "fallback_chain": [
+                {"provider": "deepseek", "model": "deepseek-chat"},
+            ],
+        },
+    )
+    raw = env.get("US_BRIDGE_FALLBACK_CHAIN", "")
+    assert raw, "expected US_BRIDGE_FALLBACK_CHAIN env var"
+    chain = json.loads(raw)
+    assert isinstance(chain, list)
+    assert len(chain) == 1
+    assert chain[0]["provider"] == "deepseek"
+    assert chain[0]["model"] == "deepseek-chat"
+
+
+def test_build_worker_command_skips_fallback_chain_when_empty(monkeypatch, tmp_path):
+    """Empty fallback_chain should not set US_BRIDGE_FALLBACK_CHAIN."""
+    us_root = tmp_path / "tradingAgents"
+    (us_root / "tradingagents").mkdir(parents=True)
+    (us_root / "tradingagents" / "__init__.py").write_text("", encoding="utf-8")
+    py = tmp_path / "python"
+    py.write_text("#!/bin/sh\n", encoding="utf-8")
+    py.chmod(0o755)
+    monkeypatch.setenv("US_TRADINGAGENTS_ROOT", str(us_root))
+    monkeypatch.setenv("US_TRADINGAGENTS_PYTHON", str(py))
+
+    _cmd, env, _cwd = build_worker_command(
+        ticker="AS",
+        trade_date="2026-07-21",
+        llm_config={
+            "llm_provider": "minimax",
+            "deep_think_llm": "MiniMax-M3",
+            "fallback_chain": [],
+        },
+    )
+    assert "US_BRIDGE_FALLBACK_CHAIN" not in env

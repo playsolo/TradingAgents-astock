@@ -109,6 +109,16 @@ def build_worker_command(
     if llm_config.get("max_risk_discuss_rounds") is not None:
         env["TRADINGAGENTS_MAX_RISK_ROUNDS"] = str(llm_config["max_risk_discuss_rounds"])
 
+    # Forward the fallback chain so the US subprocess can create a
+    # FallbackLLMClient. The upstream TradingAgents does not know about
+    # fallback chains natively — we inject it via a custom env var that
+    # worker.py reads and merges into the graph config.
+    fallback_chain = list(llm_config.get("fallback_chain") or [])
+    if fallback_chain:
+        import json
+
+        env["US_BRIDGE_FALLBACK_CHAIN"] = json.dumps(fallback_chain, ensure_ascii=False)
+
     cmd = [str(python), "-u", str(_WORKER_PATH)]
     return cmd, env, us_root
 

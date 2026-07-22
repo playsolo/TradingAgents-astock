@@ -242,6 +242,18 @@ def main() -> int:
     # Prefer streamed progress; checkpoint resume is optional via US env.
     config.setdefault("checkpoint_enabled", False)
 
+    # Inject the fallback chain (passed from the A-stock daemon via env var)
+    # so the TradingAgentsGraph can create a FallbackLLMClient and degrade
+    # to deepseek when the primary provider (minimax) hits quota exhaustion.
+    fc_raw = os.environ.get("US_BRIDGE_FALLBACK_CHAIN") or ""
+    if fc_raw.strip():
+        try:
+            parsed = json.loads(fc_raw)
+            if isinstance(parsed, list):
+                config["fallback_chain"] = parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
+
     already: set[str] = set()
     _emit("stage_active", stage="market")
 
