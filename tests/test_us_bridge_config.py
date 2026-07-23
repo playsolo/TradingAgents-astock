@@ -73,7 +73,9 @@ def test_build_worker_command_points_at_worker(monkeypatch, tmp_path):
     assert "-u" in cmd
     assert any(str(p).endswith("worker.py") for p in cmd)
     assert cwd == us_root.resolve()
-    assert env["PYTHONPATH"] == str(us_root.resolve())
+    # PYTHONPATH is now ``us_root:astock_root`` so the subprocess can
+    # import ``create_llm_client_with_fallback`` from the A-stock checkout.
+    assert env["PYTHONPATH"].startswith(str(us_root.resolve()) + ":")
     assert env["US_BRIDGE_TICKER"] == "NVDA"
     assert env["US_BRIDGE_TRADE_DATE"] == "2024-05-10"
     assert env["TRADINGAGENTS_LLM_PROVIDER"] == "openai"

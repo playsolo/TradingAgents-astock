@@ -86,7 +86,11 @@ def build_worker_command(
 
     env = os.environ.copy()
     # Ensure the US package wins over this A-stock checkout in the child.
-    env["PYTHONPATH"] = str(us_root)
+    # Append the A-stock root so the subprocess can also import
+    # ``create_llm_client_with_fallback`` (and its FallbackLLMClient
+    # dependency) from ``tradingagents/llm_clients/factory.py``.
+    _astock_root = str(Path(__file__).resolve().parents[2])
+    env["PYTHONPATH"] = f"{str(us_root)}:{_astock_root}"
     env["US_BRIDGE_TICKER"] = ticker
     env["US_BRIDGE_TRADE_DATE"] = trade_date
     env["US_BRIDGE_PROJECT_ROOT"] = str(us_root)
