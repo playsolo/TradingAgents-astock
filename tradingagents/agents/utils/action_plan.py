@@ -46,14 +46,29 @@ You extract a structured trading action plan from the FINAL investment-plan \
 section below. Use only facts stated in the text.
 
 Rules:
-- rating must be one of Buy / Overweight / Hold / Underweight / Sell \
-    (map 买入→Buy, 增持/超配→Overweight, 持有/观望→Hold, 减持→Underweight, 卖出/清仓→Sell).
-- Do NOT invent prices. If a level is not explicitly numeric in the text, leave it null.
-- holders_action / non_holders_action: short phrases capturing the stated guidance.
-- summary: 1–2 sentences for the operational conclusion.
-- buy_zone_low / buy_zone_high: if the text states a price range where \
-    non-holders should re-enter / buy (e.g. "回调至12-14元可分批建仓" or \
-    "re-entry zone 12-15"), extract the numeric bounds. Otherwise leave null.
+1. **Rating** — must be exactly one of Buy / Overweight / Hold / Underweight / Sell \
+    (map 买入→Buy, 增持/超配→Overweight, 持有/观望→Hold, 减持→Underweight, 卖出/清仓→Sell).\
+    \n   IMPORTANT: If the text explicitly says "Underweight", "减持", or "减仓" anywhere \
+    in the rating section, the rating MUST be Underweight. Never \
+    infer Overweight or Buy from a price range that is stated in a \
+    "reduce / trim / 减仓 / 反弹离场" context.\n
+2. **Price levels** —\
+    \n   - reduce_low / reduce_high: extract if the text states a price zone FOR SELLING / \
+    REDUCING / 减仓 / 减持 (e.g. "反弹至370-380元进一步减仓" → reduce_low=370, reduce_high=380).\
+    \n   - buy_zone_low / buy_zone_high: extract ONLY if the text explicitly says \
+    non-holders should BUY / ENTER / 建仓 / 买入 at a price range. If the range is stated \
+    in a "减仓 / 卖出 / 反弹离场 / 减持" context, it is NOT a buy zone — leave these null.\
+    \n   - reentry_low / reentry_high: extract ONLY if the text describes a future \
+    RE-ENTRY / 回补 / 加仓 condition (e.g. "若调整至XX可加仓"). \
+    A "反弹减仓" range is NOT a re-entry zone — leave these null.\
+    \n   - stop_loss: extract only if numeric and explicitly described as stop-loss / 止损 / 离场线.\
+    \n   - watch_support: extract only if named as support / 支撑 level.\n
+3. **Do NOT invent prices**. If a level is not explicitly numeric in the text, leave it null.\n
+4. **holders_action / non_holders_action**: short phrases capturing the stated guidance.\n
+5. **summary**: 1–2 sentences for the operational conclusion.\n
+6. **Critical**: When the text says to "减仓" or "减持" at a certain price range, \
+    that range goes into reduce_low/reduce_high — NEVER into buy_zone or reentry. \
+    The overall rating in such a text is Underweight or Sell, never Overweight or Buy.
 
 TEXT:
 {section}
