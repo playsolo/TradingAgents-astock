@@ -30,7 +30,7 @@ def build_quick_llm(config: dict[str, Any] | None) -> Any:
 
         client = create_llm_client_with_fallback(
             provider=config.get("llm_provider", "deepseek"),
-            model=config.get("quick_think_llm", "deepseek-chat"),
+            model=config.get("quick_think_llm", "deepseek-v4-flash"),
             base_url=config.get("backend_url"),
             fallback_chain=config.get("fallback_chain") or [],
         )

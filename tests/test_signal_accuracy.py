@@ -83,8 +83,8 @@ class TestConfigFingerprint:
         a = config_fingerprint(
             {
                 "llm_provider": "deepseek",
-                "deep_think_llm": "deepseek-chat",
-                "quick_think_llm": "deepseek-chat",
+                "deep_think_llm": "deepseek-v4-pro",
+                "quick_think_llm": "deepseek-v4-flash",
                 "max_debate_rounds": 1,
                 "max_risk_discuss_rounds": 1,
             }
@@ -92,8 +92,8 @@ class TestConfigFingerprint:
         b = config_fingerprint(
             {
                 "llm_provider": "deepseek",
-                "deep_think_llm": "deepseek-chat",
-                "quick_think_llm": "deepseek-chat",
+                "deep_think_llm": "deepseek-v4-pro",
+                "quick_think_llm": "deepseek-v4-flash",
                 "max_debate_rounds": 1,
                 "max_risk_discuss_rounds": 1,
             }
@@ -101,8 +101,8 @@ class TestConfigFingerprint:
         c = config_fingerprint(
             {
                 "llm_provider": "deepseek",
-                "deep_think_llm": "deepseek-chat",
-                "quick_think_llm": "deepseek-chat",
+                "deep_think_llm": "deepseek-v4-pro",
+                "quick_think_llm": "deepseek-v4-flash",
                 "max_debate_rounds": 2,
                 "max_risk_discuss_rounds": 1,
             }

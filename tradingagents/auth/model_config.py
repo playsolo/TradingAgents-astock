@@ -24,16 +24,16 @@ _MODEL_CONFIG_FILE = Path.home() / ".tradingagents" / "model_config.json"
 def _defaults() -> dict[str, Any]:
     return {
         "llm_provider": "deepseek",
-        "deep_think_llm": "deepseek-chat",
-        "quick_think_llm": "deepseek-chat",
+        "deep_think_llm": "deepseek-v4-pro",
+        "quick_think_llm": "deepseek-v4-flash",
         "backend_url": None,
-        # Default fallback chain: deepseek-chat is the always-on safety net.
+        # Default fallback chain: deepseek-v4-flash is the always-on safety net.
         # Operators overriding ``llm_provider`` (e.g. to MiniMax) will still
         # get this fallback automatically — the circuit breaker flips to
         # DeepSeek after 5 consecutive quota errors and waits 5 hours before
         # retrying the primary.
         "fallback_chain": [
-            {"provider": "deepseek", "model": "deepseek-chat"},
+            {"provider": "deepseek", "model": "deepseek-v4-flash"},
         ],
     }
 

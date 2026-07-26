@@ -50,9 +50,9 @@ def build_worker_config() -> dict[str, Any]:
     else:
         # No admin config yet: fall back to env so a fresh install still runs.
         config["llm_provider"] = os.getenv("DEFAULT_LLM_PROVIDER", "deepseek").strip() or "deepseek"
-        config["deep_think_llm"] = os.getenv("DEEP_THINK_LLM", "deepseek-chat").strip() or "deepseek-chat"
+        config["deep_think_llm"] = os.getenv("DEEP_THINK_LLM", "deepseek-v4-pro").strip() or "deepseek-v4-pro"
         config["quick_think_llm"] = (
-            os.getenv("QUICK_THINK_LLM", "deepseek-chat").strip() or "deepseek-chat"
+            os.getenv("QUICK_THINK_LLM", "deepseek-v4-flash").strip() or "deepseek-v4-flash"
         )
         backend_url = (os.getenv("BACKEND_URL") or "").strip()
         config["backend_url"] = backend_url or None

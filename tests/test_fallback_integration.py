@@ -38,7 +38,7 @@ class TestSanitizeChain:
     def test_filters_malformed_entries(self):
         from tradingagents.auth.model_config import _sanitize_chain
         raw = [
-            {"provider": "deepseek", "model": "deepseek-chat"},
+            {"provider": "deepseek", "model": "deepseek-v4-flash"},
             {"provider": "minimax"},  # missing model
             {"model": "x"},  # missing provider
             "not-a-dict",
@@ -46,7 +46,7 @@ class TestSanitizeChain:
             {"provider": "qwen", "model": "qwen-plus"},
         ]
         assert _sanitize_chain(raw) == [
-            {"provider": "deepseek", "model": "deepseek-chat"},
+            {"provider": "deepseek", "model": "deepseek-v4-flash"},
             {"provider": "qwen", "model": "qwen-plus"},
         ]
 
@@ -72,7 +72,7 @@ class TestFallbackChainPersistence:
             quick_think_llm="MiniMax-M3",
             backend_url=None,
             fallback_chain=[
-                {"provider": "deepseek", "model": "deepseek-chat"},
+                {"provider": "deepseek", "model": "deepseek-v4-flash"},
             ],
         )
         assert cfg_file.exists()
@@ -80,7 +80,7 @@ class TestFallbackChainPersistence:
         loaded = model_config.load_model_config()
         assert loaded["llm_provider"] == "minimax"
         assert loaded["fallback_chain"] == [
-            {"provider": "deepseek", "model": "deepseek-chat"}
+            {"provider": "deepseek", "model": "deepseek-v4-flash"}
         ]
 
     def test_load_handles_missing_chain(self, tmp_path: Path, monkeypatch):
@@ -94,8 +94,8 @@ class TestFallbackChainPersistence:
         monkeypatch.setattr(model_config, "_MODEL_CONFIG_FILE", cfg_file)
         cfg_file.write_text(json.dumps({
             "llm_provider": "deepseek",
-            "deep_think_llm": "deepseek-chat",
-            "quick_think_llm": "deepseek-chat",
+            "deep_think_llm": "deepseek-v4-pro",
+            "quick_think_llm": "deepseek-v4-flash",
             "backend_url": None,
         }))
 
@@ -111,11 +111,11 @@ class TestFallbackChainPersistence:
         monkeypatch.setattr(model_config, "_MODEL_CONFIG_FILE", cfg_file)
         cfg_file.write_text(json.dumps({
             "llm_provider": "deepseek",
-            "deep_think_llm": "deepseek-chat",
-            "quick_think_llm": "deepseek-chat",
+            "deep_think_llm": "deepseek-v4-pro",
+            "quick_think_llm": "deepseek-v4-flash",
             "backend_url": None,
             "fallback_chain": [
-                {"provider": "deepseek", "model": "deepseek-chat"},
+                {"provider": "deepseek", "model": "deepseek-v4-flash"},
                 "garbage",
                 {"provider": "minimax"},
             ],
@@ -123,7 +123,7 @@ class TestFallbackChainPersistence:
 
         loaded = model_config.load_model_config()
         assert loaded["fallback_chain"] == [
-            {"provider": "deepseek", "model": "deepseek-chat"}
+            {"provider": "deepseek", "model": "deepseek-v4-flash"}
         ]
 
     def test_legacy_config_without_chain_gets_default_injected(
@@ -200,7 +200,7 @@ class TestFactoryWiring:
 
         primary = create_llm_client_with_fallback(
             provider="deepseek",
-            model="deepseek-chat",
+            model="deepseek-v4-flash",
             fallback_chain=[],
         )
         # With no chain, we should get the bare client, not the wrapper.
@@ -216,7 +216,7 @@ class TestFactoryWiring:
             provider="minimax",
             model="MiniMax-M3",
             fallback_chain=[
-                {"provider": "deepseek", "model": "deepseek-chat"},
+                {"provider": "deepseek", "model": "deepseek-v4-flash"},
             ],
         )
         assert isinstance(client, FallbackLLMClient)
@@ -232,7 +232,7 @@ class TestFactoryWiring:
             provider="minimax",
             model="MiniMax-M3",
             fallback_chain=[
-                {"provider": "deepseek", "model": "deepseek-chat"},
+                {"provider": "deepseek", "model": "deepseek-v4-flash"},
             ],
             enabled=False,
         )

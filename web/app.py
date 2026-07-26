@@ -163,8 +163,8 @@ if os.getenv("WATCHLIST_SCHEDULER", "0").strip() not in {"0", "false", "off"}:
     _watchlist_cfg = load_model_config()
     start_watchlist_scheduler(config_provider=lambda: {
         "llm_provider": _watchlist_cfg.get("llm_provider", "deepseek"),
-        "quick_think_llm": _watchlist_cfg.get("quick_think_llm", "deepseek-chat"),
-        "deep_think_llm": _watchlist_cfg.get("deep_think_llm", "deepseek-chat"),
+        "quick_think_llm": _watchlist_cfg.get("quick_think_llm", "deepseek-v4-flash"),
+        "deep_think_llm": _watchlist_cfg.get("deep_think_llm", "deepseek-v4-pro"),
         "backend_url": (_watchlist_cfg.get("backend_url") or os.getenv("BACKEND_URL") or None),
     })
 

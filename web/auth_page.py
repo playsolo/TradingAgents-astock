@@ -484,8 +484,8 @@ def _render_admin_model_config() -> None:
         quick_models = [v for _, v in MODEL_OPTIONS[selected_provider]["quick"]]
         deep_models = [v for _, v in MODEL_OPTIONS[selected_provider]["deep"]]
 
-    current_quick = admin_config.get("quick_think_llm", "deepseek-chat")
-    current_deep = admin_config.get("deep_think_llm", "deepseek-chat")
+    current_quick = admin_config.get("quick_think_llm", "deepseek-v4-flash")
+    current_deep = admin_config.get("deep_think_llm", "deepseek-v4-pro")
     quick_idx = quick_models.index(current_quick) if current_quick in quick_models else 0
     deep_idx = deep_models.index(current_deep) if current_deep in deep_models else 0
 

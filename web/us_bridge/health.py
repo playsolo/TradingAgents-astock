@@ -60,7 +60,7 @@ _PROBE_ENDPOINTS: dict[str, str] = {
 # listing models still returns 200 while ``chat/completions`` returns 429.
 _PROBE_CHAT_MODELS: dict[str, str] = {
     "minimax": "MiniMax-M3",
-    "deepseek": "deepseek-chat",
+    "deepseek": "deepseek-v4-flash",
     "openai": "gpt-4o-mini",
     "qwen": "qwen-turbo",
     "glm": "glm-4-flash",

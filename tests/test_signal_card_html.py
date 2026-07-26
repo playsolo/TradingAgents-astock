@@ -18,7 +18,7 @@ def test_actual_single_provider_no_fallback_line():
             "llm_providers_used": ["minimax"],
             "llm_models_used": ["MiniMax-M3"],
             "llm_fallback_chain": [
-                {"provider": "deepseek", "model": "deepseek-chat"},
+                {"provider": "deepseek", "model": "deepseek-v4-flash"},
             ],
         },
     )
@@ -36,11 +36,11 @@ def test_actual_switched_providers_joined_with_plus():
         final_state={
             "llm_provider": "minimax",
             "llm_providers_used": ["minimax", "deepseek"],
-            "llm_models_used": ["MiniMax-M3", "deepseek-chat"],
+            "llm_models_used": ["MiniMax-M3", "deepseek-v4-flash"],
         },
     )
     assert "🤖 minimax+deepseek" in html
-    assert "MiniMax-M3 → deepseek-chat" in html
+    assert "MiniMax-M3 → deepseek-v4-flash" in html
     assert "兜底" not in html
 
 
@@ -73,11 +73,11 @@ def test_elapsed_and_provenance_both_render():
         final_state={
             "llm_provider": "deepseek",
             "llm_providers_used": ["deepseek"],
-            "llm_models_used": ["deepseek-chat"],
+            "llm_models_used": ["deepseek-v4-flash"],
         },
     )
     assert "耗时 2:05" in html
-    assert "模型 deepseek-chat" in html
+    assert "模型 deepseek-v4-flash" in html
     assert "🤖 deepseek" in html
 
 

@@ -178,7 +178,7 @@ def test_choose_provider_keeps_primary_when_healthy(monkeypatch):
         base_url=None,
         deep_think_llm="MiniMax-M3",
         quick_think_llm="MiniMax-M3",
-        fallback_chain=[{"provider": "deepseek", "model": "deepseek-chat"}],
+        fallback_chain=[{"provider": "deepseek", "model": "deepseek-v4-flash"}],
     )
     assert chosen == {
         "llm_provider": "minimax",
@@ -202,14 +202,14 @@ def test_choose_provider_falls_back_when_primary_unhealthy(monkeypatch):
         deep_think_llm="MiniMax-M3",
         quick_think_llm="MiniMax-M3",
         fallback_chain=[
-            {"provider": "deepseek", "model": "deepseek-chat"},
+            {"provider": "deepseek", "model": "deepseek-v4-flash"},
             {"provider": "openai", "model": "gpt-4o"},
         ],
     )
     assert chosen == {
         "llm_provider": "deepseek",
-        "deep_think_llm": "deepseek-chat",
-        "quick_think_llm": "deepseek-chat",
+        "deep_think_llm": "deepseek-v4-flash",
+        "quick_think_llm": "deepseek-v4-flash",
         "fell_back": True,
     }
 
@@ -249,7 +249,7 @@ def test_choose_provider_skips_unhealthy_fallbacks(monkeypatch):
         deep_think_llm="MiniMax-M3",
         quick_think_llm="MiniMax-M3",
         fallback_chain=[
-            {"provider": "deepseek", "model": "deepseek-chat"},
+            {"provider": "deepseek", "model": "deepseek-v4-flash"},
             {"provider": "openai", "model": "gpt-4o"},
         ],
     )
@@ -395,11 +395,11 @@ def test_choose_provider_falls_back_on_quota_failures(monkeypatch):
         base_url=None,
         deep_think_llm="MiniMax-M3",
         quick_think_llm="MiniMax-M3",
-        fallback_chain=[{"provider": "deepseek", "model": "deepseek-chat"}],
+        fallback_chain=[{"provider": "deepseek", "model": "deepseek-v4-flash"}],
     )
     assert chosen == {
         "llm_provider": "deepseek",
-        "deep_think_llm": "deepseek-chat",
-        "quick_think_llm": "deepseek-chat",
+        "deep_think_llm": "deepseek-v4-flash",
+        "quick_think_llm": "deepseek-v4-flash",
         "fell_back": True,
     }

@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 # 与 daemon 默认保持一致：配置缺 deep_think_llm 时按供应商补齐
 _PROVIDER_DEEP_DEFAULTS = {
-    "deepseek": "deepseek-chat",
+    "deepseek": "deepseek-v4-flash",
     "minimax": "MiniMax-M3",
     "qwen": "qwen3.5-plus",
     "glm": "glm-4-plus",

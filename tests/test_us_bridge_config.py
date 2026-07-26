@@ -130,7 +130,7 @@ def test_build_worker_command_forwards_fallback_chain(monkeypatch, tmp_path):
             "llm_provider": "minimax",
             "deep_think_llm": "MiniMax-M3",
             "fallback_chain": [
-                {"provider": "deepseek", "model": "deepseek-chat"},
+                {"provider": "deepseek", "model": "deepseek-v4-flash"},
             ],
         },
     )
@@ -140,7 +140,7 @@ def test_build_worker_command_forwards_fallback_chain(monkeypatch, tmp_path):
     assert isinstance(chain, list)
     assert len(chain) == 1
     assert chain[0]["provider"] == "deepseek"
-    assert chain[0]["model"] == "deepseek-chat"
+    assert chain[0]["model"] == "deepseek-v4-flash"
 
 
 def test_build_worker_command_skips_fallback_chain_when_empty(monkeypatch, tmp_path):

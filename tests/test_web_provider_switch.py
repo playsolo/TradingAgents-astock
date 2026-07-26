@@ -47,7 +47,7 @@ class TestAdminProviderGateLogic:
         ss = {
             "admin_llm_provider": "minimax",  # user just changed
             "_admin_model_form_provider": "deepseek",  # baseline from prev run
-            "admin_quick_model": "deepseek-chat",  # stale
+            "admin_quick_model": "deepseek-v4-flash",  # stale
             "admin_deep_model": "deepseek-v4-pro",  # stale
         }
 

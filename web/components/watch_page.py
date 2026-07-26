@@ -90,7 +90,7 @@ def render_watch_page() -> None:
                 cfg = {
                     "llm_provider": st.session_state.get("llm_provider", "deepseek"),
                     "quick_think_llm": st.session_state.get(
-                        "quick_think_llm", "deepseek-chat"
+                        "quick_think_llm", "deepseek-v4-flash"
                     ),
                     "backend_url": st.session_state.get("llm_base_url") or None,
                 }
@@ -183,7 +183,7 @@ def render_watch_page() -> None:
                         cfg = {
                             "llm_provider": st.session_state.get("llm_provider", "deepseek"),
                             "quick_think_llm": st.session_state.get(
-                                "quick_think_llm", "deepseek-chat"
+                                "quick_think_llm", "deepseek-v4-flash"
                             ),
                             "backend_url": st.session_state.get("llm_base_url") or None,
                         }

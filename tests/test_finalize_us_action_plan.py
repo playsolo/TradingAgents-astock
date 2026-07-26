@@ -137,7 +137,7 @@ def test_finalize_us_run_persists_llm_provenance(tmp_path, monkeypatch):
         "deep_think_llm": "MiniMax-M3",
         "quick_think_llm": "MiniMax-M3",
         "backend_url": "https://api.minimaxi.com/v1",
-        "fallback_chain": [{"provider": "deepseek", "model": "deepseek-chat"}],
+        "fallback_chain": [{"provider": "deepseek", "model": "deepseek-v4-flash"}],
     }
     _finalize_us_run("NVDA", "2026-07-16", config, tracker)
 
@@ -152,7 +152,7 @@ def test_finalize_us_run_persists_llm_provenance(tmp_path, monkeypatch):
     assert saved["quick_think_llm"] == "MiniMax-M3", saved
     assert saved["llm_backend_url"] == "https://api.minimaxi.com/v1", saved
     assert saved["llm_fallback_chain"] == [
-        {"provider": "deepseek", "model": "deepseek-chat"}
+        {"provider": "deepseek", "model": "deepseek-v4-flash"}
     ], saved
     assert saved["llm_providers_used"] == ["minimax"], saved
     assert saved["llm_models_used"] == ["MiniMax-M3"], saved
@@ -192,11 +192,11 @@ def test_finalize_us_run_persists_effective_providers_after_fallback(
     config = {
         "results_dir": str(tmp_path),
         "llm_provider": "deepseek",
-        "deep_think_llm": "deepseek-chat",
-        "quick_think_llm": "deepseek-chat",
-        "fallback_chain": [{"provider": "deepseek", "model": "deepseek-chat"}],
+        "deep_think_llm": "deepseek-v4-pro",
+        "quick_think_llm": "deepseek-v4-flash",
+        "fallback_chain": [{"provider": "deepseek", "model": "deepseek-v4-flash"}],
         "llm_providers_used": ["deepseek"],
-        "llm_models_used": ["deepseek-chat"],
+        "llm_models_used": ["deepseek-v4-pro", "deepseek-v4-flash"],
         "llm_provider_configured": "minimax",
     }
     _finalize_us_run("NFLX", "2026-07-18", config, tracker)
@@ -209,7 +209,7 @@ def test_finalize_us_run_persists_effective_providers_after_fallback(
     saved = json.loads(log_path.read_text(encoding="utf-8"))
     assert saved["llm_provider"] == "deepseek"
     assert saved["llm_providers_used"] == ["deepseek"]
-    assert saved["llm_models_used"] == ["deepseek-chat"]
+    assert saved["llm_models_used"] == ["deepseek-v4-pro", "deepseek-v4-flash"]
     assert tracker.final_state["llm_providers_used"] == ["deepseek"]
 
 

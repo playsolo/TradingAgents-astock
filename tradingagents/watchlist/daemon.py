@@ -41,7 +41,7 @@ _PROVIDER_QUICK_DEFAULTS = {
     "anthropic": "claude-sonnet-4-6",
 }
 _PROVIDER_DEEP_DEFAULTS = {
-    "deepseek": "deepseek-chat",
+    "deepseek": "deepseek-v4-flash",
     "minimax": "MiniMax-M3",
     "qwen": "qwen3.5-plus",
     "glm": "glm-4-plus",
@@ -62,12 +62,12 @@ def config_from_env() -> dict[str, Any]:
     quick = (
         os.getenv("WATCHLIST_QUICK_LLM")
         or os.getenv("QUICK_THINK_LLM")
-        or _PROVIDER_QUICK_DEFAULTS.get(provider, "deepseek-chat")
+        or _PROVIDER_QUICK_DEFAULTS.get(provider, "deepseek-v4-flash")
     )
     deep = (
         os.getenv("WATCHLIST_DEEP_LLM")
         or os.getenv("DEEP_THINK_LLM")
-        or _PROVIDER_DEEP_DEFAULTS.get(provider, "deepseek-chat")
+        or _PROVIDER_DEEP_DEFAULTS.get(provider, "deepseek-v4-pro")
     )
     backend = (os.getenv("BACKEND_URL") or "").strip() or None
     return {

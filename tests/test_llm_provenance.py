@@ -51,9 +51,9 @@ def test_models_for_providers_maps_primary_and_chain():
         ["minimax", "deepseek"],
         primary_provider="minimax",
         primary_model="MiniMax-M3",
-        fallback_chain=[{"provider": "deepseek", "model": "deepseek-chat"}],
+        fallback_chain=[{"provider": "deepseek", "model": "deepseek-v4-flash"}],
     )
-    assert models == ["MiniMax-M3", "deepseek-chat"]
+    assert models == ["MiniMax-M3", "deepseek-v4-flash"]
 
 
 def test_provenance_fields_default_used_to_configured_primary():
@@ -63,11 +63,11 @@ def test_provenance_fields_default_used_to_configured_primary():
             "deep_think_llm": "MiniMax-M3",
             "quick_think_llm": "MiniMax-M3",
             "backend_url": None,
-            "fallback_chain": [{"provider": "deepseek", "model": "deepseek-chat"}],
+            "fallback_chain": [{"provider": "deepseek", "model": "deepseek-v4-flash"}],
         }
     )
     assert fields["llm_providers_used"] == ["minimax"]
     assert fields["llm_models_used"] == ["MiniMax-M3"]
     assert fields["llm_fallback_chain"] == [
-        {"provider": "deepseek", "model": "deepseek-chat"}
+        {"provider": "deepseek", "model": "deepseek-v4-flash"}
     ]

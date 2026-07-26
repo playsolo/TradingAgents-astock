@@ -52,10 +52,10 @@ def test_build_worker_config_env_fallback(monkeypatch):
         "tradingagents.auth.model_config.model_config_exists", lambda: False
     )
     monkeypatch.setenv("DEFAULT_LLM_PROVIDER", "deepseek")
-    monkeypatch.setenv("DEEP_THINK_LLM", "deepseek-chat")
+    monkeypatch.setenv("DEEP_THINK_LLM", "deepseek-v4-pro")
     cfg = executor.build_worker_config()
     assert cfg["llm_provider"] == "deepseek"
-    assert cfg["deep_think_llm"] == "deepseek-chat"
+    assert cfg["deep_think_llm"] == "deepseek-v4-pro"
 
 
 def test_build_worker_config_reads_fallback_chain(monkeypatch):
@@ -75,13 +75,13 @@ def test_build_worker_config_reads_fallback_chain(monkeypatch):
             "quick_think_llm": "MiniMax-M3",
             "backend_url": None,
             "fallback_chain": [
-                {"provider": "deepseek", "model": "deepseek-chat"},
+                {"provider": "deepseek", "model": "deepseek-v4-flash"},
             ],
         },
     )
     cfg = executor.build_worker_config()
     assert cfg.get("fallback_chain") == [
-        {"provider": "deepseek", "model": "deepseek-chat"}
+        {"provider": "deepseek", "model": "deepseek-v4-flash"}
     ], (
         "build_worker_config must mirror fallback_chain from model_config.json "
         "so the analyze worker gets the same failover semantics as web/runner."
@@ -99,8 +99,8 @@ def test_build_worker_config_fallback_chain_default_when_missing(monkeypatch):
         "tradingagents.auth.model_config.load_model_config",
         lambda: {
             "llm_provider": "deepseek",
-            "deep_think_llm": "deepseek-chat",
-            "quick_think_llm": "deepseek-chat",
+            "deep_think_llm": "deepseek-v4-pro",
+            "quick_think_llm": "deepseek-v4-flash",
             "backend_url": None,
         },
     )
