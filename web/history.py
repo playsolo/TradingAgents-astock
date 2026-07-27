@@ -68,16 +68,26 @@ def group_history_by_signal(
             groups[sig].append(entry)
         else:
             groups["N/A"].append(entry)
-        # Also add to WatchBuy if this ticker has an active signal
-        # AND the entry date matches the signal's analysis date (only the
-        # specific analysis that produced the buy zone, not all history).
-        if watch_signals:
-            ticker = entry.get("ticker", "").strip().upper()
-            ws = watch_signals.get(ticker)
-            if ws and entry.get("date") == ws.get("date"):
-                # Attach signal details to the entry for rendering
-                entry["_watch_signal"] = ws
-                groups.setdefault("WatchBuy", []).append(entry)
+    # ── WatchBuy group: one entry per active signal, always the *latest*
+    # history entry for that ticker. The buy-zone trigger is a price event
+    # that should link to the most recent analysis, not necessarily the
+    # one that originally defined the zone.
+    if watch_signals:
+        # Build a ticker → [entries] index for fast lookup
+        by_ticker: dict[str, list[dict[str, Any]]] = {}
+        for entry in entries:
+            tk = (entry.get("ticker") or "").strip().upper()
+            if tk:
+                by_ticker.setdefault(tk, []).append(entry)
+        for tk, ws in watch_signals.items():
+            ticker_entries = by_ticker.get(tk)
+            if not ticker_entries:
+                continue
+            # History is sorted newest-first by get_history(); pick the first
+            # (most recent) entry as the canonical link.
+            latest = ticker_entries[0]
+            latest["_watch_signal"] = ws
+            groups["WatchBuy"].append(latest)
     return groups
 
 
