@@ -531,9 +531,11 @@ def extract_signal(state: dict[str, Any]) -> str:
             continue
         cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
 
-        # Structured English rating line first
+        # Structured rating line — supports both English "Rating" and
+        # Chinese "评级", with either ASCII or full-width colon:
+        #   **评级：Hold**  /  **评级**：**Hold**  /  Rating: Hold
         m = re.search(
-            r"(?:\*\*)?Rating(?:\*\*)?\s*:\s*\*?\*?([A-Za-z]+)",
+            r"(?:\*\*)?(?:Rating|评级)(?:\*\*)?\s*[：:]\s*\*?\*?([A-Za-z]+)",
             cleaned,
             flags=re.IGNORECASE,
         )
@@ -542,9 +544,12 @@ def extract_signal(state: dict[str, Any]) -> str:
             if mapped:
                 return mapped
 
-        # Allow markdown between label and value:
-        # **最终评级**：**减持（Underweight）**
-        m = re.search(r"最终评级[\s\*]*[：:][\s\*]*([^\n*]+)", cleaned)
+        # Allow markdown between label and value — matches both the legacy
+        # "最终评级" label and the newer LLM-produced "最终裁决" variant.
+        # Leading ** is optional (LLMs often bold these labels):
+        #   **最终评级**：**减持（Underweight）**
+        #   **最终裁决：维持 Hold 评级**
+        m = re.search(r"(?:\*\*)?(?:最终评级|最终裁决)[\s\*]*[：:][\s\*]*([^\n*]+)", cleaned)
         if m:
             mapped = _map_rating_label(m.group(1).strip(), cn_map, rating_map)
             if mapped:
