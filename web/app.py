@@ -157,9 +157,11 @@ if _active_incomplete and _started is None:
         )
 
 
+# ── Watchlist Scheduler (观察池定时调度) ────────────────────────────
 # 默认可由独立守护 tradingagents-watch 负责到点观察（不开 Web 也跑）。
 # 若要改回「仅 Web 存活时调度」，启动前设 WATCHLIST_SCHEDULER=1。
-if os.getenv("WATCHLIST_SCHEDULER", "0").strip() not in {"0", "false", "off"}:
+_sched_env = os.getenv("WATCHLIST_SCHEDULER", "0").strip()
+if _sched_env not in {"0", "false", "off"}:
     _watchlist_cfg = load_model_config()
     start_watchlist_scheduler(config_provider=lambda: {
         "llm_provider": _watchlist_cfg.get("llm_provider", "deepseek"),
@@ -168,13 +170,13 @@ if os.getenv("WATCHLIST_SCHEDULER", "0").strip() not in {"0", "false", "off"}:
         "backend_url": (_watchlist_cfg.get("backend_url") or os.getenv("BACKEND_URL") or None),
     })
 
-    # ── Price Monitor (后台 A 股买入区间自动监控) ──────────────────────────
-    # 在 Web 进程启动时自启一个 daemon 线程，交易时段每 5 分钟扫描一次
-    # 已完成分析的买入区间，触发时写入 watchlist_signals.json。
-    try:
-        ensure_monitor_running()
-    except Exception:
-        pass  # 不影响 Web 启动
+# ── Price Monitor (后台 A 股买入区间自动监控) ──────────────────────────
+# 独立于 WATCHLIST_SCHEDULER：Price Monitor 不需要 LLM，只需读历史
+# 日志 + 实时价格查询，应始终在 Web 存活期间运行。
+try:
+    ensure_monitor_running()
+except Exception:
+    pass  # 不影响 Web 启动
 
     # ── Custom CSS ───────────────────────────────────────────────────────────────
 
