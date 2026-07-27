@@ -929,15 +929,16 @@ def render_sidebar() -> None:
 
     n_watch = len(groups.get("WatchBuy", []))
     # 关注-待买入 Tab 始终显示（包括 0），让用户知道功能存在
-    tab_labels = [("关注-待买入", "watchbuy")] + [
+    tab_labels = [("🛎️ 关注-待买入", "watchbuy"), ("全部", "all")] + [
         ("买入", "buy"),
         ("卖出", "sell"),
         ("持有", "hold"),
     ]
 
     tabs = st.tabs(
-        [f"{label}({len(groups.get(name_key.capitalize(), []))})" if name_key != "watchbuy"
-         else f"🛎️ 关注-待买入({n_watch})"
+        [f"{label}({n_watch})" if name_key == "watchbuy"
+         else f"{label}({total})" if name_key == "all"
+         else f"{label}({len(groups.get(name_key.capitalize(), []))})"
          for label, name_key in tab_labels]
     )
 
@@ -946,6 +947,16 @@ def render_sidebar() -> None:
         with tabs[i]:
             if name_key == "watchbuy":
                 _render_watchbuy_page(groups.get("WatchBuy", []), dismiss_fn=dismiss_signal)
+            elif name_key == "all":
+                # 全部 tab: merge all signal groups (except WatchBuy) sorted
+                # newest-first, matching get_history() ordering.
+                all_entries = []
+                for sig_key in ("Buy", "Sell", "Hold", "N/A"):
+                    all_entries.extend(groups.get(sig_key, []))
+                # get_history returns newest-first; groups preserve that order
+                # within each signal bucket, so interleaving by date is needed.
+                all_entries.sort(key=lambda e: e.get("date", ""), reverse=True)
+                _render_history_page(all_entries, page_size, tab_key=name_key)
             else:
                 _render_history_page(groups.get(name_key.capitalize(), []), page_size, tab_key=name_key)
 

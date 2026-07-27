@@ -543,6 +543,18 @@ def extract_signal(state: dict[str, Any]) -> str:
             continue
         cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
 
+        # US bridge produces "**Action**: Hold" in trader_investment_decision
+        # and "FINAL TRANSACTION PROPOSAL: **HOLD**" without the Chinese labels.
+        m = re.search(
+            r"(?:\*\*)?(?:Action|FINAL\s+TRANSACTION\s+PROPOSAL)(?:\*\*)?\s*:\s*\*?\*?([A-Za-z]+)",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        if m:
+            mapped = rating_map.get(m.group(1).upper())
+            if mapped:
+                return mapped
+
         # Structured rating line — supports both English "Rating" and
         # Chinese "评级", with either ASCII or full-width colon:
         #   **评级：Hold**  /  **评级**：**Hold**  /  Rating: Hold
