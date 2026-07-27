@@ -69,10 +69,12 @@ def group_history_by_signal(
         else:
             groups["N/A"].append(entry)
         # Also add to WatchBuy if this ticker has an active signal
+        # AND the entry date matches the signal's analysis date (only the
+        # specific analysis that produced the buy zone, not all history).
         if watch_signals:
             ticker = entry.get("ticker", "").strip().upper()
             ws = watch_signals.get(ticker)
-            if ws:
+            if ws and entry.get("date") == ws.get("date"):
                 # Attach signal details to the entry for rendering
                 entry["_watch_signal"] = ws
                 groups.setdefault("WatchBuy", []).append(entry)
