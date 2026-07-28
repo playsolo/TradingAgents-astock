@@ -447,7 +447,13 @@ def _render_analysis_queue_inner() -> None:
         "刷新后会从本地恢复，空闲时自动开跑。"
     )
     for idx, job in enumerate(jobs, start=1):
-        st.caption(format_queue_job_caption(job, idx))
+        caption = format_queue_job_caption(job, idx)
+        col_text, col_btn = st.columns([9, 1])
+        col_text.caption(caption)
+        ident = job.identity()
+        if col_btn.button("✕", key=f"qdrop_{ident[0]}_{ident[1]}_{ident[2]}", help="移除此项"):
+            remove_job_identity(st.session_state, ident)
+            st.rerun()
 
     is_busy = slots_available(st.session_state) < max_jobs_configured()
     cont_col, clear_col = st.columns(2)
@@ -483,7 +489,13 @@ def _render_worker_queue() -> None:
         "关闭页面也会继续跑，完成后见历史。"
     )
     for idx, job in enumerate(jobs, start=1):
-        st.caption(format_queue_job_caption(job, idx))
+        caption = format_queue_job_caption(job, idx)
+        col_text, col_btn = st.columns([9, 1])
+        col_text.caption(caption)
+        ident = job.identity()
+        if col_btn.button("✕", key=f"qdrop_w_{ident[0]}_{ident[1]}_{ident[2]}", help="移除此项"):
+            default_store().remove_job_identity(ident)
+            st.rerun()
     if st.button("清空队列", key="clear_analysis_queue_worker", use_container_width=True):
         default_store().clear_atomic()
         st.rerun()

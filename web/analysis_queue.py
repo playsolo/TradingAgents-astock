@@ -500,6 +500,23 @@ class AnalysisQueueStore:
             _jobs, leases = self._load_state()
             self._save_state([], leases)
 
+    def remove_job_identity(self, identity: tuple[str, str, str]) -> int:
+        """Atomically remove a specific job from the waiting queue by identity.
+
+        ``identity`` is ``(market, ticker, trade_date)`` (matches
+        ``AnalysisJob.identity()``). Leases are untouched — remove only
+        affects jobs that haven't been claimed yet.
+
+        Returns the number of jobs removed (0 or 1).
+        """
+        with self.exclusive():
+            jobs, leases = self._load_state()
+            kept = [j for j in jobs if j.identity() != identity]
+            removed = len(jobs) - len(kept)
+            if removed:
+                self._save_state(kept, leases)
+            return removed
+
 
 def default_store() -> AnalysisQueueStore:
     return AnalysisQueueStore()
