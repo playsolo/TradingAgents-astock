@@ -418,6 +418,7 @@ class TradingAgentsGraph:
         try:
             from tradingagents.agents.utils.action_plan import (
                 extract_action_plan,
+                fallback_extract_action_plan,
                 rating_to_sidebar_signal as _rating_to_sidebar,
             )
 
@@ -426,6 +427,12 @@ class TradingAgentsGraph:
                 self.quick_thinking_llm,
                 str(final_state.get("final_trade_decision") or ""),
             )
+            # Fallback: parse PM structured markdown when LLM extraction is
+            # unavailable (e.g. MiniMax M3 thinking mode rejects tool_choice).
+            if not plan:
+                plan = fallback_extract_action_plan(
+                    str(final_state.get("final_trade_decision") or ""),
+                )
             if plan:
                 final_state["action_plan"] = plan
         except Exception:

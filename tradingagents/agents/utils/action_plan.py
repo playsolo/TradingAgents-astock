@@ -114,6 +114,163 @@ def rating_to_sidebar_signal(rating: str | PortfolioRating) -> str:
     return _SIDEBAR_FROM_RATING.get(value.strip().capitalize(), "Hold")
 
 
+# ── Regex fallback: parse PM structured markdown directly (no second LLM) ──
+
+_RATING_RE = re.compile(
+    r"(?:\*\*)?Rating(?:\*\*)?\s*[：:]\s*\*?\*?\s*([A-Za-z]+)",
+    re.IGNORECASE,
+)
+_SUMMARY_RE = re.compile(
+    r"(?:\*\*)?Executive\s+Summary(?:\*\*)?\s*[：:]\s*(.+?)(?=\n\n|\n\*\*|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
+# Chinese label fallback: the model may output 评级 in Chinese
+_CN_RATING_RE = re.compile(
+    r"(?:评级|投资评级|最终评级|最终裁决)\s*[：:]\s*\*?\*?\s*([^\n]+)",
+)
+
+
+def fallback_extract_action_plan(final_trade_decision: str) -> dict[str, Any] | None:
+    """Regex-parse PM structured markdown when the LLM extraction is unavailable.
+
+    MiniMax M3 with thinking mode rejects ``with_structured_output`` (API
+    error: "Thinking mode does not support this tool_choice"), so the
+    LLM-based ``extract_action_plan`` silently returns None. This fallback
+    reads the PM's own structured markdown (produced by ``render_pm_decision``
+    from the ``PortfolioDecision`` schema) without a second API call.
+    """
+    text = final_trade_decision or ""
+    if not text.strip():
+        return None
+
+    # 1. Rating: try English label first, then Chinese
+    rating = None
+    m = _RATING_RE.search(text)
+    if m:
+        rating = m.group(1).strip().capitalize()
+    if not rating or rating.lower() not in {"buy", "overweight", "hold", "underweight", "sell"}:
+        m = _CN_RATING_RE.search(text)
+        if m:
+            cn_label = m.group(1).strip()
+            # First check if the label itself is an English rating word
+            cn_lower = cn_label.lower()
+            direct_map = {"buy": "Buy", "overweight": "Overweight", "hold": "Hold",
+                          "underweight": "Underweight", "sell": "Sell"}
+            for en, en_label in direct_map.items():
+                if en in cn_lower:
+                    rating = en_label
+                    break
+            if not rating:
+                cn_map = {
+                    "买入": "Buy", "增持": "Overweight", "超配": "Overweight",
+                    "持有": "Hold", "减持": "Underweight", "卖出": "Sell",
+                    "观望": "Hold", "中性": "Hold", "标配": "Hold",
+                }
+                for cn, en in cn_map.items():
+                    if cn in cn_label:
+                        rating = en
+                        break
+    if not rating:
+        return None
+
+    # 2. Summary (1-2 sentence operational conclusion)
+    summary = ""
+    m = _SUMMARY_RE.search(text)
+    if m:
+        summary = m.group(1).strip()
+
+    # 3. Best-effort holder/non-holder actions from text
+    holders_action = ""
+    non_holders_action = ""
+    horizon = None
+
+    # Extract time horizon if present
+    horizon_m = re.search(
+        r"(?:\*\*)?Time\s+Horizon(?:\*\*)?\s*[：:]\s*([^\n]+)",
+        text, re.IGNORECASE,
+    )
+    if horizon_m:
+        horizon = horizon_m.group(1).strip()
+
+    # Extract holders/non-holders actions from body text
+    # (these come from the Portfolio Manager's prose body, not the schema header)
+    holders_m = re.search(
+        r"(?:持仓者|已持有者|已持仓).*?[：:]\s*([^\n。]+)",
+        text,
+    )
+    if holders_m:
+        holders_action = holders_m.group(1).strip().rstrip("*").strip()
+
+    non_holders_m = re.search(
+        r"(?:未持仓者|新建仓位|非持有者).*?[：:]\s*([^\n。]+)",
+        text,
+    )
+    if non_holders_m:
+        non_holders_action = non_holders_m.group(1).strip().rstrip("*").strip()
+
+    # 4. Best-effort price levels extraction
+    from tradingagents.agents.schemas import ActionPlanLevels
+
+    levels = ActionPlanLevels()
+    _extract_fallback_price_levels(text, levels)
+
+    return {
+        "rating": rating,
+        "holders_action": holders_action,
+        "non_holders_action": non_holders_action,
+        "levels": levels.model_dump(mode="json"),
+        "horizon": horizon,
+        "summary": summary,
+    }
+
+
+# Price patterns for fallback extraction
+_BUY_LOW_RE = re.compile(r"(?:买入|建仓|介入|回补).*?(\d+(?:\.\d+)?)元?\s*[,~\-—至到]\s*(\d+(?:\.\d+)?)元?")
+_REDUCE_LOW_RE = re.compile(r"(?:减持|减仓|离场|退出|卖出).*?(\d+(?:\.\d+)?)元?\s*[,~\-—至到]\s*(\d+(?:\.\d+)?)元?")
+_SINGLE_PRICE_RE = re.compile(r"(?:(?:买入|介入|建仓)[^\d\n]*|低位)[^\d\n]*(\d+(?:\.\d+)?)\s*元")
+_STOP_LOSS_RE = re.compile(r"(?:止损|离场位|硬止损|清仓位)[^\d]*(\d+(?:\.\d+)?)\s*元")
+
+
+def _extract_fallback_price_levels(text: str, levels) -> None:
+    """Try to extract price levels from PM prose text."""
+    # Buy zone
+    m = _BUY_LOW_RE.search(text)
+    if m:
+        try:
+            levels.buy_zone_low = float(m.group(1))
+            levels.buy_zone_high = float(m.group(2))
+        except (ValueError, TypeError):
+            pass
+
+    # Reduce/sell zone
+    m = _REDUCE_LOW_RE.search(text)
+    if m:
+        try:
+            levels.reduce_low = float(m.group(1))
+            levels.reduce_high = float(m.group(2))
+        except (ValueError, TypeError):
+            pass
+
+    # Single entry price → buy_zone
+    if levels.buy_zone_low is None and levels.buy_zone_high is None:
+        m = _SINGLE_PRICE_RE.search(text)
+        if m:
+            try:
+                price = float(m.group(1))
+                levels.buy_zone_low = price * 0.95
+                levels.buy_zone_high = price * 1.05
+            except (ValueError, TypeError):
+                pass
+
+    # Stop loss
+    m = _STOP_LOSS_RE.search(text)
+    if m:
+        try:
+            levels.stop_loss = float(m.group(1))
+        except (ValueError, TypeError):
+            pass
+
+
 def extract_action_plan(llm: Any, final_trade_decision: str) -> Optional[dict[str, Any]]:
     """Run a structured LLM pass on the isolated plan section.
 
