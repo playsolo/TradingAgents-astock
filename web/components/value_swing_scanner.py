@@ -135,6 +135,15 @@ def _build_recommendation_bar(candidate: dict) -> tuple[str, str, str]:
     return "待观察", "#555555", "🔍"
 
 
+def _is_turnaround_candidate(candidate: dict) -> bool:
+    """是否为错杀反转候选（strategy 字段或特有字段判断）。"""
+    return bool(
+        candidate.get("strategy") == "turnaround"
+        or candidate.get("w_bottom_found") is not None
+        or candidate.get("asset_revalue") is not None
+    )
+
+
 def _is_growth_candidate(candidate: dict) -> bool:
     return bool(
         candidate.get("track")
@@ -150,6 +159,9 @@ def _score_max_for(candidate: dict) -> int:
             return max(int(raw), 1)
     except (TypeError, ValueError):
         pass
+    if _is_turnaround_candidate(candidate):
+        from tradingagents.strategies.turnaround import l2_score_max as turnaround_score_max
+        return turnaround_score_max()
     if _is_growth_candidate(candidate):
         from tradingagents.strategies.growth_accel import l2_score_max
     else:
@@ -161,6 +173,9 @@ def _candidate_why_line(candidate: dict) -> str:
     why = candidate.get("why")
     if isinstance(why, str) and why.strip():
         return why.strip()
+    if _is_turnaround_candidate(candidate):
+        from tradingagents.strategies.turnaround import why_selected_line as turnaround_why
+        return turnaround_why(candidate)
     if _is_growth_candidate(candidate):
         from tradingagents.strategies.growth_accel import why_selected_line
     else:
@@ -257,7 +272,7 @@ def _analysis_block_html(candidate: dict) -> str:
 
 
 def _candidate_metrics_html(candidate: dict) -> str:
-    """卡片中部指标行：成长池强调利润增速，价值池强调 PE/PB。"""
+    """卡片中部指标行：错杀池强调 PB/负债率，成长池强调利润增速，价值池强调 PE/PB。"""
     pe = float(candidate.get("pe_ttm") or 0)
     pb = float(candidate.get("pb") or 0)
     price = float(candidate.get("price") or 0)
@@ -266,7 +281,15 @@ def _candidate_metrics_html(candidate: dict) -> str:
         f"<span>PB {pb:.1f}x</span>",
         f"<span>价 {price:.2f}</span>",
     ]
-    if _is_growth_candidate(candidate):
+    if _is_turnaround_candidate(candidate):
+        debt = candidate.get("debt_ratio")
+        if debt is not None:
+            bits.append(f"<span>负债 {float(debt):.0f}%</span>")
+        if candidate.get("asset_revalue"):
+            bits.append('<span style="color:#fbbf24;">破净</span>')
+        if candidate.get("w_bottom_found"):
+            bits.append('<span style="color:#34d399;">W底</span>')
+    elif _is_growth_candidate(candidate):
         yoy = candidate.get("np_ttm_yoy")
         if yoy is not None:
             bits.insert(0, f"<span>净利TTM {float(yoy):.0f}%</span>")
@@ -339,6 +362,9 @@ def _render_selection_rules(rules: dict | None = None, *, strategy: str = "value
     """展示当前（或落盘）选股规则。"""
     if isinstance(rules, dict) and rules.get("l0"):
         snap = rules
+    elif strategy == "turnaround":
+        from tradingagents.strategies.turnaround import selection_rules_snapshot as turnaround_snap
+        snap = turnaround_snap()
     elif strategy == "growth_accel":
         from tradingagents.strategies.growth_accel import selection_rules_snapshot
 
@@ -348,33 +374,64 @@ def _render_selection_rules(rules: dict | None = None, *, strategy: str = "value
 
         snap = selection_rules_snapshot()
     l2 = snap.get("l2") or {}
+    is_turnaround = strategy == "turnaround" or snap.get("strategy") == "turnaround"
     is_growth = strategy == "growth_accel" or snap.get("strategy") == "growth_accel"
     with st.expander("选股规则（当前口径）", expanded=False):
-        c0, c1, c2, c3 = st.columns(4)
-        c0.markdown("**L0 流动性**")
-        for line in snap.get("l0") or []:
-            c0.caption(f"• {line}")
-        c1.markdown("**L1a 预筛**" if is_growth else "**L1a 估值**")
-        for line in snap.get("l1a") or []:
-            c1.caption(f"• {line}")
-        c2.markdown("**L1 增长核**" if is_growth else "**L1b 财务**")
-        l1_lines = snap.get("l1") or snap.get("l1b") or []
-        for line in l1_lines:
-            c2.caption(f"• {line}")
-        c3.markdown("**L2 排序**" if is_growth else "**L2 催化剂**")
-        c3.caption(l2.get("note") or "")
-        active = l2.get("active") or []
-        if active:
-            c3.caption("计分：" + " · ".join(active) + f"（满分 {l2.get('score_max', '?')}）")
-        dormant = l2.get("dormant") or []
-        if dormant:
-            c3.caption("暂未启用：" + " · ".join(dormant))
+        if is_turnaround:
+            # Turnaround has 6 stages: L0, L0.5, L1, L1.5, L2, L3
+            c0, c1, c2, c3 = st.columns(4)
+            c0.markdown("**L0 基础安全**")
+            for line in snap.get("l0") or []:
+                c0.caption(f"• {line}")
+            c1.markdown("**L0.5 错杀甄别**")
+            for line in snap.get("l0_5") or []:
+                c1.caption(f"• {line}")
+            c2.markdown("**L1 利空出尽**")
+            for line in snap.get("l1") or []:
+                c2.caption(f"• {line}")
+            c3.markdown("**L1.5 资金预警**")
+            for line in snap.get("l1_5") or []:
+                c3.caption(f"• {line}")
+            st.caption("**L2 技术反转**：" + " · ".join(snap.get("l2") or []))
+            st.caption("**L3 催化剂评估**：" + " · ".join(snap.get("l3") or []))
+        else:
+            c0, c1, c2, c3 = st.columns(4)
+            c0.markdown("**L0 流动性**")
+            for line in snap.get("l0") or []:
+                c0.caption(f"• {line}")
+            c1.markdown("**L1a 预筛**" if is_growth else "**L1a 估值**")
+            for line in snap.get("l1a") or []:
+                c1.caption(f"• {line}")
+            c2.markdown("**L1 增长核**" if is_growth else "**L1b 财务**")
+            l1_lines = snap.get("l1") or snap.get("l1b") or []
+            for line in l1_lines:
+                c2.caption(f"• {line}")
+            c3.markdown("**L2 排序**" if is_growth else "**L2 催化剂**")
+            c3.caption(l2.get("note") or "")
+            active = l2.get("active") or []
+            if active:
+                c3.caption("计分：" + " · ".join(active) + f"（满分 {l2.get('score_max', '?')}）")
+            dormant = l2.get("dormant") or []
+            if dormant:
+                c3.caption("暂未启用：" + " · ".join(dormant))
 
 
 def _render_funnel_stats(result: dict, *, strategy: str = "value_swing"):
     """渲染漏斗统计。"""
-    cols = st.columns(6)
-    if strategy == "growth_accel" or result.get("strategy") == "growth_accel":
+    is_turnaround = strategy == "turnaround" or result.get("strategy") == "turnaround"
+    if is_turnaround:
+        cols = st.columns(7)
+        metrics = [
+            ("全 A 股", result["total_stocks"], ""),
+            ("L0 通过", result["l0_passed"], "基础安全"),
+            ("L0.5 通过", result.get("l0_5_passed", 0), "错杀甄别"),
+            ("L1 利空", result.get("l1_passed", 0), "负面公告+韧性"),
+            ("L1.5 资金", result.get("l1_5_passed", 0), "主力吸筹"),
+            ("L2 反转", result.get("l2_passed", 0), "技术确认"),
+            ("L3 候选", result.get("l3_passed", 0), "催化剂评分"),
+        ]
+    elif strategy == "growth_accel" or result.get("strategy") == "growth_accel":
+        cols = st.columns(6)
         metrics = [
             ("全 A 股", result["total_stocks"], ""),
             ("L0 通过", result["l0_passed"], "流动性/含亏损"),
@@ -384,6 +441,7 @@ def _render_funnel_stats(result: dict, *, strategy: str = "value_swing"):
             ("耗时", f"{result['duration_seconds']:.0f}s", ""),
         ]
     else:
+        cols = st.columns(6)
         metrics = [
             ("全 A 股", result["total_stocks"], ""),
             ("L0 通过", result["l0_passed"], "流动性/非ST"),
@@ -487,7 +545,7 @@ def render_scan_results(
         )
 
 
-_STAGE_ORDER = ("L0", "L1a", "L1b", "L2", "done")
+_STAGE_ORDER = ("L0", "L0.5", "L1", "L1.5", "L1a", "L1b", "L2", "L3", "done")
 
 
 def _render_progress(progress: dict | None):
@@ -499,7 +557,10 @@ def _render_progress(progress: dict | None):
     percent = int(progress.get("percent", 0))
     stage = progress.get("stage", "")
     label = progress.get("stage_label", stage)
-    stage_pos = (_STAGE_ORDER.index(stage) + 1) if stage in _STAGE_ORDER else 0
+    try:
+        stage_pos = (_STAGE_ORDER.index(stage) + 1) if stage in _STAGE_ORDER else 0
+    except ValueError:
+        stage_pos = 0
     caption = f"{percent}% · 阶段 {stage_pos}/{len(_STAGE_ORDER)}：{label}"
     st.progress(min(max(percent, 0), 100) / 100.0, text=caption)
 
@@ -507,9 +568,9 @@ def _render_progress(progress: dict | None):
     funnel = [
         ("全 A 股", progress.get("total_stocks", 0)),
         ("L0 通过", progress.get("l0_passed", 0)),
-        ("L1a 通过", progress.get("l1a_passed", 0)),
-        ("L1b 通过", progress.get("l1b_passed", 0)),
-        ("L2 候选", progress.get("l2_passed", 0)),
+        ("L0.5 通过", progress.get("l0_5_passed", 0) or "-"),
+        ("L1 通过", progress.get("l1_passed", 0) or progress.get("l1a_passed", 0)),
+        ("L2 候选", progress.get("l2_passed", 0) or progress.get("l3_passed", 0)),
     ]
     for col, (name, value) in zip(cols, funnel):
         with col:
@@ -581,12 +642,13 @@ def _render_running_scan_poll(strategy: str) -> None:
 
 
 @st.fragment(run_every=_POLL_INTERVAL_S)
-def _render_dual_pool_running_poll() -> None:
-    """双池扫描进行中：只显示两侧进度，不渲染旧候选（避免叠层）。"""
+def _render_all_pool_running_poll() -> None:
+    """多池扫描进行中：只显示各侧进度，不渲染旧候选（避免叠层）。"""
     from tradingagents.strategies.scan_runner import reconcile_stale_running
     from tradingagents.strategies.scan_store import (
         SCAN_STATUS_RUNNING,
         STRATEGY_GROWTH_ACCEL,
+        STRATEGY_TURNAROUND,
         STRATEGY_VALUE_SWING,
         default_store,
     )
@@ -596,12 +658,13 @@ def _render_dual_pool_running_poll() -> None:
         return
 
     st.subheader("扫描进行中")
-    left, right = st.columns(2)
     panels = (
-        (left, STRATEGY_VALUE_SWING, "价值波段"),
-        (right, STRATEGY_GROWTH_ACCEL, "成长加速"),
+        (STRATEGY_VALUE_SWING, "价值波段"),
+        (STRATEGY_GROWTH_ACCEL, "成长加速"),
+        (STRATEGY_TURNAROUND, "错杀反转"),
     )
-    for col, strategy, title in panels:
+    cols = st.columns(len(panels))
+    for col, (strategy, title) in zip(cols, panels):
         with col:
             st.markdown(f"**{title}**")
             store = default_store(strategy)
@@ -611,7 +674,7 @@ def _render_dual_pool_running_poll() -> None:
             if status == SCAN_STATUS_RUNNING:
                 _render_progress(rec.get("progress"))
             elif _is_strategy_launching(strategy, status) or _session_launch_busy(
-                ("both", strategy)
+                ("both", "all", strategy)
             ):
                 st.info("扫描进程正在启动…")
             else:
@@ -666,12 +729,16 @@ def render_strategy_scanner(strategy: str = "value_swing"):
         SCAN_STATUS_FAILED,
         SCAN_STATUS_RUNNING,
         STRATEGY_GROWTH_ACCEL,
+        STRATEGY_TURNAROUND,
         default_store,
         resolve_strategy,
     )
 
     strategy = resolve_strategy(strategy)
-    if strategy == STRATEGY_GROWTH_ACCEL:
+    if strategy == STRATEGY_TURNAROUND:
+        st.subheader("🔄 错杀反转扫描")
+        st.caption("六阶漏斗：全市场 → 错杀甄别 → 利空出尽 → 资金预警 → 技术反转 → 催化剂评估 → Top 15")
+    elif strategy == STRATEGY_GROWTH_ACCEL:
         st.subheader("🚀 成长加速扫描")
         st.caption("三阶漏斗：全市场 → 利润TTM增速/亏损拐点 → 前景轻加权 → Top 15（不设 PE/PB 顶）")
     else:
@@ -686,11 +753,9 @@ def render_strategy_scanner(strategy: str = "value_swing"):
     pid_key, ts_key = _launch_keys(strategy)
     launching = _is_strategy_launching(strategy, status)
     is_running = status == SCAN_STATUS_RUNNING or launching
-    # 双池同扫时一侧先结束，另一侧仍在跑：禁止对本侧再点「开始扫描」
     other_busy = _any_strategy_running() and not is_running
 
     if is_running:
-        # 进行中不渲染旧候选：旧 result 仍留在 store 里供失败回退，但 UI 只显示进度。
         _render_running_scan_poll(strategy)
         return
 
@@ -698,7 +763,7 @@ def render_strategy_scanner(strategy: str = "value_swing"):
     st.session_state.pop(ts_key, None)
 
     if other_busy:
-        st.info("另一策略扫描进行中，请稍候；可用顶部「价值+成长都扫」统一启动。")
+        st.info("另一策略扫描进行中，请稍候；可用顶部统一启动。")
     else:
         col1, col2, col3 = st.columns([2, 1, 1])
         with col1:
@@ -707,7 +772,7 @@ def render_strategy_scanner(strategy: str = "value_swing"):
                 min_value=5,
                 max_value=50,
                 value=15,
-                help="只重跑本池时生效；双池同扫请用顶部控件",
+                help="只重跑本池时生效；多池同扫请用顶部控件",
                 key=f"max_cand_{strategy}",
             )
         with col2:
@@ -756,49 +821,61 @@ def _mark_dual_pool(candidates: list[dict], other_codes: set[str]) -> list[dict]
     return out
 
 
-def _render_dual_pool_overview():
+def _render_all_pool_overview():
     from tradingagents.strategies.scan_store import (
         STRATEGY_GROWTH_ACCEL,
+        STRATEGY_TURNAROUND,
         STRATEGY_VALUE_SWING,
         default_store,
     )
 
     value_rec = default_store(STRATEGY_VALUE_SWING).load()
     growth_rec = default_store(STRATEGY_GROWTH_ACCEL).load()
+    turnaround_rec = default_store(STRATEGY_TURNAROUND).load()
     value_cands = (value_rec.get("result") or {}).get("candidates") or []
     growth_cands = (growth_rec.get("result") or {}).get("candidates") or []
+    turnaround_cands = (turnaround_rec.get("result") or {}).get("candidates") or []
     v_codes = {str(c.get("code") or "") for c in value_cands}
     g_codes = {str(c.get("code") or "") for c in growth_cands}
-    overlap = sorted(v_codes & g_codes - {""})
+    t_codes = {str(c.get("code") or "") for c in turnaround_cands}
+    all_overlap = sorted(v_codes & g_codes & t_codes - {""})
+    vg_overlap = sorted((v_codes & g_codes) - t_codes - {""})
+    vt_overlap = sorted((v_codes & t_codes) - g_codes - {""})
+    gt_overlap = sorted((g_codes & t_codes) - v_codes - {""})
 
-    st.subheader("双池对照")
-    st.caption("价值波段与成长加速各自独立扫描；重叠标的会标注「价值&成长」。")
-    if overlap:
-        st.info("双池重叠：" + "、".join(overlap))
+    st.subheader("三池对照")
+    st.caption("价值波段、成长加速、错杀反转各自独立扫描；重叠标的会标注。")
+    if all_overlap:
+        st.info("三池重叠：" + "、".join(all_overlap))
+    elif vg_overlap or vt_overlap or gt_overlap:
+        parts = []
+        if vg_overlap:
+            parts.append(f"价值&成长：{'、'.join(vg_overlap)}")
+        if vt_overlap:
+            parts.append(f"价值&反转：{'、'.join(vt_overlap)}")
+        if gt_overlap:
+            parts.append(f"成长&反转：{'、'.join(gt_overlap)}")
+        st.info("；".join(parts))
     else:
         st.caption("当前无重叠标的（或某一侧尚未扫描）。")
 
-    left, right = st.columns(2)
-    with left:
-        st.markdown("**价值波段**")
-        if value_cands:
-            render_scan_results(
-                _mark_dual_pool(value_cands, g_codes),
-                rules=(value_rec.get("result") or {}).get("rules"),
-                strategy=STRATEGY_VALUE_SWING,
-            )
-        else:
-            st.info("价值波段暂无结果。")
-    with right:
-        st.markdown("**成长加速**")
-        if growth_cands:
-            render_scan_results(
-                _mark_dual_pool(growth_cands, v_codes),
-                rules=(growth_rec.get("result") or {}).get("rules"),
-                strategy=STRATEGY_GROWTH_ACCEL,
-            )
-        else:
-            st.info("成长加速暂无结果。")
+    cols = st.columns(3)
+    panels = [
+        (cols[0], "**价值波段**", value_cands, value_rec, STRATEGY_VALUE_SWING, g_codes | t_codes),
+        (cols[1], "**成长加速**", growth_cands, growth_rec, STRATEGY_GROWTH_ACCEL, v_codes | t_codes),
+        (cols[2], "**错杀反转**", turnaround_cands, turnaround_rec, STRATEGY_TURNAROUND, v_codes | g_codes),
+    ]
+    for col, title, cands, rec, strategy, other_codes in panels:
+        with col:
+            st.markdown(title)
+            if cands:
+                render_scan_results(
+                    _mark_dual_pool(cands, other_codes),
+                    rules=(rec.get("result") or {}).get("rules"),
+                    strategy=strategy,
+                )
+            else:
+                st.info(f"{title.strip('*')}暂无结果。")
 
 
 def _session_launch_busy(keys: tuple[str, ...]) -> bool:
@@ -827,13 +904,14 @@ def _any_strategy_running() -> bool:
     from tradingagents.strategies.scan_store import (
         SCAN_STATUS_RUNNING,
         STRATEGY_GROWTH_ACCEL,
+        STRATEGY_TURNAROUND,
         STRATEGY_VALUE_SWING,
         default_store,
     )
 
-    if _session_launch_busy(("both", STRATEGY_VALUE_SWING, STRATEGY_GROWTH_ACCEL)):
+    if _session_launch_busy(("both", "all", STRATEGY_VALUE_SWING, STRATEGY_GROWTH_ACCEL, STRATEGY_TURNAROUND)):
         return True
-    for strategy in (STRATEGY_VALUE_SWING, STRATEGY_GROWTH_ACCEL):
+    for strategy in (STRATEGY_VALUE_SWING, STRATEGY_GROWTH_ACCEL, STRATEGY_TURNAROUND):
         store = default_store(strategy)
         reconcile_stale_running(store)
         rec = store.load()
@@ -842,40 +920,60 @@ def _any_strategy_running() -> bool:
     return False
 
 
-def _render_both_scan_controls():
-    """价值+成长同扫（独立进程顺序跑完两池）。"""
+def _render_all_scan_controls():
+    """三条策略同扫（独立进程顺序跑完三池）。"""
     from tradingagents.strategies.scan_runner import start_detached_scan
-    from tradingagents.strategies.scan_store import STRATEGY_BOTH
+    from tradingagents.strategies.scan_store import STRATEGY_ALL, STRATEGY_BOTH
 
     busy = _any_strategy_running()
     if busy:
-        st.info("🔄 双池扫描进行中 — 下方切换「价值波段 / 成长加速」查看进度；完成后按钮会恢复。")
+        st.info("🔄 多池扫描进行中 — 下方切换各策略查看进度；完成后按钮会恢复。")
         return True
 
-    c1, c2, c3 = st.columns([2, 1, 1])
+    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
     with c1:
         max_candidates = st.number_input(
-            "两池候选上限（各）",
+            "各池候选上限",
             min_value=5,
             max_value=50,
             value=15,
-            key="max_cand_both",
-            help="价值波段与成长加速各自输出的 Top N",
+            key="max_cand_all",
+            help="三条策略各自输出的 Top N",
         )
     with c2:
-        run_both = st.button(
-            "🚀 价值+成长都扫",
+        run_all = st.button(
+            "🚀 三条全扫",
             use_container_width=True,
             type="primary",
-            key="run_scan_both",
+            key="run_scan_all",
         )
     with c3:
+        run_both = st.button(
+            "价值+成长",
+            use_container_width=True,
+            type="secondary",
+            key="run_scan_both",
+        )
+    with c4:
         auto_enqueue = st.checkbox(
             "完成后自动入队",
             value=False,
-            key="auto_enq_both",
-            help="两池候选都会写入分析队列",
+            key="auto_enq_all",
+            help="所有候选都会写入分析队列",
         )
+    if run_all:
+        try:
+            pid = start_detached_scan(
+                max_candidates=int(max_candidates),
+                enqueue_on_success=bool(auto_enqueue),
+                strategy=STRATEGY_ALL,
+            )
+            st.session_state["_scan_launch_pid_all"] = pid
+            st.session_state["_scan_launch_ts_all"] = time.time()
+            logger.info("三池全扫已启动 pid=%s", pid)
+            st.rerun()
+        except RuntimeError as exc:
+            st.warning(str(exc))
     if run_both:
         try:
             pid = start_detached_scan(
@@ -893,29 +991,31 @@ def _render_both_scan_controls():
 
 
 def render_value_swing_scanner():
-    """首页策略扫描：价值波段 / 成长加速 / 双池对照（radio 互斥，避免 tabs 叠层）。"""
+    """首页策略扫描：三池对照 / 各策略独立查看（radio 互斥，避免 tabs 叠层）。"""
     from tradingagents.strategies.scan_store import (
         STRATEGY_GROWTH_ACCEL,
+        STRATEGY_TURNAROUND,
         STRATEGY_VALUE_SWING,
     )
 
     st.header("📊 策略扫描")
-    st.caption("推荐用顶部一键扫两池；下方可查看进度或单独重跑某一侧。")
-    both_busy = _render_both_scan_controls()
+    st.caption("推荐用顶部一键扫三池；下方可查看进度或单独重跑某一侧。")
+    busy = _render_all_scan_controls()
     st.divider()
     mode = st.radio(
         "查看池",
-        options=["双池对照", "价值波段", "成长加速"],
+        options=["三池对照", "价值波段", "成长加速", "错杀反转"],
         horizontal=True,
         key="strategy_scan_pool_mode",
-        help="两套漏斗彼此独立；重叠标的在双池对照中标注。",
+        help="三套漏斗彼此独立；重叠标的在三池对照中标注。",
     )
-    if mode == "成长加速":
+    if mode == "错杀反转":
+        render_strategy_scanner(STRATEGY_TURNAROUND)
+    elif mode == "成长加速":
         render_strategy_scanner(STRATEGY_GROWTH_ACCEL)
     elif mode == "价值波段":
         render_strategy_scanner(STRATEGY_VALUE_SWING)
-    elif both_busy:
-        # 进行中只刷进度，不画旧候选；避免 fragment 残留 + sleep/rerun 叠层
-        _render_dual_pool_running_poll()
+    elif busy:
+        _render_all_pool_running_poll()
     else:
-        _render_dual_pool_overview()
+        _render_all_pool_overview()

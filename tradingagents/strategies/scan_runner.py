@@ -470,10 +470,17 @@ def start_detached_scan(
     """Spawn an independent scan process that outlives the Web parent.
 
     ``strategy=both`` (default) runs value_swing then growth_accel in one child
-    process; both status files are reserved with the same pid.
+    process; ``strategy=all`` runs all three; both/all status files are reserved
+    with the same pid.
     """
     strategies = expand_strategies(strategy)
-    cli_strategy = STRATEGY_BOTH if len(strategies) > 1 else strategies[0]
+    from tradingagents.strategies.scan_store import STRATEGY_ALL
+    if len(strategies) >= 3:
+        cli_strategy = STRATEGY_ALL
+    elif len(strategies) == 2:
+        cli_strategy = STRATEGY_BOTH
+    else:
+        cli_strategy = strategies[0]
 
     stores: list[ValueSwingScanStore]
     if len(strategies) == 1 and (status_path is not None or archive_dir is not None):

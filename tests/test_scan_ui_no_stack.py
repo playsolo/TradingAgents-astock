@@ -35,14 +35,12 @@ def test_running_scan_uses_fragment_run_every_not_sleep_rerun():
     )
     assert "@st.fragment(run_every=_POLL_INTERVAL_S)" in src
     assert "_render_running_scan_poll" in src
-    assert "_render_dual_pool_running_poll" in src
+    assert "_render_all_pool_running_poll" in src
 
 
 def test_dual_pool_busy_hides_old_candidates_path():
-    """双池扫描进行中应走进度 poll，而不是一边画旧结果一边 sleep。"""
+    """多池扫描进行中应走进度 poll，而不是一边画旧结果一边 sleep。"""
     src = _module_source()
-    # render_value_swing_scanner 在 both_busy 时调用进度 fragment
     idle = src.split("def render_value_swing_scanner")[-1]
-    assert "_render_dual_pool_running_poll()" in idle
-    # 忙时不应在同一分支先 overview 再 sleep
+    assert "_render_all_pool_running_poll()" in idle
     assert "time.sleep" not in idle
