@@ -596,12 +596,15 @@ def run_l1_news_filter(
 
 # ── L1.5: 资金预警（地量+主力吸筹）───────────────────────────────────────────
 
+_push2his_failed: bool = False  # push2his API 不可用时跳过资金流查询
+
 
 def _check_fund_flow_smart(code: str) -> tuple[bool, bool, int]:
     """检查近5日是否呈现"主力吸筹"特征。
 
     返回 (volume_bottomed, volume_warming, smart_money_days)。
     """
+    global _push2his_failed
     try:
         from tradingagents.dataflows.a_stock import _sina_kline_fallback
 
@@ -632,37 +635,39 @@ def _check_fund_flow_smart(code: str) -> tuple[bool, bool, int]:
 
     # Check fund flow for smart money pattern
     smart_days = 0
-    try:
-        # Use EastMoney fund flow
-        url = (
-            "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
-        )
-        resp = _em_get(
-            url,
-            params={
-                "secid": f"1.{code}",
-                "fields1": "f1,f2,f3,f7",
-                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
-                "lmt": "5",
-            },
-            timeout=8,
-        )
-        data = resp.json()
-        klines = (data.get("data") or {}).get("klines") or []
+    if not _push2his_failed:
+        try:
+            # Use EastMoney fund flow
+            url = (
+                "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
+            )
+            resp = _em_get(
+                url,
+                params={
+                    "secid": f"1.{code}",
+                    "fields1": "f1,f2,f3,f7",
+                    "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
+                    "lmt": "5",
+                },
+                timeout=4,
+            )
+            data = resp.json()
+            klines = (data.get("data") or {}).get("klines") or []
 
-        for line in klines[-5:]:
-            parts = line.split(",")
-            if len(parts) < 6:
-                continue
-            try:
-                main_net = float(parts[1])   # 主力净流入
-                retail_net = float(parts[7])  # 散户净流入（index may vary）
-                if main_net > 0 and retail_net < 0:
-                    smart_days += 1
-            except (ValueError, IndexError):
-                continue
-    except Exception:
-        pass
+            for line in klines[-5:]:
+                parts = line.split(",")
+                if len(parts) < 6:
+                    continue
+                try:
+                    main_net = float(parts[1])   # 主力净流入
+                    retail_net = float(parts[7])  # 散户净流入（index may vary）
+                    if main_net > 0 and retail_net < 0:
+                        smart_days += 1
+                except (ValueError, IndexError):
+                    continue
+        except Exception:
+            _push2his_failed = True
+            logger.warning("push2his 资金流 API 不可用，后续 L1.5 跳过资金流查询")
 
     return bottomed, warming, smart_days
 
