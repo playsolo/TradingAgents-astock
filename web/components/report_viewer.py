@@ -136,6 +136,18 @@ def _provenance_html(final_state: dict[str, Any]) -> str:
                     bits.append(f"深度 {prov_deep}")
                 provenance_parts.append(" / ".join(bits))
 
+    # ── Analysis clock ──
+    clock = final_state.get("analysis_clock") or ""
+    if clock:
+        try:
+            from datetime import datetime as _dt
+
+            parsed = _dt.fromisoformat(str(clock))
+            formatted = parsed.strftime("%Y-%m-%d %H:%M:%S")
+        except (ValueError, IndexError):
+            formatted = str(clock)
+        provenance_parts.append(f"分析日期 {formatted}")
+
     if not provenance_parts:
         return ""
     prov_text = html.escape(" · ".join(str(p) for p in provenance_parts))
