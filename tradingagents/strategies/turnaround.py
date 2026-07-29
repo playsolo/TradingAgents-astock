@@ -60,6 +60,7 @@ _L0_5_PROCESS_LIMIT: int = 200    # L0.5 深度财务检测上限
 
 # L1: 利空出尽
 _MAX_CRASH_3D: float = 0.15       # 公告后3日跌幅 < 15%
+_L1_API_BYPASS_CONSECUTIVE: int = 5  # 连续N只无负面公告 → API 不可用 → 放行
 _NEGATIVE_KEYWORDS = (
     "预亏", "亏损", "减值", "计提", "业绩预告", "终止",
     "资产减值", "商誉减值", "坏账", "信用减值",
@@ -515,9 +516,15 @@ def run_l1_news_filter(
     *,
     on_item: ItemCb | None = None,
 ) -> list[TurnaroundStockInfo]:
-    """L1：利空出尽确认 — 近30天负面公告 + 股价未崩盘。"""
+    """L1：利空出尽确认 — 近30天负面公告 + 股价未崩盘。
+
+    防公告 API 失效：若连续 N 只股票都无负面公告，判定 API 不可用，
+    整段放行，交由 L1.5/L2 的技术面做真正筛选。
+    """
     total = len(stocks)
     passed: list[TurnaroundStockInfo] = []
+    bypass_triggered: bool = False
+    consecutive_no_news: int = 0
 
     for idx, info in enumerate(stocks, 1):
         if on_item is not None:
@@ -533,8 +540,31 @@ def run_l1_news_filter(
         info.news_crash_3d = crash
 
         if not info.has_negative_news:
+            consecutive_no_news += 1
+            # 连续 N 只无负面 + 零通过 → API 大概率挂了
+            if consecutive_no_news >= _L1_API_BYPASS_CONSECUTIVE and len(passed) == 0:
+                logger.warning(
+                    "反转 L1: 连续 %d 只无负面公告，公告 API 不可用，L1 全部放行",
+                    _L1_API_BYPASS_CONSECUTIVE,
+                )
+                bypass_triggered = True
+                # 放行已检测的全部股票（包括被排除的）
+                for prev in stocks[:idx]:
+                    prev.exclude_reason = None
+                    prev.has_negative_news = False
+                    prev.news_crash_3d = None
+                passed = list(stocks[:idx])
+                # 剩余股票不再检查
+                for later in stocks[idx:]:
+                    later.has_negative_news = False
+                    later.news_crash_3d = None
+                passed = list(stocks)
+                break
             info.exclude_reason = "无近期负面公告"
             continue
+
+        # 找到有负面公告的股票，重置计数
+        consecutive_no_news = 0
 
         if crash is not None and crash >= _MAX_CRASH_3D:
             info.exclude_reason = f"公告后跌幅 {crash * 100:.1f}%（≥ {_MAX_CRASH_3D * 100:.0f}%）"
@@ -542,6 +572,23 @@ def run_l1_news_filter(
 
         info.news_resilient = True
         passed.append(info)
+
+    # 兜底：循环正常结束但 0 通过 → 也是 API 不可用
+    if not bypass_triggered and len(passed) == 0 and total > 0:
+        all_no_news = all(
+            getattr(info, "exclude_reason", "") == "无近期负面公告"
+            for info in stocks
+        )
+        if all_no_news:
+            logger.warning(
+                "反转 L1: 全部 %d 只均无负面公告，公告 API 不可用，L1 全部放行",
+                total,
+            )
+            for info in stocks:
+                info.exclude_reason = None
+                info.has_negative_news = False
+                info.news_crash_3d = None
+            passed = list(stocks)
 
     logger.info("反转 L1: 检测 %d 只, 通过 %d 只", total, len(passed))
     return passed

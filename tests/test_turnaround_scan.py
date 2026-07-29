@@ -373,3 +373,35 @@ def test_turnaround_scan_store_path():
     store = ValueSwingScanStore(strategy=STRATEGY_TURNAROUND)
     assert "turnaround" in str(store.path).lower()
     assert "turnaround" in str(store.archive_dir).lower()
+
+
+# ── L1 公告 API 不可用时的 bypass 行为 ────────────────────────────────────
+
+def test_l1_bypass_when_all_no_news():
+    """所有股票无负面公告 → API 不可用 → L1 全部放行。"""
+    from unittest.mock import patch
+    from tradingagents.strategies.turnaround import run_l1_news_filter
+
+    stocks = [
+        TurnaroundStockInfo(code=f"60000{i}", name=f"测试{i}", pb=1.5, pb_safe=True)
+        for i in range(5)
+    ]
+
+    # 模拟 API 全部返回无负面公告
+    with patch(
+        "tradingagents.strategies.turnaround._safe_call",
+        return_value=(False, None),
+    ):
+        result = run_l1_news_filter(stocks)
+
+    # 全部放行
+    assert len(result) == len(stocks)
+    # 所有 exclude_reason 应为 None
+    assert all(info.exclude_reason is None for info in result)
+
+def test_l1_bypass_constant_reasonable():
+    """Bypass 阈值在合理范围（≥2, ≤total/2）。"""
+    from tradingagents.strategies.turnaround import _L1_API_BYPASS_CONSECUTIVE
+
+    assert _L1_API_BYPASS_CONSECUTIVE >= 2
+    assert _L1_API_BYPASS_CONSECUTIVE <= 20  # 不会等太久
