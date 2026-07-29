@@ -363,3 +363,32 @@ def test_extract_signal_english_still_works():
 def test_extract_signal_unknown_returns_na():
     assert history.extract_signal({"final_trade_decision": "无明确方向。"}) == "N/A"
     assert history.extract_signal({}) == "N/A"
+
+
+def test_extract_signal_debate_prose_does_not_override_underweight():
+    """Bare keyword scan must not match 买入 in debate prose when the
+    structured label says 减持 (Underweight)."""
+    state = {
+        "final_trade_decision": (
+            "## 风险管理辩论\n\n"
+            "多头分析师: 主张买入，看涨到120元\n"
+            "空头分析师: 建议减持\n\n"
+            "**最终评级**：**减持（Underweight）**\n"
+            "理由：估值偏高，下行风险加大"
+        ),
+    }
+    assert history.extract_signal(state) == "Sell"
+
+
+def test_extract_signal_buy_in_debate_does_not_override_labeled_hold():
+    """Structured final label must beat 买入/卖出 in bull/bear debate.
+    This tests the 300014 scenario (Hold → incorrectly Buy)."""
+    state = {
+        "final_trade_decision": (
+            "多头观点：建议买入，目标价40元\n"
+            "空头观点：建议卖出\n\n"
+            "**最终裁决：维持 Hold 评级**\n"
+            "等待催化剂确认"
+        ),
+    }
+    assert history.extract_signal(state) == "Hold"

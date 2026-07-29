@@ -472,11 +472,11 @@ def load_analysis(path: str) -> dict[str, Any]:
 def extract_signal(state: dict[str, Any]) -> str:
     """Extract the short signal (Buy/Sell/Hold) from a final state dict.
 
-    Prefers post-analysis ``action_plan.rating`` when present, then uses
-    the shared ``parse_rating`` heuristic for text-based extraction (which
-    understands both Chinese and English 5-tier vocabulary — issues #78 / #80).
-    US bridge patterns (``**Action**: Hold`` / ``FINAL TRANSACTION PROPOSAL``)
-    are checked before the generic parser.
+    Prefers post-analysis ``action_plan.rating`` when present, then explicit
+    rating labels (``Rating:`` / ``最终评级``). Uses ``parse_rating`` for
+    structured label detection only; bare keyword scans are limited to short
+    snippets (<120 chars) so debate prose like 「主张买入」cannot override a
+    labeled 「减持」.
     """
     plan = state.get("action_plan")
     if isinstance(plan, dict) and plan.get("rating"):
@@ -486,6 +486,22 @@ def extract_signal(state: dict[str, Any]) -> str:
 
     from tradingagents.agents.utils.rating import parse_rating
     from tradingagents.agents.utils.action_plan import rating_to_sidebar_signal
+
+    rating_map = {
+        "BUY": "Buy",
+        "OVERWEIGHT": "Buy",
+        "HOLD": "Hold",
+        "UNDERWEIGHT": "Sell",
+        "SELL": "Sell",
+    }
+    # Long PM memos often recount bull/bear arguments; only scan bare keywords
+    # on short decision lines (e.g. saved "HOLD" / "最终评级：卖出").
+    # Exclude 减持 from unordered body scan — it appears in risk prose
+    # ("无减持计划") far more often than as a standalone decision word.
+    _body_cn_map = {"买入": "Buy", "加仓": "Buy", "增持": "Buy",
+                    "卖出": "Sell", "减仓": "Sell", "清仓": "Sell",
+                    "持有": "Hold", "观望": "Hold"}
+    _short_snippet_max = 120
 
     _UNKNOWN = ""
     for field in (
@@ -507,17 +523,43 @@ def extract_signal(state: dict[str, Any]) -> str:
             flags=re.IGNORECASE,
         )
         if m:
-            mapped = {
-                "BUY": "Buy",
-                "OVERWEIGHT": "Buy",
-                "HOLD": "Hold",
-                "UNDERWEIGHT": "Sell",
-                "SELL": "Sell",
-            }.get(m.group(1).upper())
+            mapped = rating_map.get(m.group(1).upper())
             if mapped:
                 return mapped
 
-        rating = parse_rating(cleaned, default=_UNKNOWN)
-        if rating:
-            return rating_to_sidebar_signal(rating)
+        # Structured rating line — supports both English "Rating" and
+        # Chinese "评级", with either ASCII or full-width colon:
+        #   **评级：Hold**  /  **评级**：**Hold**  /  Rating: Hold
+        m = re.search(
+            r"(?:\*\*)?(?:Rating|评级)(?:\*\*)?\s*[：:]\s*\*?\*?([A-Za-z]+)",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        if m:
+            mapped = rating_map.get(m.group(1).upper())
+            if mapped:
+                return mapped
+
+        # Allow markdown between label and value — matches both the legacy
+        # "最终评级" label and the newer LLM-produced "最终裁决" variant.
+        # Leading ** is optional (LLMs often bold these labels):
+        #   **最终评级**：**减持（Underweight）**
+        #   **最终裁决：维持 Hold 评级**
+        m = re.search(r"(?:\*\*)?(?:最终评级|最终裁决)[\s\*]*[：:][\s\*]*([^\n*]+)", cleaned)
+        if m:
+            rating = parse_rating(m.group(1).strip(), default=_UNKNOWN)
+            if rating:
+                return rating_to_sidebar_signal(rating)
+
+        # Bare keyword fallback — only on short snippets to avoid
+        # debate prose poisoning (e.g. 「主张买入」in bull argument
+        # should not override a labeled 「减持」).
+        if len(cleaned) <= _short_snippet_max:
+            for cn, en in _body_cn_map.items():
+                if cn in cleaned:
+                    return en
+
+            for keyword in ("BUY", "SELL", "HOLD"):
+                if keyword in cleaned.upper():
+                    return keyword.capitalize()
     return "N/A"
