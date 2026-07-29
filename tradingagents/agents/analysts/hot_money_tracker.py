@@ -2,6 +2,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from tradingagents.agents.utils.agent_utils import (
     analysis_date_instruction,
     build_instrument_context,
+    clock_from_state,
     get_concept_blocks,
     get_dragon_tiger_board,
     get_fund_flow,
@@ -71,7 +72,7 @@ def create_hot_money_tracker(llm):
             "\n4. 所属概念板块及当日板块涨幅（全市场行业榜不可用时用个股板块）"
             "\n5. 当日是否上榜热门股及题材归因（未上榜写「未上榜」，勿标缺失）"
             "\n6. 资金面总体判断"
-            + analysis_date_instruction(current_date)
+            + analysis_date_instruction(current_date, now=clock_from_state(state))
             + get_language_instruction()
         )
 
