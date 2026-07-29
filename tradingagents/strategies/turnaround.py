@@ -56,7 +56,7 @@ _MIN_REVENUE_YOY: float = -0.20   # 营收同比 > -20%（未崩塌）
 _MAX_DEBT_RATIO: float = 0.80     # 资产负债率 < 80%
 _MAX_PB_L0_5: float = 2.0         # PB < 2（有安全垫）
 _PB_ASSET_PLAY: float = 1.0       # PB < 1 视为资产重估型加分项
-_L0_5_PROCESS_LIMIT: int = 200    # L0.5 深度财务检测上限
+_L0_5_PROCESS_LIMIT: int = 400    # L0.5 深度财务检测上限（覆盖 PB≤1 错杀股）
 
 # L1: 利空出尽
 _MAX_CRASH_3D: float = 0.15       # 公告后3日跌幅 < 15%
