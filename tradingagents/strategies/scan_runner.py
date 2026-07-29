@@ -19,6 +19,7 @@ from tradingagents.strategies.scan_store import (
     SCAN_STATUS_RUNNING,
     STRATEGY_BOTH,
     STRATEGY_GROWTH_ACCEL,
+    STRATEGY_TURNAROUND,
     STRATEGY_VALUE_SWING,
     ValueSwingScanStore,
     default_store,
@@ -127,6 +128,68 @@ def result_dict_from_scan(result: Any, *, strategy: str = STRATEGY_VALUE_SWING) 
                     "factor_hits": l2_factor_hits(c),
                     "why": why_selected_line(c),
                 }
+                for c in         result.candidates
+    ],
+    "duration_seconds": result.duration_seconds,
+}
+
+    if strategy == STRATEGY_TURNAROUND:
+        from tradingagents.strategies.turnaround import (
+            l2_factor_hits,
+            l2_score_max,
+            selection_rules_snapshot,
+            why_selected_line,
+        )
+
+        score_max = l2_score_max()
+        return {
+            "ok": True,
+            "strategy": STRATEGY_TURNAROUND,
+            "scan_date": result.scan_date,
+            "total_stocks": result.total_stocks,
+            "l0_passed": result.l0_passed,
+            "l0_5_passed": result.l0_5_passed,
+            "l1_passed": result.l1_passed,
+            "l1_5_passed": result.l1_5_passed,
+            "l2_passed": result.l2_passed,
+            "l3_passed": result.l3_passed,
+            "rules": selection_rules_snapshot(),
+            "score_max": score_max,
+            "candidates": [
+                {
+                    "code": c.code,
+                    "name": c.name,
+                    "price": c.price,
+                    "pe_ttm": c.pe_ttm,
+                    "pb": c.pb,
+                    "signal_score": c.signal_score,
+                    "score_max": score_max,
+                    "revenue_yoy": (
+                        round(c.revenue_yoy * 100, 1) if c.revenue_yoy is not None else None
+                    ),
+                    "debt_ratio": (
+                        round(c.debt_ratio * 100, 1) if c.debt_ratio is not None else None
+                    ),
+                    "ocf_ttm": c.ocf_ttm,
+                    "has_negative_news": c.has_negative_news,
+                    "news_resilient": c.news_resilient,
+                    "volume_bottomed": c.volume_bottomed,
+                    "smart_money_active": c.smart_money_active,
+                    "w_bottom_found": c.w_bottom_found,
+                    "volume_breakout": c.volume_breakout,
+                    "neckline_break": c.neckline_break,
+                    "main_force_turned": c.main_force_turned,
+                    "above_ma20": c.above_ma20,
+                    "ret_5d": (
+                        round(c.ret_5d, 4) if c.ret_5d is not None else None
+                    ),
+                    "industry_resonance": c.industry_resonance,
+                    "asset_revalue": c.asset_revalue,
+                    "management_action": c.management_action,
+                    "lane": c.lane,
+                    "factor_hits": l2_factor_hits(c),
+                    "why": why_selected_line(c),
+                }
                 for c in result.candidates
             ],
             "duration_seconds": result.duration_seconds,
@@ -192,6 +255,10 @@ def _scan_fn_for_strategy(strategy: str) -> ScanFn:
         from tradingagents.strategies.growth_accel import run_growth_accel_scan
 
         return run_growth_accel_scan
+    if strategy == STRATEGY_TURNAROUND:
+        from tradingagents.strategies.turnaround import run_turnaround_scan
+
+        return run_turnaround_scan
     return run_value_swing_scan
 
 
@@ -426,6 +493,12 @@ def start_detached_scan(
             env["TRADINGAGENTS_GROWTH_ACCEL_SCAN_PATH"] = str(status_path)
         if archive_dir is not None:
             env["TRADINGAGENTS_GROWTH_ACCEL_SCANS_DIR"] = str(archive_dir)
+    elif cli_strategy == STRATEGY_TURNAROUND:
+        default_log = Path.home() / ".tradingagents" / "turnaround_scan.log"
+        if status_path is not None:
+            env["TRADINGAGENTS_TURNAROUND_SCAN_PATH"] = str(status_path)
+        if archive_dir is not None:
+            env["TRADINGAGENTS_TURNAROUND_SCANS_DIR"] = str(archive_dir)
     elif cli_strategy == STRATEGY_VALUE_SWING:
         default_log = Path.home() / ".tradingagents" / "value_swing_scan.log"
         if status_path is not None:

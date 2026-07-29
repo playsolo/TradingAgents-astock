@@ -27,7 +27,9 @@ SCAN_STATUS_FAILED = "failed"
 
 STRATEGY_VALUE_SWING = "value_swing"
 STRATEGY_GROWTH_ACCEL = "growth_accel"
+STRATEGY_TURNAROUND = "turnaround"
 STRATEGY_BOTH = "both"
+STRATEGY_ALL = "all"  # all three strategies
 
 _STRATEGY_PATHS: dict[str, tuple[Path, Path, str, str]] = {
     # status_path, archive_dir, status_env, archive_env
@@ -42,6 +44,12 @@ _STRATEGY_PATHS: dict[str, tuple[Path, Path, str, str]] = {
         Path.home() / ".tradingagents" / "growth_accel_scans",
         "TRADINGAGENTS_GROWTH_ACCEL_SCAN_PATH",
         "TRADINGAGENTS_GROWTH_ACCEL_SCANS_DIR",
+    ),
+    STRATEGY_TURNAROUND: (
+        Path.home() / ".tradingagents" / "turnaround_scan.json",
+        Path.home() / ".tradingagents" / "turnaround_scans",
+        "TRADINGAGENTS_TURNAROUND_SCAN_PATH",
+        "TRADINGAGENTS_TURNAROUND_SCANS_DIR",
     ),
 }
 
@@ -60,8 +68,12 @@ def resolve_strategy(strategy: str | None) -> str:
 
 
 def expand_strategies(strategy: str | None) -> list[str]:
-    """Expand ``both`` → [value_swing, growth_accel]; otherwise one strategy."""
+    """Expand ``both`` → [value_swing, growth_accel];
+    ``all`` → [value_swing, growth_accel, turnaround];
+    otherwise one strategy."""
     key = (strategy or STRATEGY_BOTH).strip()
+    if key == STRATEGY_ALL:
+        return [STRATEGY_VALUE_SWING, STRATEGY_GROWTH_ACCEL, STRATEGY_TURNAROUND]
     if key == STRATEGY_BOTH:
         return [STRATEGY_VALUE_SWING, STRATEGY_GROWTH_ACCEL]
     return [resolve_strategy(key)]

@@ -1,7 +1,7 @@
-# TradingAgents-Astock 策略扫描（oneshot）：价值波段 + 成长加速
+# TradingAgents-Astock 策略扫描（oneshot）：价值波段 + 成长加速 + 错杀反转
 #
 # 由 tradingagents-scan.timer 每日 20:30（Asia/Shanghai）触发。
-# 默认 --strategy both：顺序跑两池，结果分别落盘；--enqueue 写入分析队列，
+# --strategy all：顺序跑三池，结果分别落盘；--enqueue 写入分析队列，
 # 由 tradingagents-analyze.service 消费（关闭 Web 不影响）。
 #
 # 安装：
@@ -17,7 +17,7 @@
 # 前提：tradingagents-analyze.service 已在跑，否则入队后无人消费。
 
 [Unit]
-Description=TradingAgents Astock Dual Strategy Scan (value + growth)
+Description=TradingAgents Astock Triple Strategy Scan (value + growth + turnaround)
 After=network-online.target
 Wants=network-online.target
 
@@ -28,8 +28,8 @@ WorkingDirectory=/home/solo/TradingAgents-astock
 Environment="PATH=/home/solo/TradingAgents-astock/.venv/bin:/usr/bin"
 Environment="TZ=Asia/Shanghai"
 Environment="ARROW_DEFAULT_MEMORY_POOL=system"
-# 两池全市场漏斗 + 东财限流，给足时间；失败等次日 timer
-TimeoutStartSec=7200
+# 三池全市场漏斗 + 东财限流，给足时间；失败等次日 timer
+TimeoutStartSec=10800
 Nice=10
-ExecStart=/home/solo/TradingAgents-astock/.venv/bin/tradingagents-scan --strategy both --enqueue --skip-non-trading-day
+ExecStart=/home/solo/TradingAgents-astock/.venv/bin/tradingagents-scan --strategy all --enqueue --skip-non-trading-day
 SuccessExitStatus=0

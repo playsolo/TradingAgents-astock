@@ -19,8 +19,10 @@ from datetime import datetime
 from tradingagents.strategies.scan_runner import run_scan_job
 from tradingagents.strategies.scan_store import (
     SCAN_STATUS_COMPLETED,
+    STRATEGY_ALL,
     STRATEGY_BOTH,
     STRATEGY_GROWTH_ACCEL,
+    STRATEGY_TURNAROUND,
     STRATEGY_VALUE_SWING,
     default_store,
     expand_strategies,
@@ -32,6 +34,7 @@ logger = logging.getLogger(__name__)
 _STRATEGY_LABELS = {
     STRATEGY_VALUE_SWING: "价值波段",
     STRATEGY_GROWTH_ACCEL: "成长加速",
+    STRATEGY_TURNAROUND: "错杀反转",
 }
 
 
@@ -39,9 +42,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="策略漏斗扫描（独立进程）")
     p.add_argument(
         "--strategy",
-        choices=(STRATEGY_VALUE_SWING, STRATEGY_GROWTH_ACCEL, STRATEGY_BOTH),
+        choices=(STRATEGY_VALUE_SWING, STRATEGY_GROWTH_ACCEL, STRATEGY_TURNAROUND, STRATEGY_BOTH, STRATEGY_ALL),
         default=STRATEGY_BOTH,
-        help="both=价值+成长都跑（默认）；也可只跑 value_swing / growth_accel",
+        help="both=价值+成长都跑；all=三条策略全跑（默认 both）",
     )
     p.add_argument(
         "--max-candidates",
