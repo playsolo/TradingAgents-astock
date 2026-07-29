@@ -23,4 +23,4 @@ def test_scan_service_oneshot_enqueues_and_skips_weekend():
     assert "--enqueue" in text
     assert "--skip-non-trading-day" in text
     assert "TZ=Asia/Shanghai" in text
-    assert "TimeoutStartSec=7200" in text
+    assert "TimeoutStartSec=10800" in text
