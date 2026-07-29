@@ -178,3 +178,145 @@ def test_extract_signal_prefers_action_plan_over_body_buy():
         },
     }
     assert extract_signal(state) == "Sell"
+
+
+# ── Fallback regex tests: false positives from previous bug ──
+
+# pylint: disable=wrong-import-position
+import re
+
+from tradingagents.agents.utils.action_plan import (
+    _extract_fallback_price_levels,
+    isolate_action_section,
+)
+
+# Mirror the regexes defined in action_plan.py for targeted unit testing.
+_REDUCE_LOW_RE = re.compile(
+    r"(?:减持|减仓|离场|退出|卖出)"
+    r".*?"
+    r"(\d+(?:\.\d+)?)"
+    r"\s*[,~\-—至到]\s*"
+    r"(\d+(?:\.\d+)?)"
+    r"(?:\s*元|(?=[\s。，、；）\)\n]|$))",
+)
+_BUY_LOW_RE = re.compile(
+    r"(?:买入|建仓|介入|回补)"
+    r".*?"
+    r"(\d+(?:\.\d+)?)"
+    r"\s*[,~\-—至到]\s*"
+    r"(\d+(?:\.\d+)?)"
+    r"(?:\s*元|(?=[\s。，、；）\)\n]|$))",
+)
+
+from tradingagents.agents.schemas import ActionPlanLevels
+
+
+@pytest.mark.unit
+def test_reduce_regex_rejects_time_horizon_as_price():
+    """The exact false positive from the 002044 bug: 6-12个月 is a time
+    horizon, not a price zone."""
+    text = (
+        "减持压力持续——在辩论中均未被有效证伪；而潜在的看多催化"
+        "（棒杰重整/银发经济/AI医疗等）兑现窗口远在6-12个月之外且传导不确定。"
+    )
+    m = _REDUCE_LOW_RE.search(text)
+    assert m is None, f"BUG: reduce_low={m.group(1)}, reduce_high={m.group(2)}"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "text,label",
+    [
+        ("减持1.66-1.97亿", "亿 suffix"),
+        ("减持压力构成未来2-3季度", "季度 suffix"),
+        ("减持比例15-20%", "% suffix"),
+        ("减持2027-2028年", "年 suffix"),
+        ("减仓至20-30%仓位", "% suffix 2"),
+        ("减持300-500万股", "万股 suffix"),
+        ("完成减仓，避开14:57-15:00集合竞价", "time HH:MM"),
+    ],
+)
+def test_reduce_regex_rejects_non_price_units(text, label):
+    m = _REDUCE_LOW_RE.search(text)
+    assert m is None, (
+        f"false positive ({label}): reduce_low={m.group(1) if m else 'N/A'}, "
+        f"reduce_high={m.group(2) if m else 'N/A'}"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "text,expected_low,expected_high",
+    [
+        ("减仓至370-380元", 370, 380),
+        ("减持370-380元附近", 370, 380),
+        ("卖出12.5-14.8元", 12.5, 14.8),
+    ],
+)
+def test_reduce_regex_matches_legit_price_ranges(text, expected_low, expected_high):
+    m = _REDUCE_LOW_RE.search(text)
+    assert m is not None, f"missed: {text}"
+    assert float(m.group(1)) == expected_low
+    assert float(m.group(2)) == expected_high
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "text,expected_low,expected_high",
+    [
+        ("买入12-14元建仓", 12, 14),
+        ("回调至买入区域12-14", 12, 14),
+        ("建仓14-16元", 14, 16),
+    ],
+)
+def test_buy_regex_matches_legit_buy_zones(text, expected_low, expected_high):
+    m = _BUY_LOW_RE.search(text)
+    assert m is not None, f"missed: {text}"
+    assert float(m.group(1)) == expected_low
+    assert float(m.group(2)) == expected_high
+
+
+@pytest.mark.unit
+def test_fallback_uses_isolated_section_not_full_raw_text():
+    """The fallback extractor now uses isolate_action_section() for price
+    extraction, so debate text and <think> blocks can't pollute regex
+    matches."""
+    memo = (
+        "<think>early thoughts: 减持 to 400-420元 region</think>\n\n"
+        "## 最终评级\n"
+        "**评级：UNDERWEIGHT（减持）**\n\n"
+        "当前暂无明确减仓价格区间，需等待进一步信号。"
+    )
+    levels = ActionPlanLevels()
+    _extract_fallback_price_levels(isolate_action_section(memo), levels)
+
+    # The <think> block contains a fake price range "400-420元" — it must
+    # NOT leak into the extracted levels.
+    assert levels.reduce_low is None, f"<think> leaked: reduce_low={levels.reduce_low}"
+    assert levels.reduce_high is None, f"<think> leaked: reduce_high={levels.reduce_high}"
+
+
+@pytest.mark.unit
+def test_extract_fallback_levels_null_when_no_prices_stated():
+    """When the PM's final section has no numeric price range for
+    reduce/buy, the extractor must leave all levels null (do not invent)."""
+    # Real-world pattern: Underweight rating with no specific price zone
+    section = (
+        "**评级：UNDERWEIGHT（减持）**\n\n"
+        "**操作方向**：\n"
+        "- **现有持仓**：分批减仓至较低仓位（≤30%）\n"
+        "- **新资金**：零介入\n"
+        "**总结**：在T+1+涨跌停的制度环境下，4.55元附近处于风险过渡区间，"
+        "Underweight是当前信息状态下最匹配的仓位方向。"
+    )
+    levels = ActionPlanLevels()
+    _extract_fallback_price_levels(section, levels)
+
+    assert levels.reduce_low is None, (
+        f"invented reduce_low={levels.reduce_low}"
+    )
+    assert levels.reduce_high is None, (
+        f"invented reduce_high={levels.reduce_high}"
+    )
+    assert levels.buy_zone_low is None
+    assert levels.buy_zone_high is None

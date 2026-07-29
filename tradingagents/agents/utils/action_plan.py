@@ -208,11 +208,13 @@ def fallback_extract_action_plan(final_trade_decision: str) -> dict[str, Any] | 
     if non_holders_m:
         non_holders_action = non_holders_m.group(1).strip().rstrip("*").strip()
 
-    # 4. Best-effort price levels extraction
+    # 4. Best-effort price levels extraction — use the isolated action
+    # section (same as the LLM path) to avoid false positives from debate
+    # prose, <think> blocks, and non-price numbers like time horizons.
     from tradingagents.agents.schemas import ActionPlanLevels
 
     levels = ActionPlanLevels()
-    _extract_fallback_price_levels(text, levels)
+    _extract_fallback_price_levels(isolate_action_section(text), levels)
 
     return {
         "rating": rating,
@@ -224,9 +226,26 @@ def fallback_extract_action_plan(final_trade_decision: str) -> dict[str, Any] | 
     }
 
 
-# Price patterns for fallback extraction
-_BUY_LOW_RE = re.compile(r"(?:买入|建仓|介入|回补).*?(\d+(?:\.\d+)?)元?\s*[,~\-—至到]\s*(\d+(?:\.\d+)?)元?")
-_REDUCE_LOW_RE = re.compile(r"(?:减持|减仓|离场|退出|卖出).*?(\d+(?:\.\d+)?)元?\s*[,~\-—至到]\s*(\d+(?:\.\d+)?)元?")
+# Price patterns for fallback extraction — the second number in a range must
+# be followed by 元, punctuation, whitespace, or end-of-string.  This prevents
+# false captures of time horizons ("6-12个月"), percentages ("15-20%"),
+# quantities ("1.66-1.97亿", "300-500万股"), etc.
+_BUY_LOW_RE = re.compile(
+    r"(?:买入|建仓|介入|回补)"
+    r".*?"
+    r"(\d+(?:\.\d+)?)"
+    r"\s*[,~\-—至到]\s*"
+    r"(\d+(?:\.\d+)?)"
+    r"(?:\s*元|(?=[\s。，、；）\)\n]|$))"
+)
+_REDUCE_LOW_RE = re.compile(
+    r"(?:减持|减仓|离场|退出|卖出)"
+    r".*?"
+    r"(\d+(?:\.\d+)?)"
+    r"\s*[,~\-—至到]\s*"
+    r"(\d+(?:\.\d+)?)"
+    r"(?:\s*元|(?=[\s。，、；）\)\n]|$))"
+)
 _SINGLE_PRICE_RE = re.compile(r"(?:(?:买入|介入|建仓)[^\d\n]*|低位)[^\d\n]*(\d+(?:\.\d+)?)\s*元")
 _STOP_LOSS_RE = re.compile(r"(?:止损|离场位|硬止损|清仓位)[^\d]*(\d+(?:\.\d+)?)\s*元")
 

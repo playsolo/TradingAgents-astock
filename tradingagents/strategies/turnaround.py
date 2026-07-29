@@ -696,7 +696,8 @@ def run_l1_5_money_filter(
         info.smart_money_days = int(smart_days)
         info.smart_money_active = smart_days >= _SMART_MONEY_DAYS_MIN
 
-        if not info.volume_bottomed and not info.smart_money_active:
+        # 地量筑底 或 温和放量（地量后反弹）或 主力吸筹
+        if not info.volume_bottomed and not info.volume_warming and not info.smart_money_active:
             info.exclude_reason = "无量价/资金预警信号"
             continue
 
@@ -848,6 +849,9 @@ def _check_technical_reversal(
 
 def _check_main_force_turn(code: str) -> bool:
     """检查近3日主力资金是否转向（超大单累计净流入 > 0）。"""
+    global _push2his_failed
+    if _push2his_failed:
+        return False
     try:
         url = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
         resp = _em_get(
@@ -858,7 +862,7 @@ def _check_main_force_turn(code: str) -> bool:
                 "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
                 "lmt": str(_MAIN_FORCE_TURN_DAYS),
             },
-            timeout=8,
+            timeout=4,
         )
         data = resp.json()
         klines = (data.get("data") or {}).get("klines") or []
@@ -872,6 +876,7 @@ def _check_main_force_turn(code: str) -> bool:
                     continue
         return total_super_large > 0
     except Exception:
+        _push2his_failed = True
         return False
 
 
