@@ -72,15 +72,15 @@ def analysis_date_instruction(trade_date: str, now: datetime | None = None) -> s
     context so agents know whether same-date OHLCV is intraday or settled --
     preventing 「盘中」 labels for post-close analyses.
     """
-    date = str(trade_date or "").strip()
-    if not date:
+    date_str = str(trade_date or "").strip()
+    if not date_str:
         return ""
 
     base = (
-        f"\n\n**Analysis date (required)**: {date}. "
+        f"\n\n**Analysis date (required)**: {date_str}. "
         "Any report header, memo date, decision date, or document date MUST equal "
         "this analysis date exactly. Do not invent the next calendar day. "
-        f"When reports say 「今日」/「当日」 for market facts, interpret them as {date}. "
+        f"When reports say 「今日」/「当日」 for market facts, interpret them as {date_str}. "
     )
 
     if now is not None:
@@ -94,21 +94,21 @@ def analysis_date_instruction(trade_date: str, now: datetime | None = None) -> s
         today = now_cn.date()
 
         try:
-            analysis_date = date.fromisoformat(date[:10])
+            analysis_date = date.fromisoformat(date_str[:10])
         except ValueError:
             analysis_date = None
 
         # Retrospective: analysis day is in the past
         if analysis_date is not None and analysis_date < today:
             base += (
-                f"Analysis date {date} is in the past. All OHLCV data for this "
+                f"Analysis date {date_str} is in the past. All OHLCV data for this "
                 "date represents FINAL settled daily bars (已收盘). Label data "
                 "as 收盘, NOT as 盘中/intraday."
             )
         # Forward-dated analysis
         elif analysis_date is not None and analysis_date > today:
             base += (
-                f"Analysis date {date} is in the future. Market data for this "
+                f"Analysis date {date_str} is in the future. Market data for this "
                 "date is not yet available. Use the latest available completed "
                 "data from prior sessions."
             )
@@ -119,7 +119,7 @@ def analysis_date_instruction(trade_date: str, now: datetime | None = None) -> s
             if phase is CnSessionPhase.AFTER_HOURS:
                 base += (
                     f"Market CLOSED at 15:00 Beijing time (generation: {gen_time}). "
-                    f"Any OHLCV bar for {date} IS the FINAL settled daily bar "
+                    f"Any OHLCV bar for {date_str} IS the FINAL settled daily bar "
                     "(已收盘). Label it as 收盘/closed day. "
                     "Do NOT write 「未闭市」「盘中实时数据」— the session is finished."
                 )
