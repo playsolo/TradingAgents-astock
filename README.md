@@ -1,3 +1,5 @@
+<p align="center"><b>简体中文</b> | <a href="README_en.md">English</a></p>
+
 <h1 align="center">TradingAgents-Astock</h1>
 
 <p align="center">
@@ -6,7 +8,8 @@
 </p>
 
 <p align="center">
-  <b>⚠️ 免责声明：本项目仅供学习研究与技术演示，不构成任何投资建议。投资决策请咨询持牌专业机构。</b>
+  <b>⚠️ 本项目是 <a href="https://arxiv.org/abs/2412.20138">TradingAgents 论文</a>框架的工程实现与研究复现，面向研究与教学。<br>
+  不构成任何投资建议，也不提供任何投资服务。</b>
 </p>
 
 <p align="center">
@@ -17,22 +20,16 @@
   <a href="./CHANGES_FROM_UPSTREAM.md"><img alt="改动记录" src="https://img.shields.io/badge/改动记录-CHANGES-orange"/></a>
 </p>
 
----
-
-## 目录
-
-- [为什么做这个 Fork](#为什么做这个-fork)
-- [与上游对比](#与上游对比)
-- [架构概览](#架构概览)
-- [7 个 Analyst 角色](#7-个-analyst-角色)
-- [数据源](#数据源)
-- [快速开始](#快速开始)
-- [Web UI](#web-ui)
-- [配置说明](#配置说明)
-- [项目结构](#项目结构)
-- [致谢](#致谢)
-- [Donate](#donate)
-- [许可证](#许可证)
+<p align="center">
+  <a href="#为什么做这个-fork">为什么做这个 Fork</a> ·
+  <a href="#与上游对比">与上游对比</a> ·
+  <a href="#架构概览">架构概览</a> ·
+  <a href="#7-个-analyst-角色">Analyst 角色</a> ·
+  <a href="#数据源">数据源</a> ·
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#web-ui">Web UI</a> ·
+  <a href="#常见问题排错">排错</a>
+</p>
 
 ---
 
@@ -89,7 +86,7 @@
 │               三方风险辩论                                 │
 ├─────────────────────────────────────────────────────────┤
 │            Portfolio Manager 最终决策                      │
-│     （深度思考 LLM，输出 Buy/Hold/Sell + 仓位）             │
+│     （深度思考 LLM，输出评级 + 理由）                       │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -189,6 +186,10 @@ ANTHROPIC_API_KEY=sk-ant-xxx
 
 # ── 方案 G：Kimi（Anthropic 兼容 API）────────────────
 ANTHROPIC_AUTH_TOKEN=your-kimi-token
+
+# ── 方案 H：任意 OpenAI 兼容网关（9Router / AI Router / 自建代理）──
+OPENAI_COMPATIBLE_API_KEY=sk-xxx     # 也接受 OPENAI_API_KEY
+BACKEND_URL=https://your-relay.example/v1   # 你的网关地址（也可在 Web 侧栏「API Base URL」填）
 ```
 
 ### 3. 运行分析
@@ -255,8 +256,8 @@ streamlit run web/app.py
 
 ### 功能
 
-- **模型自选**：侧边栏支持 9 个 LLM 供应商切换（MiniMax/DeepSeek/Qwen/GLM/OpenAI/Anthropic/Google/xAI/Ollama）
-- **一键分析**：输入 6 位 A 股代码 + 日期，点击「开始分析」
+- **模型自选**：侧边栏支持 10 个 LLM 供应商切换（MiniMax/DeepSeek/Qwen/GLM/OpenAI/Anthropic/Google/xAI/OpenRouter/Ollama），外加 **「OpenAI 兼容（自定义 base_url）」** 一档可接任意 OpenAI 兼容网关（9Router / AI Router / 自建代理）
+- **一键分析**：输入 6 位 A 股代码 + 分析日期 +「数据起始日期」（默认本月第一天，可自定义技术分析回溯区间，支持按月/自定义时段分析），点击「开始分析」
 - **实时进度**：12 阶段 pipeline 实时显示（7 分析师 → 质量门控 → 辩论 → 风控 → 决策），所有已完成阶段的报告均可展开查看
 - **完整报告**：信号卡片（Buy/Hold/Sell）、7 份分析师报告、多空辩论、风控评估
 - **报告导出**：一键下载 **Markdown**（零依赖，永远可用）或 **PDF** 完整分析报告（PDF 自动适配 Windows/macOS/Linux 中文字体）
@@ -281,6 +282,7 @@ streamlit run web/app.py
 | `quick_think_llm` | `"MiniMax-M2.7-highspeed"` | 所有 Analyst / Researcher / Trader 用的模型 |
 | `backend_url` | `None` | 自定义 API 端点 / 第三方中转网关。可在 Web UI 侧边栏填写，或用 `.env` 的 `BACKEND_URL`；方便国内通过代理访问 Claude / OpenAI |
 | `output_language` | `"Chinese"` | 报告输出语言（内部辩论始终英文） |
+| `market_lookback_days` | `None` | 技术分析回溯天数（分析区间 = 起始日期 → 分析日期）。Web/CLI 由「数据起始日期」自动算出；`None` = 模型自选（约 30 天）。#16 |
 | `max_debate_rounds` | `1` | Bull vs Bear 辩论轮数 |
 | `max_risk_discuss_rounds` | `1` | 风险三方辩论轮数 |
 | `data_vendors` | 全部 `"a_stock"` | 数据供应商路由 |
@@ -292,10 +294,18 @@ streamlit run web/app.py
 ## 常见问题排错
 
 **Q: 用 DeepSeek/通义/智谱，却报 `OpenAIError: The api_key client option must be set ... OPENAI_API_KEY`？**
-每个供应商用**各自的环境变量**，不是 OPENAI_API_KEY：DeepSeek=`DEEPSEEK_API_KEY`、通义=`DASHSCOPE_API_KEY`、智谱=`ZHIPU_API_KEY`、MiniMax=`MINIMAX_API_KEY`、xAI=`XAI_API_KEY`、OpenRouter=`OPENROUTER_API_KEY`。在项目根目录 `.env` 里设置对应变量后**重启**程序。（v0.2.12 起缺 key 会直接提示该用哪个变量名。）
+每个供应商用**各自的环境变量**，不是 OPENAI_API_KEY：DeepSeek=`DEEPSEEK_API_KEY`、通义=`DASHSCOPE_API_KEY`、智谱=`ZHIPU_API_KEY`、MiniMax=`MINIMAX_API_KEY`、xAI=`XAI_API_KEY`、OpenRouter=`OPENROUTER_API_KEY`、OpenAI 兼容（自定义）=`OPENAI_COMPATIBLE_API_KEY`。在项目根目录 `.env` 里设置对应变量后**重启**程序。（v0.2.12 起缺 key 会直接提示该用哪个变量名。）
+
+**Q: 想接一个 OpenAI 兼容的第三方网关/中继（9Router、AI Router、自建代理），自定义 base_url + model？**
+用 **「OpenAI 兼容（自定义 base_url）」** 这一档（v0.2.20 新增）。Web 侧栏「LLM 供应商」选它 →「快速/深度思考模型 ID」手动填你网关支持的 model 名 →「API Base URL」填你的网关地址（如 `https://your-relay.example/v1`）→ `.env` 里设 `OPENAI_COMPATIBLE_API_KEY=你的key`（也接受 `OPENAI_API_KEY`）。CLI 方式选 `OpenAI-Compatible` 后会提示输入 Base URL。它走标准 Chat Completions（非 OpenAI Responses API，兼容性最好），model 名自由填、不受内置清单限制。配置方式等价：`llm_provider="openai_compatible"` + `backend_url="<你的网关>"` + `deep_think_llm/quick_think_llm="<你的model>"`。
 
 **Q: 导出 PDF 报 `UnicodeEncodeError: 'latin-1' codec can't encode`？**
 你的环境里装了**旧版 `fpdf`（pyfpdf）**，它和本项目用的 `fpdf2` 都以 `fpdf` 名称导入、互相冲突。执行：`pip uninstall -y fpdf && pip install "fpdf2>=2.8.6"`。实在不行可改用「下载 Markdown」导出（零依赖，永远可用）。
+
+**Q: Docker 里怎么跑 Web UI？容器启动报 `Invalid value: File does not exist: web/app.py`？**
+用 compose 里的 `web` 服务：`docker compose up web`，然后开 http://localhost:8501 。
+
+报这个错通常是因为命令写成了 `streamlit run web/app.py`——这条**依赖当前工作目录**，工作目录不对就找不到文件。正确的入口是 `tradingagents-web`（即 `web.launch:main`），它按 `__file__` 解析 `app.py` 的绝对路径，跟工作目录无关。本地跑同理，装完后直接 `tradingagents-web` 最稳。
 
 **Q: Docker 里导出 PDF 报「未找到中文字体」？**
 v0.2.12 起 Dockerfile 已内置 `fonts-noto-cjk`，重新 `docker build` 即可。旧镜像可临时 `apt install fonts-noto-cjk`，或改用 Markdown 导出。
@@ -371,33 +381,40 @@ TradingAgents-Astock/
 
 ---
 
-## 许可证
+## 项目定位
 
-[Apache License 2.0](./LICENSE)
+**这是一个框架的工程实现，不是一个投资产品。**
 
-本项目是 TauricResearch/TradingAgents 的 fork，继承 Apache 2.0 许可证。详见 [NOTICE](./NOTICE)。
+- **它是什么**：[TradingAgents 论文](https://arxiv.org/abs/2412.20138)（TauricResearch）多 Agent 架构的 A 股工程实现，用于研究与教学——研究多 Agent 辩论在金融文本上的行为、A 股数据源如何接入、结构化输出如何落地。
+- **它不是什么**：不是投资顾问、不是荐股软件、不提供任何投资服务。本仓库不发布针对具体证券的分析报告、评级或买卖建议；`examples/` 下只有可自行运行的脚本，没有任何预生成的个股结论。
+- **模型和数据都是你自己的**：你配置自己的 LLM API key，在自己的机器上运行，产出的内容归你所有、由你判断、由你负责。项目本身不托管服务、不代为分析、不接触你的运行结果。
+- **不产出可执行价位**：框架内**没有**建仓价 / 止损位 / 仓位 / 目标价这类输出——不是默认关闭，是代码里就没有。Trader 与 Portfolio Manager 只给方向、评级与理由。需要这类能力的使用者可以自行 fork 添加（Apache-2.0 允许），并自行承担相应责任、自行确认所在司法辖区的资质要求。
 
-## Donate
+> **⚠️ 免责声明**
+>
+> - 本系统产出的所有内容均由 AI 自动生成，可能存在错误或偏差
+> - 本项目不构成任何投资建议；投资决策请咨询持有中国证监会颁发资质的专业机构
+> - 作者不对使用本工具产生的任何投资损失承担责任
+> - 股市有风险，投资需谨慎
+
+---
+
+## 赞赏
 
 如果这个工具帮到了你的投研工作流，欢迎请作者喝杯咖啡 ☕
 
 <p align="center">
-  <img src="./assets/wechat-sponsor.jpg" width="240" alt="微信赞赏码">
-</p>
-<p align="center">
-  <a href="https://ifdian.net/a/simonlin">爱发电</a> ·
-  <a href="https://buymeacoffee.com/simonlin1212">Buy Me a Coffee</a>
+  <a href="https://buymeacoffee.com/simonlin1212"><img src="./assets/bmc-qr.png" width="180" alt="Buy Me a Coffee"></a>
 </p>
 
 > 想要什么功能？欢迎开 [Issue](https://github.com/simonlin1212/tradingagents-astock/issues) 提需求，赞助者的 Issue 优先处理。
 
 ---
 
-## 免责声明
+## License
 
-> **本项目仅供学习研究与技术演示，不构成任何投资建议。**
->
-> - 本系统产出的所有分析报告和交易信号均由 AI 自动生成，可能存在错误或偏差
-> - 投资决策请咨询持有中国证监会颁发资质的专业机构
-> - 作者不对使用本工具产生的任何投资损失承担责任
-> - 股市有风险，投资需谨慎
+[Apache License 2.0](./LICENSE)
+
+本项目是 TauricResearch/TradingAgents 的 fork，继承 Apache 2.0 许可证。详见 [NOTICE](./NOTICE)。
+
+**作者：** Simon 林 · X [@linsizhen](https://x.com/linsizhen) · 邮箱：[simonlin0423@gmail.com](mailto:simonlin0423@gmail.com)

@@ -197,6 +197,9 @@ def _select_model(provider: str, mode: str) -> str:
     if provider.lower() == "openrouter":
         return select_openrouter_model()
 
+    if provider.lower() == "openai_compatible":
+        return _prompt_custom_model_id()
+
     if provider.lower() == "azure":
         return questionary.text(
             f"Enter Azure deployment name ({mode}-thinking):",
@@ -251,6 +254,7 @@ def select_llm_provider() -> tuple[str, str | None]:
         ("Anthropic", "anthropic", "https://api.anthropic.com/"),
         ("xAI", "xai", "https://api.x.ai/v1"),
         ("OpenRouter", "openrouter", "https://openrouter.ai/api/v1"),
+        ("OpenAI-Compatible (custom base URL / 自定义 OpenAI 兼容网关)", "openai_compatible", None),
         ("Azure OpenAI", "azure", None),
         ("Ollama", "ollama", "http://localhost:11434/v1"),
     ]
@@ -270,12 +274,25 @@ def select_llm_provider() -> tuple[str, str | None]:
             ]
         ),
     ).ask()
-    
+
     if choice is None:
         console.print("\n[red]No LLM provider selected. Exiting...[/red]")
         exit(1)
 
     provider, url = choice
+
+    # The generic OpenAI-compatible relay has no fixed endpoint — prompt for it.
+    # The API key is read from OPENAI_COMPATIBLE_API_KEY (or OPENAI_API_KEY).
+    if provider == "openai_compatible":
+        url = questionary.text(
+            "Enter the OpenAI-compatible Base URL (e.g. https://your-relay.example/v1):",
+            validate=lambda x: len(x.strip()) > 0 or "Please enter a base URL.",
+        ).ask()
+        if url is None:
+            console.print("\n[red]No base URL entered. Exiting...[/red]")
+            exit(1)
+        url = url.strip()
+
     return provider, url
 
 

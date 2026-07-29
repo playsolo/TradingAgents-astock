@@ -354,6 +354,8 @@ def _build_config() -> dict:
     # 与 CLI Research Depth=Deep 对齐：多空辩论 + 风险三方辩论各 5 轮
     config["max_debate_rounds"] = 5
     config["max_risk_discuss_rounds"] = 5
+    # Analysis window (#16): start-date input in the sidebar → look-back days.
+    config["market_lookback_days"] = st.session_state.get("market_lookback_days")
     config["checkpoint_enabled"] = True
     config["output_language"] = "Chinese"
     return config
