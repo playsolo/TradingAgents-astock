@@ -10,8 +10,16 @@ from pathlib import Path
 from typing import Any
 
 
+# Exchange-assigned ex-dividend / ex-rights prefix markers.
+# Tencent / mootdx may prepend these during corporate actions, e.g. "XD华夏银"
+# for 华夏银行.  The 1–2 ASCII chars foul the fullmatch regex and cause the
+# authoritative name to be rejected, letting LLM report prose win.
+_XD_RE = re.compile(r"^[xX][dD]\s*|^[xX][rR]\s*|^[dD][rR]\s*")
+
 def _clean_stock_name(name: str) -> str:
-    return "".join(ch for ch in str(name) if ch.isprintable()).strip()
+    text = "".join(ch for ch in str(name) if ch.isprintable()).strip()
+    text = _XD_RE.sub("", text).strip()
+    return text
 
 
 # Well-known Chinese ADRs / US listings — overlay Chinese display names.
@@ -202,6 +210,8 @@ def _is_exchange_or_market_label(value: str) -> bool:
 _NON_NAME_MARKERS: tuple[str, ...] = (
     "社区",
     "讨论",
+    "加权",
+    "近似",
     "技术面",
     "技术分析",
     "市场情绪",
@@ -497,7 +507,9 @@ def resolve_stock_name(ticker: str) -> str | None:
         return cached
 
     if _is_a_share_code(code):
-        name = _tencent_name(code) or _mootdx_name_if_cached(code)
+        # mootdx has the full un-truncated name; Tencent may return an XD/XR/DR-
+        # stripped but character-truncated name (e.g. "华夏银" instead of "华夏银行").
+        name = _mootdx_name_if_cached(code) or _tencent_name(code)
         if name and _is_cache_worthy_name(name, code):
             _NAME_CACHE.set(code, name)
             return name

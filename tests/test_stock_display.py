@@ -161,3 +161,62 @@ def test_normalize_report_state_mentions_updates_generated_fields(monkeypatch):
     assert state["investment_debate_state"]["bull_history"] == "看多 600370 *ST三房"
     assert state["investment_debate_state"]["round"] == 1
     assert state["risk_debate_state"]["judge_decision"] == "600370 *ST三房 风险偏高"
+
+
+def test_clean_stock_name_strips_xd_xr_dr_prefix():
+    assert stock_display._clean_stock_name("XD华夏银") == "华夏银"
+    assert stock_display._clean_stock_name("XR平安银") == "平安银"
+    assert stock_display._clean_stock_name("DR兴业银") == "兴业银"
+    assert stock_display._clean_stock_name("xd中国银行") == "中国银行"
+    assert stock_display._clean_stock_name("xr招商银") == "招商银"
+    assert stock_display._clean_stock_name("XD 农业银行") == "农业银行"
+    # Unprefixed names are untouched
+    assert stock_display._clean_stock_name("华夏银行") == "华夏银行"
+    assert stock_display._clean_stock_name("贵州茅台") == "贵州茅台"
+    assert stock_display._clean_stock_name("UiPath Inc.") == "UiPath Inc."
+
+
+def test_weighted_approx_rejected_as_stock_name():
+    """加权近似 (weighted approximate) is a report phrase, never a stock name."""
+    assert stock_display.is_junk_stock_name("加权近似")
+    assert stock_display.is_junk_stock_name("加权")
+    assert stock_display.is_junk_stock_name("近似")
+
+
+def test_resolve_stock_name_prefers_mootdx_over_truncated_tencent(monkeypatch, tmp_path):
+    """During XD/XR/DR periods Tencent truncates names; mootdx has the full name."""
+    # Simulate: Tencent returns "XD华夏银" → _clean_stock_name strips XD → "华夏银"
+    monkeypatch.setattr(
+        stock_display,
+        "_tencent_name",
+        lambda code: "华夏银",
+    )
+    monkeypatch.setattr(
+        stock_display,
+        "_mootdx_name_if_cached",
+        lambda code: "华夏银行",
+    )
+    cache = stock_display.StockNameCache(tmp_path / "names.json")
+    monkeypatch.setattr(stock_display, "_NAME_CACHE", cache)
+    stock_display.resolve_stock_name.cache_clear()
+
+    assert stock_display.resolve_stock_name("600015") == "华夏银行"
+
+
+def test_resolve_stock_name_falls_back_to_tencent_when_mootdx_unavailable(monkeypatch, tmp_path):
+    """When mootdx map is not built yet, Tencent (even truncated) is used."""
+    monkeypatch.setattr(
+        stock_display,
+        "_tencent_name",
+        lambda code: "华夏银",
+    )
+    monkeypatch.setattr(
+        stock_display,
+        "_mootdx_name_if_cached",
+        lambda code: None,
+    )
+    cache = stock_display.StockNameCache(tmp_path / "names.json")
+    monkeypatch.setattr(stock_display, "_NAME_CACHE", cache)
+    stock_display.resolve_stock_name.cache_clear()
+
+    assert stock_display.resolve_stock_name("600015") == "华夏银"
