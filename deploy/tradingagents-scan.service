@@ -1,6 +1,6 @@
 # TradingAgents-Astock 策略扫描（oneshot）：价值波段 + 成长加速 + 错杀反转
 #
-# 由 tradingagents-scan.timer 每日 20:30（Asia/Shanghai）触发。
+# 由 tradingagents-scan.timer 每日 19:00（Asia/Shanghai）触发。
 # --strategy all：顺序跑三池，结果分别落盘；--enqueue 写入分析队列，
 # 由 tradingagents-analyze.service 消费（关闭 Web 不影响）。
 #

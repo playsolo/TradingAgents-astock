@@ -7,9 +7,9 @@ TIMER = ROOT / "deploy" / "tradingagents-scan.timer"
 SERVICE = ROOT / "deploy" / "tradingagents-scan.service"
 
 
-def test_scan_timer_runs_daily_at_2030_shanghai():
+def test_scan_timer_runs_daily_at_1900_shanghai():
     text = TIMER.read_text(encoding="utf-8")
-    assert "OnCalendar=*-*-* 20:30:00" in text
+    assert "OnCalendar=*-*-* 19:00:00" in text
     assert "Persistent=true" in text
     assert "Unit=tradingagents-scan.service" in text
     # Documented assumption: host TZ is Asia/Shanghai (m.wcc.io)

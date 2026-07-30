@@ -40,7 +40,7 @@ def test_display_label_does_not_cache_report_extraction(monkeypatch, tmp_path):
 
 
 def test_display_label_does_not_cache_cn_extract_over_english(monkeypatch, tmp_path):
-    """CN overlay from reports is display-only — aliases/yfinance own the cache."""
+    """Authoritative yfinance name wins over report-extracted Chinese, never caches extracts."""
     cache = stock_display.StockNameCache(tmp_path / "names.json")
     monkeypatch.setattr(stock_display, "_NAME_CACHE", cache)
     monkeypatch.setattr(
@@ -49,7 +49,8 @@ def test_display_label_does_not_cache_cn_extract_over_english(monkeypatch, tmp_p
         lambda ticker: "MINISO Group Holding Limited",
     )
     state = {"fundamentals_report": "MINISO（名创优品）主营零售"}
-    assert stock_display.stock_display_label("MNSO", state) == "MNSO 名创优品"
+    # Authoritative resolved name wins; extracted CN name is never cached.
+    assert stock_display.stock_display_label("MNSO", state) == "MNSO MINISO Group Holding Limited"
     assert cache.get("MNSO") is None
 
 

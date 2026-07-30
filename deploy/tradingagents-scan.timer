@@ -1,4 +1,4 @@
-# TradingAgents-Astock 价值波段扫描 — 每日 20:30（北京时间）
+# TradingAgents-Astock 价值波段扫描 — 每日 19:00（北京时间）
 #
 # 与 tradingagents-scan.service 成对安装。
 #
@@ -9,12 +9,12 @@
 #   sudo systemctl enable --now tradingagents-scan.timer
 
 [Unit]
-Description=Daily 20:30 value swing scan for TradingAgents Astock
+Description=Daily 19:00 value swing scan for TradingAgents Astock
 
 [Timer]
-# 服务器时区为 Asia/Shanghai；本地时间每日 20:30
+# 服务器时区为 Asia/Shanghai；本地时间每日 19:00
 # （部分 systemd 版本不支持 OnCalendar=Asia/Shanghai ... 前缀语法）
-OnCalendar=*-*-* 20:30:00
+OnCalendar=*-*-* 19:00:00
 Persistent=true
 Unit=tradingagents-scan.service
 

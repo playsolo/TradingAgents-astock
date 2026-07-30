@@ -81,7 +81,14 @@ def test_resolve_us_name_prefers_chinese_alias(monkeypatch, tmp_path):
     assert cache.get("MNSO") == "名创优品"
 
 
-def test_display_prefers_chinese_state_over_english_resolve(monkeypatch):
+def test_authoritative_english_resolve_beats_extracted_chinese(monkeypatch):
+    """Authoritative yfinance/cache names beat Chinese fragments from report extraction.
+
+    In production ``_US_CN_ALIASES`` provides ``名创优品`` for MNSO so
+    ``resolve_stock_name`` returns Chinese directly.  This test exercises the
+    edge case where only an English yfinance name is available — the official
+    issuer name should win, not any Chinese prose the LLM happened to write.
+    """
     monkeypatch.setattr(
         stock_display,
         "resolve_stock_name",
@@ -91,7 +98,21 @@ def test_display_prefers_chinese_state_over_english_resolve(monkeypatch):
     state = {
         "fundamentals_report": "MINISO（名创优品）主营生活方式零售",
     }
-    assert stock_display.stock_display_label("MNSO", state) == "MNSO 名创优品"
+    assert stock_display.stock_display_label("MNSO", state) == "MNSO MINISO Group Holding Limited"
+
+
+def test_us_chinese_prose_never_overrides_english_resolve(monkeypatch):
+    """Regression: 「社区讨论」must never beat a correct yfinance name like UiPath Inc."""
+    monkeypatch.setattr(
+        stock_display,
+        "resolve_stock_name",
+        lambda ticker: "UiPath Inc.",
+    )
+
+    state = {
+        "sentiment_report": "PATH 社区讨论 情绪分析",
+    }
+    assert stock_display.stock_display_label("PATH", state) == "PATH UiPath Inc."
 
 
 def test_a_share_label_unchanged_when_rejecting_exchanges(monkeypatch):

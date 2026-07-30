@@ -110,6 +110,7 @@ def _serialize(state: dict[str, Any]) -> dict[str, Any]:
     keys = (
         "company_of_interest",
         "trade_date",
+        "analysis_clock",
         "market_report",
         "sentiment_report",
         "news_report",
@@ -317,6 +318,15 @@ def main() -> int:
             past_context=past_context,
             instrument_context=instrument_context,
         )
+        # Freeze US Eastern clock so Trader/PM share the same session timing,
+        # mirroring the A-stock analysis_clock convention.
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo
+
+        init_state["analysis_clock"] = _dt.now(
+            ZoneInfo("America/New_York")
+        ).isoformat(timespec="seconds")
+
         bootstrap_parts: list[str] = [ticker]
         if filing_block:
             bootstrap_parts.append(

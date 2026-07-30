@@ -163,7 +163,7 @@ if [ -f deploy/tradingagents-accuracy.service ] && [ -f deploy/tradingagents-acc
   systemctl list-timers tradingagents-accuracy.timer --no-pager || true
 fi
 
-# 价值波段扫描每日 20:30 timer（幂等安装 / 刷新单元文件）
+# 价值波段扫描每日 19:00 timer（幂等安装 / 刷新单元文件）
 if [ -f deploy/tradingagents-scan.service ] && [ -f deploy/tradingagents-scan.timer ]; then
   echo "[远程] 安装/刷新 tradingagents-scan.timer ..."
   sudo cp deploy/tradingagents-scan.service /etc/systemd/system/

@@ -200,6 +200,8 @@ def _is_exchange_or_market_label(value: str) -> bool:
 # Report / valuation jargon that must never be treated as an issuer name.
 # Includes common A-share and US fundamentals phrasing (静态市盈率、稀释EPS…).
 _NON_NAME_MARKERS: tuple[str, ...] = (
+    "社区",
+    "讨论",
     "技术面",
     "技术分析",
     "市场情绪",
@@ -655,16 +657,37 @@ def _extract_stock_name_from_state(code: str, final_state: dict) -> str | None:
 
 
 def _prefer_display_name(*candidates: str | None) -> str | None:
-    """Pick a display name from candidates in call order (resolved before extracted).
+    """Pick a display name. The first candidate is authoritative (cache / yfinance /
+    腾讯); later candidates are report-text extractions used only as fallbacks.
 
-    Chinese company-style names still beat English issuer names so US tickers can
-    show a CN alias from fundamentals — but never re-sort by shortness (that let
-    「静态」「稀释」 override 「紫金矿业」 / 「Micron Technology」).
+    When the authoritative name exists it wins outright — regardless of language —
+    because it comes from a vetted source.  This prevents random Chinese prose
+    fragments from LLM-generated reports (e.g. 「社区讨论」「公司层面核心」) from
+    overriding a correct English issuer name like 「UiPath Inc.」.
+
+    Fallback (no authoritative name): Chinese company-style names still beat English
+    issuer names so US tickers can show a CN alias found in fundamentals reports
+    when the cache misses.
     """
+    if not candidates:
+        return None
+
+    # ── Authoritative (first candidate) ──
+    authoritative = _clean_stock_name(candidates[0] or "")
+    if authoritative and _looks_like_stock_name(authoritative) and not _is_exchange_or_market_label(authoritative):
+        if _has_chinese(authoritative):
+            if _is_plausible_stock_name(authoritative, ""):
+                return authoritative
+        else:
+            if _is_plausible_stock_name(authoritative, "") or _looks_like_stock_name(authoritative):
+                if authoritative.upper() not in _BANNED_EN_NAME_TOKENS:
+                    return authoritative
+
+    # ── Fallback: pick from extraction candidates (Chinese-first cascade) ──
     chinese_company: list[str] = []
     chinese_other: list[str] = []
     english: list[str] = []
-    for raw in candidates:
+    for raw in candidates[1:]:
         name = _clean_stock_name(raw or "")
         if not name or not _looks_like_stock_name(name) or _is_exchange_or_market_label(name):
             continue
@@ -677,7 +700,6 @@ def _prefer_display_name(*candidates: str | None) -> str | None:
             else:
                 chinese_other.append(name)
             continue
-        # English: allow yfinance issuer names even when single-token checks are strict
         if _is_plausible_stock_name(name, "") or _looks_like_stock_name(name):
             if name.upper() in _BANNED_EN_NAME_TOKENS:
                 continue

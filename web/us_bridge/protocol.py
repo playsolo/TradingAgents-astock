@@ -24,6 +24,7 @@ US_STAGE_IDS = [s["id"] for s in US_PIPELINE_STAGES]
 _FINAL_STATE_KEYS = (
     "company_of_interest",
     "trade_date",
+    "analysis_clock",
     "market_report",
     "sentiment_report",
     "news_report",
