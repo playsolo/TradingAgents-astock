@@ -518,11 +518,14 @@ def _render_admin_model_config() -> None:
         )
 
         if st.form_submit_button("保存模型配置", type="primary", use_container_width=True):
+            # Preserve existing fallback chain — the form doesn't expose it.
+            existing = load_model_config()
             save_model_config(
                 llm_provider=selected_provider,
                 deep_think_llm=deep_val,
                 quick_think_llm=quick_val,
                 backend_url=backend_val.strip() or None,
+                fallback_chain=list(existing.get("fallback_chain") or []),
             )
             st.success("模型配置已保存，全体用户立即生效")
             st.rerun()
