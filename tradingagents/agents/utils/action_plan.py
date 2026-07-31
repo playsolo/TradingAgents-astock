@@ -35,9 +35,9 @@ _RATING_ANCHOR_RE = re.compile(
 
 _SIDEBAR_FROM_RATING = {
     "Buy": "Buy",
-    "Overweight": "Buy",
+    "Overweight": "Overweight",
     "Hold": "Hold",
-    "Underweight": "Sell",
+    "Underweight": "Underweight",
     "Sell": "Sell",
 }
 
@@ -109,7 +109,7 @@ def isolate_action_section(text: str) -> str:
 
 
 def rating_to_sidebar_signal(rating: str | PortfolioRating) -> str:
-    """Collapse 5-tier rating to the Buy / Sell / Hold sidebar buckets."""
+    """Return the canonical 5-tier rating for sidebar grouping."""
     value = rating.value if isinstance(rating, PortfolioRating) else str(rating or "")
     return _SIDEBAR_FROM_RATING.get(value.strip().capitalize(), "Hold")
 

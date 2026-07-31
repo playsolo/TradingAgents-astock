@@ -749,37 +749,35 @@ def stock_display_label(ticker: str, final_state: dict | None = None) -> str:
 
 _SIGNAL_STYLES: dict[str, tuple[str, str, str]] = {
     "Buy": ("#22c55e", "🟢", "买入"),
-    "Sell": ("#ef4444", "🔴", "卖出"),
+    "Overweight": ("#10b981", "🟩", "增持"),
     "Hold": ("#fbbf24", "🟡", "持有"),
+    "Underweight": ("#f97316", "🟠", "减持"),
+    "Sell": ("#ef4444", "🔴", "卖出"),
 }
 
 
 def signal_text_tag(signal: str) -> str:
     """Return an inline emoji + text tag for the signal (safe for st.button labels)."""
-    s = signal.upper() if signal else ""
-    if "BUY" in s:
-        _, icon, cn = _SIGNAL_STYLES["Buy"]
-        return f"{icon} {cn}"
-    if "SELL" in s:
-        _, icon, cn = _SIGNAL_STYLES["Sell"]
-        return f"{icon} {cn}"
-    if "HOLD" in s:
-        _, icon, cn = _SIGNAL_STYLES["Hold"]
-        return f"{icon} {cn}"
+    s = signal.strip()
+    style = _SIGNAL_STYLES.get(s)
+    if style:
+        return f"{style[1]} {style[2]}"
+    # Backward compat: loose matches for legacy / N/A signals
+    su = (signal or "").upper()
+    for key in ("Buy", "Overweight", "Hold", "Underweight", "Sell"):
+        if key.upper() in su:
+            style2 = _SIGNAL_STYLES[key]
+            return f"{style2[1]} {style2[2]}"
     return ""
 
 
 def signal_html_tag(signal: str) -> str:
     """Return an inline HTML badge for the signal, e.g. '<span style="...">买入</span>'."""
-    s = signal.upper() if signal else ""
-    if "BUY" in s:
-        color, icon, cn = _SIGNAL_STYLES["Buy"]
-    elif "SELL" in s:
-        color, icon, cn = _SIGNAL_STYLES["Sell"]
-    elif "HOLD" in s:
-        color, icon, cn = _SIGNAL_STYLES["Hold"]
-    else:
+    s = signal.strip()
+    style = _SIGNAL_STYLES.get(s)
+    if not style:
         return ""
+    color, icon, cn = style
     return (
         f'<span style="'
         f'display:inline-block;'

@@ -32,15 +32,26 @@ def _lazy_signal(path: str) -> str:
 
 
 def _signal_group_key(signal: str) -> int:
-    """Sort key for signal groups: Buy first, then Sell, then Hold, then N/A."""
+    """Sort key for signal groups: Buy > Overweight > Hold > Underweight > Sell > N/A."""
     s = signal.upper() if signal else ""
+    if s == "BUY":
+        return 0
+    if s == "OVERWEIGHT":
+        return 1
+    if s == "HOLD":
+        return 2
+    if s == "UNDERWEIGHT":
+        return 3
+    if s == "SELL":
+        return 4
+    # Backward compat: substring match for legacy 3-tier signals
     if "BUY" in s:
         return 0
     if "SELL" in s:
-        return 1
+        return 4
     if "HOLD" in s:
         return 2
-    return 3
+    return 5
 
 
 def group_history_by_signal(
@@ -57,8 +68,10 @@ def group_history_by_signal(
     """
     groups: dict[str, list[dict[str, Any]]] = {
         "Buy": [],
-        "Sell": [],
+        "Overweight": [],
         "Hold": [],
+        "Underweight": [],
+        "Sell": [],
         "N/A": [],
         "WatchBuy": [],
     }
@@ -94,7 +107,14 @@ def group_history_by_signal(
 def signal_count_label(group: dict[str, list[dict[str, Any]]], total: int) -> str:
     """Build a compact summary line, e.g. '共 42 条 · 买入12 持有18 卖出8'."""
     parts = [f"共 {total} 条"]
-    for sig, display in [("Buy", "买入"), ("Sell", "卖出"), ("Hold", "持有"), ("WatchBuy", "关注-待买入")]:
+    for sig, display in [
+        ("Buy", "买入"),
+        ("Overweight", "增持"),
+        ("Hold", "持有"),
+        ("Underweight", "减持"),
+        ("Sell", "卖出"),
+        ("WatchBuy", "关注-待买入"),
+    ]:
         n = len(group.get(sig, []))
         if n:
             parts.append(f"{display}{n}")
@@ -489,17 +509,18 @@ def extract_signal(state: dict[str, Any]) -> str:
 
     rating_map = {
         "BUY": "Buy",
-        "OVERWEIGHT": "Buy",
+        "OVERWEIGHT": "Overweight",
         "HOLD": "Hold",
-        "UNDERWEIGHT": "Sell",
+        "UNDERWEIGHT": "Underweight",
         "SELL": "Sell",
     }
     # Long PM memos often recount bull/bear arguments; only scan bare keywords
     # on short decision lines (e.g. saved "HOLD" / "最终评级：卖出").
     # Exclude 减持 from unordered body scan — it appears in risk prose
     # ("无减持计划") far more often than as a standalone decision word.
-    _body_cn_map = {"买入": "Buy", "加仓": "Buy", "增持": "Buy",
+    _body_cn_map = {"买入": "Buy", "加仓": "Buy", "增持": "Overweight",
                     "卖出": "Sell", "减仓": "Sell", "清仓": "Sell",
+                    "减持": "Underweight",
                     "持有": "Hold", "观望": "Hold"}
     _short_snippet_max = 120
 

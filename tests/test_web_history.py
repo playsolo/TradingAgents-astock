@@ -24,13 +24,13 @@ def test_extract_signal_prefers_labeled_underweight_over_body_buy():
             "**执行方向**：不买入\n"
         ),
     }
-    assert history.extract_signal(state) == "Sell"
+    assert history.extract_signal(state) == "Underweight"
 
 
 def test_extract_signal_reads_plain_jianchi_label():
     assert (
         history.extract_signal({"final_trade_decision": "最终评级：减持\n降低仓位"})
-        == "Sell"
+        == "Underweight"
     )
 
 
@@ -46,7 +46,7 @@ def test_extract_signal_hold_label_not_fooled_by_jianchi_prose():
 def test_extract_signal_reads_prefixed_jianchi_label():
     assert (
         history.extract_signal({"final_trade_decision": "最终评级：建议减持\n降低敞口"})
-        == "Sell"
+        == "Underweight"
     )
 
 
@@ -352,7 +352,7 @@ def test_extract_signal_prefers_final_trade_decision():
         "investment_plan": "最终评级：买入",
         "final_trade_decision": "最终评级：减持",
     }
-    assert history.extract_signal(state) == "Sell"
+    assert history.extract_signal(state) == "Underweight"
 
 
 def test_extract_signal_english_still_works():
@@ -377,7 +377,7 @@ def test_extract_signal_debate_prose_does_not_override_underweight():
             "理由：估值偏高，下行风险加大"
         ),
     }
-    assert history.extract_signal(state) == "Sell"
+    assert history.extract_signal(state) == "Underweight"
 
 
 def test_extract_signal_buy_in_debate_does_not_override_labeled_hold():

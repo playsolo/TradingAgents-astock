@@ -219,7 +219,8 @@ def _analysis_block_html(candidate: dict) -> str:
     else:
         signal = str(analysis.get("signal") or "N/A")
         color, rating_cn = action_plan_rating_style(
-            {"Buy": "Buy", "Sell": "Sell", "Hold": "Hold"}.get(signal, signal)
+            {"Buy": "Buy", "Overweight": "Overweight", "Hold": "Hold",
+             "Underweight": "Underweight", "Sell": "Sell"}.get(signal, signal)
         )
         if signal == "N/A":
             rating_cn = "已分析"

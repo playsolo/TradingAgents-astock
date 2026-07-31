@@ -55,7 +55,7 @@ def test_finalize_us_run_extracts_and_persists_action_plan(tmp_path, monkeypatch
     saved = json.loads(log_path.read_text(encoding="utf-8"))
     assert saved["action_plan"]["rating"] == "Underweight"
     assert tracker.final_state["action_plan"]["rating"] == "Underweight"
-    assert tracker.signal == "Sell"  # Underweight → sidebar Sell
+    assert tracker.signal == "Underweight"  # 5-tier preserved for sidebar
 
 
 def test_finalize_us_run_skips_extract_when_plan_already_present(tmp_path, monkeypatch):

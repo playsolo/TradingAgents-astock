@@ -35,11 +35,21 @@ def _strip_think(text: str) -> str:
 
 
 def _signal_style(signal: str) -> tuple[str, str]:
-    s = signal.upper()
-    if "BUY" in s:
-        return "#22c55e", "买入"
-    if "SELL" in s:
-        return "#ef4444", "卖出"
+    s = signal.strip()
+    known = {
+        "Buy": ("#22c55e", "买入"),
+        "Overweight": ("#10b981", "增持"),
+        "Hold": ("#fbbf24", "持有"),
+        "Underweight": ("#f97316", "减持"),
+        "Sell": ("#ef4444", "卖出"),
+    }
+    if s in known:
+        return known[s]
+    # Backward compat: loose match for legacy signals
+    su = (signal or "").upper()
+    for key in ("Buy", "Overweight", "Hold", "Underweight", "Sell"):
+        if key.upper() in su:
+            return known[key]
     return "#fbbf24", "持有"
 
 
@@ -175,9 +185,9 @@ def _safe_filename_label(label: str) -> str:
 
 _RATING_STYLE: dict[str, tuple[str, str]] = {
     "buy": ("#22c55e", "买入"),
-    "overweight": ("#22c55e", "增持"),
+    "overweight": ("#10b981", "增持"),
     "hold": ("#fbbf24", "持有"),
-    "underweight": ("#ef4444", "减持"),
+    "underweight": ("#f97316", "减持"),
     "sell": ("#ef4444", "卖出"),
 }
 
@@ -300,8 +310,8 @@ def _render_pm_override_banner(final_state: dict[str, Any], sidebar_signal: str)
     if pm_signal == rm_signal:
         return
 
-    rm_label = {"Buy": "买入", "Sell": "卖出", "Hold": "持有"}.get(rm_signal, rm_signal)
-    pm_label = {"Buy": "买入", "Sell": "卖出", "Hold": "持有"}.get(pm_signal, pm_signal)
+    rm_label = {"Buy": "买入", "Overweight": "增持", "Hold": "持有", "Underweight": "减持", "Sell": "卖出"}.get(rm_signal, rm_signal)
+    pm_label = {"Buy": "买入", "Overweight": "增持", "Hold": "持有", "Underweight": "减持", "Sell": "卖出"}.get(pm_signal, pm_signal)
     color, _ = _signal_style(pm_signal)
 
     st.markdown(

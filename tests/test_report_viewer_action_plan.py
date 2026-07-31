@@ -46,9 +46,9 @@ def test_format_levels_single_bound_zone():
 
 def test_rating_style_maps_five_tier_to_color_and_chinese():
     assert action_plan_rating_style("Buy") == ("#22c55e", "买入")
-    assert action_plan_rating_style("Overweight") == ("#22c55e", "增持")
+    assert action_plan_rating_style("Overweight") == ("#10b981", "增持")
     assert action_plan_rating_style("Hold") == ("#fbbf24", "持有")
-    assert action_plan_rating_style("Underweight") == ("#ef4444", "减持")
+    assert action_plan_rating_style("Underweight") == ("#f97316", "减持")
     assert action_plan_rating_style("Sell") == ("#ef4444", "卖出")
 
 

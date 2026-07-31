@@ -962,8 +962,10 @@ def render_sidebar() -> None:
     # 关注-待买入 Tab 始终显示（包括 0），让用户知道功能存在
     tab_labels = [("🛎️ 关注-待买入", "watchbuy"), ("全部", "all")] + [
         ("买入", "buy"),
-        ("卖出", "sell"),
+        ("增持", "overweight"),
         ("持有", "hold"),
+        ("减持", "underweight"),
+        ("卖出", "sell"),
     ]
 
     tabs = st.tabs(
@@ -982,7 +984,7 @@ def render_sidebar() -> None:
                 # 全部 tab: merge all signal groups (except WatchBuy) sorted
                 # newest-first, matching get_history() ordering.
                 all_entries = []
-                for sig_key in ("Buy", "Sell", "Hold", "N/A"):
+                for sig_key in ("Buy", "Overweight", "Hold", "Underweight", "Sell", "N/A"):
                     all_entries.extend(groups.get(sig_key, []))
                 # get_history returns newest-first; groups preserve that order
                 # within each signal bucket, so interleaving by date is needed.

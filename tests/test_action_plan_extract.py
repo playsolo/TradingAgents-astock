@@ -114,10 +114,12 @@ def test_isolate_prefers_final_plan_over_earlier_recap_heading():
 
 
 @pytest.mark.unit
-def test_rating_to_sidebar_signal_collapses_five_tier():
-    assert rating_to_sidebar_signal("Underweight") == "Sell"
-    assert rating_to_sidebar_signal("Overweight") == "Buy"
+def test_rating_to_sidebar_signal_preserves_five_tier():
+    assert rating_to_sidebar_signal("Underweight") == "Underweight"
+    assert rating_to_sidebar_signal("Overweight") == "Overweight"
     assert rating_to_sidebar_signal("Hold") == "Hold"
+    assert rating_to_sidebar_signal("Buy") == "Buy"
+    assert rating_to_sidebar_signal("Sell") == "Sell"
 
 
 @pytest.mark.unit
@@ -177,7 +179,7 @@ def test_extract_signal_prefers_action_plan_over_body_buy():
             "summary": "减持",
         },
     }
-    assert extract_signal(state) == "Sell"
+    assert extract_signal(state) == "Underweight"
 
 
 # ── Fallback regex tests: false positives from previous bug ──

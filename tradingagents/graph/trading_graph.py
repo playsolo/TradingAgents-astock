@@ -476,8 +476,6 @@ class TradingAgentsGraph:
         if plan and plan.get("rating") and rating_to_sidebar_signal is not None:
             return rating_to_sidebar_signal(plan["rating"])
         raw_signal = self.process_signal(final_state["final_trade_decision"])
-        # Collapse 5-tier (Overweight/Underweight) to the 3-tier sidebar buckets
-        # so the live signal matches the disk-derived history signal.
         if rating_to_sidebar_signal is not None:
             return rating_to_sidebar_signal(raw_signal)
         return raw_signal

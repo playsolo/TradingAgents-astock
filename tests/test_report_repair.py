@@ -302,5 +302,5 @@ def test_extract_signal_reads_chinese_sell():
     )
     assert (
         extract_signal({"final_trade_decision": "**Rating**: Underweight\n"})
-        == "Sell"
+        == "Underweight"
     )
