@@ -278,6 +278,50 @@ def action_plan_card_html(plan: dict[str, Any]) -> str:
     )
 
 
+def _render_pm_override_banner(final_state: dict[str, Any], sidebar_signal: str) -> None:
+    """Show a warning banner when the PM's final rating diverges from the RM's.
+
+    Detected by comparing the 3-tier sidebar signal (derived from PM) against
+    the Research Manager's rating parsed from ``investment_plan`` prose.
+    """
+    inv_plan = final_state.get("investment_plan", "")
+    if not inv_plan:
+        return
+
+    from tradingagents.agents.utils.rating import parse_rating
+    from tradingagents.agents.utils.action_plan import rating_to_sidebar_signal
+
+    rm_rating = parse_rating(str(inv_plan), default="")
+    if not rm_rating:
+        return
+    rm_signal = rating_to_sidebar_signal(rm_rating)
+
+    pm_signal = sidebar_signal
+    if pm_signal == rm_signal:
+        return
+
+    rm_label = {"Buy": "买入", "Sell": "卖出", "Hold": "持有"}.get(rm_signal, rm_signal)
+    pm_label = {"Buy": "买入", "Sell": "卖出", "Hold": "持有"}.get(pm_signal, pm_signal)
+    color, _ = _signal_style(pm_signal)
+
+    st.markdown(
+        f'<div style="'
+        f"background: linear-gradient(135deg, #1a1a2e 0%, #2d1a1a 100%);"
+        f"border: 2px solid {color};"
+        f"border-radius: 12px;"
+        f"padding: 1rem 1.4rem;"
+        f'margin: 0 0 1.5rem;">'
+        f'<div style="font-size:0.85rem; color:#fbbf24; margin-bottom:0.3rem;">'
+        f"⚠️ 投资组合经理 (PM) 推翻研究经理 (RM) 原结论</div>"
+        f'<div style="color:#e8e3da; font-size:0.95rem;">'
+        f"RM 原判：<strong>{rm_label}（{rm_rating}）</strong> → "
+        f'PM 终裁：<strong style="color:{color};">{pm_label}（{pm_signal}）</strong>'
+        f"</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def _render_action_plan_card(final_state: dict[str, Any]) -> None:
     """Render the structured action-plan card below the signal banner.
 
@@ -613,9 +657,21 @@ def render_report(
 
     st.markdown("---")
 
+    # ── PM final decision (top of report, right after hero + action plan) ──
+    pm_decision = final_state.get("final_trade_decision", "")
+    if pm_decision:
+        color, cn_label = _signal_style(signal)
+        st.markdown(f"### 👔 投资组合经理终裁 · {cn_label}")
+        st.markdown(_display_report_text(pm_decision, ticker, final_state))
+        st.markdown("---")
+
+    # ── PM override detection ──
+    _render_pm_override_banner(final_state, signal)
+
     inv_plan = final_state.get("investment_plan", "")
     if inv_plan:
-        st.markdown("### 👔 最终投资建议")
+        st.markdown("### 📋 研究经理投资计划")
+        st.caption("此为研究经理基于多空辩论的初步计划，最终以上方「投资组合经理终裁」为准。")
         st.markdown(_display_report_text(inv_plan, ticker, final_state))
         st.markdown("---")
 
@@ -658,15 +714,15 @@ def render_report(
     risk = final_state.get("risk_debate_state")
     if risk and isinstance(risk, dict):
         st.markdown("### 🛡️ 风控评估")
-        tab_agg, tab_con, tab_neu, tab_rj = st.tabs(["激进", "保守", "中性", "风控决策"])
+        tab_agg, tab_con, tab_neu = st.tabs(["激进", "保守", "中性"])
         with tab_agg:
             st.markdown(_display_report_text(risk.get("aggressive_history", "") or "无数据", ticker, final_state))
         with tab_con:
             st.markdown(_display_report_text(risk.get("conservative_history", "") or "无数据", ticker, final_state))
         with tab_neu:
             st.markdown(_display_report_text(risk.get("neutral_history", "") or "无数据", ticker, final_state))
-        with tab_rj:
-            st.markdown(_display_report_text(risk.get("judge_decision", "") or "无数据", ticker, final_state))
+
+    # PM final decision is rendered at the top of the report (after hero + action plan).
 
     dqs = final_state.get("data_quality_summary", "")
     if dqs:

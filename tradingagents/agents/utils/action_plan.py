@@ -126,7 +126,7 @@ _SUMMARY_RE = re.compile(
 )
 # Chinese label fallback: the model may output 评级 in Chinese
 _CN_RATING_RE = re.compile(
-    r"(?:评级|投资评级|最终评级|最终裁决)\s*[：:]\s*\*?\*?\s*([^\n]+)",
+    r"(?:评级|投资评级|最终评级|最终裁决)\s*\**\s*[：:]\s*\*?\*?\s*([^\n]+)",
 )
 
 
