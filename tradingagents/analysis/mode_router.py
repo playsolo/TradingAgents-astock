@@ -1,10 +1,11 @@
 """分析模式路由：硬闸 → 全量；窄口径 → 伪增量/扫描跳过；不确定默认全量。
 
 偏风控（怕漏翻盘）：取价失败、无锚点、灰区一律 full_reeval。
-伪增量注入的是「最近一次全量校准锚点」，不是上一次伪增量结论。
+伪增量注入的是「股票档案 active_plan + delta」（由最近一次全量回写），
+不是上一次伪增量结论。
 
-扫描入队（source=scan）在窄口径下走 skip_reuse：不跑深分析，沿用校准。
-手工分析即使窄口径仍跑伪增量图（用户点了「开始分析」即期望出报告）。
+扫描入队（source=scan）在窄口径下走 skip_reuse：不跑深分析，沿用档案计划。
+手工分析即使窄口径仍跑伪增量图（用户点了「开始分析」即期望出报告；仍跑满 Analyst）。
 """
 
 from __future__ import annotations
@@ -15,12 +16,15 @@ from datetime import date, datetime
 from typing import Any, Callable
 
 from tradingagents.analysis.calibration import CalibrationStore, default_calibration_store
+from tradingagents.archive.delta import compute_plan_delta
+from tradingagents.archive.models import ActivePlan
+from tradingagents.archive.prior import build_archive_prior, build_prior_for_baseline
+from tradingagents.archive.store import StockArchiveStore, default_archive_store
 from tradingagents.watchlist.calendar import (
     FULL_ANALYSIS_STALE_TRADING_DAYS,
     cn_trading_days_since,
 )
 from tradingagents.watchlist.models import Baseline
-from tradingagents.watchlist.service import prior_context_from_baseline
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +48,7 @@ class AnalysisRouteDecision:
 
     @property
     def updates_calibration(self) -> bool:
-        """全量（非 resume）成功后应写入新的校准锚点。"""
+        """全量（非 resume）成功后应写入新的校准锚点与档案计划。"""
         return self.mode == MODE_FULL and self.reason != "resume"
 
     @property
@@ -53,15 +57,8 @@ class AnalysisRouteDecision:
 
 
 def build_calibration_prior(baseline: Baseline) -> str:
-    """伪增量 prior：标明校准锚点，避免与观察池措辞混淆。"""
-    text = prior_context_from_baseline(baseline)
-    lines = text.splitlines()
-    if lines and lines[0].startswith("[观察池基准"):
-        rest = lines[0].split("|", 1)[-1].strip().rstrip("]")
-        lines[0] = f"[校准锚点 | {rest}]"
-    else:
-        lines.insert(0, f"[校准锚点 | {baseline.ticker} | 分析日 {baseline.trade_date}]")
-    return "\n".join(lines)
+    """兼容旧调用：无档案时的校准锚点 prior。"""
+    return build_prior_for_baseline(baseline)
 
 
 def _seed_anchor_from_history(
@@ -87,25 +84,61 @@ def _resolve_anchor(
     market: str,
     *,
     calibration_store: CalibrationStore,
+    archive_store: StockArchiveStore,
     watch_store: Any | None,
     seed_from_history: bool = True,
-) -> Baseline | None:
+) -> tuple[Baseline | None, ActivePlan | None]:
+    """Resolve plan: archive first, then calibration / watchlist / history (lazy migrate)."""
+    plan = archive_store.get_active_plan(ticker, market)
+    if plan is not None:
+        return plan.to_baseline(), plan
+
     anchor = calibration_store.get(ticker, market)
-    if anchor is not None:
-        return anchor
-    if watch_store is not None:
+    if anchor is None and watch_store is not None:
         try:
             item = watch_store.get(ticker)
         except Exception:  # noqa: BLE001
             logger.exception("watch_store.get failed for %s", ticker)
             item = None
         if item is not None:
-            return item.baseline
-    if seed_from_history:
-        return _seed_anchor_from_history(
+            anchor = item.baseline
+    if anchor is None and seed_from_history:
+        anchor = _seed_anchor_from_history(
             ticker, market, calibration_store=calibration_store
         )
-    return None
+    if anchor is None:
+        return None, None
+
+    try:
+        plan = archive_store.ensure_from_baseline(anchor)
+    except Exception:  # noqa: BLE001
+        logger.exception("archive ensure_from_baseline failed for %s", ticker)
+        return anchor, None
+    return plan.to_baseline(), plan
+
+
+def _route_prior(
+    anchor: Baseline,
+    plan: ActivePlan | None,
+    *,
+    archive_store: StockArchiveStore,
+    current_price: float | None,
+    price_threshold_pct: float,
+) -> str:
+    delta = None
+    if plan is not None:
+        try:
+            delta = compute_plan_delta(
+                plan,
+                current_price=current_price,
+                price_hard_threshold_pct=price_threshold_pct,
+            )
+            archive_store.save_delta(delta)
+        except Exception:  # noqa: BLE001
+            logger.exception("archive delta failed for %s", plan.ticker)
+            delta = None
+        return build_archive_prior(plan, delta)
+    return build_prior_for_baseline(anchor)
 
 
 def _high_priority_alerts(watch_store: Any | None, ticker: str) -> bool:
@@ -143,6 +176,7 @@ def resolve_analysis_mode(
     fresh: bool = True,
     as_of: datetime | date | str | None = None,
     calibration_store: CalibrationStore | None = None,
+    archive_store: StockArchiveStore | None = None,
     watch_store: Any | None = None,
     current_price: float | None = None,
     fetch_price: bool = True,
@@ -164,6 +198,7 @@ def resolve_analysis_mode(
     mode_req = (analysis_mode or MODE_AUTO).strip().lower()
     src = (source or SOURCE_MANUAL).strip().lower() or SOURCE_MANUAL
     cal = calibration_store or default_calibration_store()
+    archives = archive_store or default_archive_store()
     when = as_of if as_of is not None else trade_date
 
     if not fresh:
@@ -175,10 +210,11 @@ def resolve_analysis_mode(
             reason="force" if force_full_reeval else "explicit_full",
         )
 
-    anchor = _resolve_anchor(
+    anchor, plan = _resolve_anchor(
         ticker,
         market,
         calibration_store=cal,
+        archive_store=archives,
         watch_store=watch_store,
         seed_from_history=seed_from_history,
     )
@@ -186,10 +222,17 @@ def resolve_analysis_mode(
     if mode_req == MODE_INCREMENTAL:
         if anchor is None:
             return AnalysisRouteDecision(mode=MODE_FULL, reason="no_anchor")
+        prior = _route_prior(
+            anchor,
+            plan,
+            archive_store=archives,
+            current_price=current_price,
+            price_threshold_pct=price_threshold_pct,
+        )
         return AnalysisRouteDecision(
             mode=MODE_INCREMENTAL,
             reason="explicit_incremental",
-            extra_past_context=build_calibration_prior(anchor),
+            extra_past_context=prior,
             anchor=anchor,
         )
 
@@ -249,7 +292,13 @@ def resolve_analysis_mode(
                 )
             # vote reuse with enough confidence → fall through to narrow path
 
-    prior = build_calibration_prior(anchor)
+    prior = _route_prior(
+        anchor,
+        plan,
+        archive_store=archives,
+        current_price=price,
+        price_threshold_pct=price_threshold_pct,
+    )
     if src == SOURCE_SCAN:
         return AnalysisRouteDecision(
             mode=MODE_SKIP,
@@ -304,3 +353,4 @@ def apply_route_to_job_fields(
         "analysis_mode": mode,
         "source": src,
     }
+

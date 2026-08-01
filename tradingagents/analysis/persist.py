@@ -1,4 +1,4 @@
-"""Persist / seed calibration anchors."""
+"""Persist / seed calibration anchors and per-ticker archive plans."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 from tradingagents.analysis.calibration import CalibrationStore, default_calibration_store
+from tradingagents.archive.store import StockArchiveStore, default_archive_store
 from tradingagents.watchlist.baseline import extract_baseline
 from tradingagents.watchlist.models import Baseline
 from tradingagents.watchlist.service import resolve_log_path
@@ -23,11 +24,13 @@ def save_calibration_from_state(
     price: float | None = None,
     log_path: str = "",
     store: CalibrationStore | None = None,
+    archive_store: StockArchiveStore | None = None,
 ) -> Baseline | None:
-    """Write a new calibration anchor from a completed full analysis state."""
+    """Write a new calibration anchor + archive active_plan from a full analysis."""
     if not state:
         return None
     cal = store or default_calibration_store()
+    archives = archive_store or default_archive_store()
     path = log_path or resolve_log_path(ticker, trade_date)
     try:
         if price is None:
@@ -47,6 +50,18 @@ def save_calibration_from_state(
             market=market,
         )
         cal.save(baseline)
+        try:
+            plan = archives.save_from_baseline(
+                baseline, source_mode="full_reeval", bump_version=True
+            )
+            logger.info(
+                "archive plan saved %s v%s stance=%s",
+                ticker,
+                plan.plan_version,
+                plan.stance,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("failed to save archive plan for %s", ticker)
         logger.info(
             "calibration saved %s %s (%s) stance=%s",
             ticker,

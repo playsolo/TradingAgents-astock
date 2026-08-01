@@ -398,7 +398,8 @@ class TradingAgentsGraph:
 
         # Initialize state only for fresh runs. Passing a new initial state to
         # LangGraph would start a new run and replay completed nodes.
-        past_context = self.memory_log.get_past_context(company_name)
+        # Same-ticker lessons only (product: no cross-ticker injection).
+        past_context = self.memory_log.get_past_context(company_name, n_cross=0)
         extra = (extra_past_context or "").strip()
         if extra:
             past_context = f"{extra}\n\n{past_context}".strip() if past_context else extra
