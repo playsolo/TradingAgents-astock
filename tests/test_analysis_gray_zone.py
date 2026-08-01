@@ -13,6 +13,7 @@ from tradingagents.analysis.gray_zone import (
     parse_gray_zone_response,
 )
 from tradingagents.analysis.mode_router import MODE_FULL, MODE_INCREMENTAL, resolve_analysis_mode
+from tradingagents.archive.store import StockArchiveStore
 from tradingagents.watchlist.models import Baseline
 
 
@@ -68,6 +69,7 @@ def test_gray_zone_without_llm_defaults_to_full(tmp_path):
         ticker="002648",
         trade_date="2026-07-14",
         calibration_store=store,
+        archive_store=StockArchiveStore(tmp_path / "archives"),
         current_price=104.0,
         as_of=date(2026, 7, 14),
         seed_from_history=False,
@@ -95,6 +97,7 @@ def test_gray_zone_llm_reuse_allows_incremental(tmp_path):
         ticker="002648",
         trade_date="2026-07-14",
         calibration_store=store,
+        archive_store=StockArchiveStore(tmp_path / "archives"),
         current_price=104.0,
         as_of=date(2026, 7, 14),
         seed_from_history=False,
@@ -118,6 +121,7 @@ def test_hard_price_move_still_bypasses_gray(tmp_path):
         ticker="002648",
         trade_date="2026-07-14",
         calibration_store=store,
+        archive_store=StockArchiveStore(tmp_path / "archives"),
         current_price=106.0,
         as_of=date(2026, 7, 14),
         seed_from_history=False,

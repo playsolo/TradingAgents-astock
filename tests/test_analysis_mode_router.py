@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 from tradingagents.analysis.calibration import CalibrationStore
 from tradingagents.analysis.mode_router import (
@@ -11,6 +12,8 @@ from tradingagents.analysis.mode_router import (
     AnalysisRouteDecision,
     resolve_analysis_mode,
 )
+from tradingagents.archive.models import ActivePlan
+from tradingagents.archive.store import StockArchiveStore
 from tradingagents.watchlist.models import Alert, Baseline, WatchItem
 from tradingagents.watchlist.store import WatchlistStore
 
@@ -34,10 +37,20 @@ def _baseline(**kwargs) -> Baseline:
     return Baseline(**data)
 
 
+def _archives(tmp_path: Path) -> StockArchiveStore:
+    return StockArchiveStore(tmp_path / "archives")
+
+
+def _resolve(tmp_path: Path, **kwargs):
+    kwargs.setdefault("archive_store", _archives(tmp_path))
+    return resolve_analysis_mode(**kwargs)
+
+
 def test_force_full_reeval_wins(tmp_path):
     store = CalibrationStore(tmp_path / "anchors.json")
     store.save(_baseline())
-    decision = resolve_analysis_mode(
+    decision = _resolve(
+        tmp_path,
         ticker="002648",
         trade_date="2026-07-14",
         force_full_reeval=True,
@@ -53,7 +66,8 @@ def test_force_full_reeval_wins(tmp_path):
 def test_explicit_full_mode(tmp_path):
     store = CalibrationStore(tmp_path / "anchors.json")
     store.save(_baseline())
-    decision = resolve_analysis_mode(
+    decision = _resolve(
+        tmp_path,
         ticker="002648",
         trade_date="2026-07-14",
         analysis_mode=MODE_FULL,
@@ -67,7 +81,8 @@ def test_explicit_full_mode(tmp_path):
 
 def test_no_anchor_defaults_to_full(tmp_path):
     store = CalibrationStore(tmp_path / "anchors.json")
-    decision = resolve_analysis_mode(
+    decision = _resolve(
+        tmp_path,
         ticker="002648",
         trade_date="2026-07-14",
         calibration_store=store,
@@ -81,11 +96,10 @@ def test_no_anchor_defaults_to_full(tmp_path):
 
 def test_stale_calibration_forces_full(tmp_path):
     store = CalibrationStore(tmp_path / "anchors.json")
-    # Fri 2026-07-10 → Tue 2026-07-14 = 2 trading days later? 
-    # Mon 13, Tue 14 → days since Fri 10: Mon=1, Tue=2. Need > 3 for stale with N=3.
     # Use older calibration: 2026-07-06 (Mon) → 2026-07-14 (Tue) = 6 trading days.
     store.save(_baseline(trade_date="2026-07-06"))
-    decision = resolve_analysis_mode(
+    decision = _resolve(
+        tmp_path,
         ticker="002648",
         trade_date="2026-07-14",
         calibration_store=store,
@@ -100,7 +114,8 @@ def test_stale_calibration_forces_full(tmp_path):
 def test_stop_loss_breach_forces_full(tmp_path):
     store = CalibrationStore(tmp_path / "anchors.json")
     store.save(_baseline(trade_date="2026-07-13", stop_loss=90.0))
-    decision = resolve_analysis_mode(
+    decision = _resolve(
+        tmp_path,
         ticker="002648",
         trade_date="2026-07-14",
         calibration_store=store,
@@ -114,7 +129,8 @@ def test_stop_loss_breach_forces_full(tmp_path):
 def test_large_price_move_forces_full(tmp_path):
     store = CalibrationStore(tmp_path / "anchors.json")
     store.save(_baseline(trade_date="2026-07-13", baseline_price=100.0))
-    decision = resolve_analysis_mode(
+    decision = _resolve(
+        tmp_path,
         ticker="002648",
         trade_date="2026-07-14",
         calibration_store=store,
@@ -144,7 +160,8 @@ def test_high_priority_watch_alert_forces_full(tmp_path):
             ],
         )
     )
-    decision = resolve_analysis_mode(
+    decision = _resolve(
+        tmp_path,
         ticker="002648",
         trade_date="2026-07-14",
         calibration_store=cal,
@@ -159,7 +176,8 @@ def test_high_priority_watch_alert_forces_full(tmp_path):
 def test_narrow_path_allows_pseudo_incremental(tmp_path):
     store = CalibrationStore(tmp_path / "anchors.json")
     store.save(_baseline(trade_date="2026-07-13"))
-    decision = resolve_analysis_mode(
+    decision = _resolve(
+        tmp_path,
         ticker="002648",
         trade_date="2026-07-14",
         calibration_store=store,
@@ -171,8 +189,45 @@ def test_narrow_path_allows_pseudo_incremental(tmp_path):
     )
     assert decision.mode == MODE_INCREMENTAL
     assert "原逻辑仍在" in decision.extra_past_context
-    assert "校准锚点" in decision.extra_past_context
+    assert "[档案计划" in decision.extra_past_context
+    assert "[自上次以来的变更" in decision.extra_past_context
     assert decision.updates_calibration is False
+    # Lazy migrate calibration → archive
+    assert _archives(tmp_path).get_active_plan("002648", "CN") is not None
+    assert _archives(tmp_path).get_delta("002648", "CN") is not None
+
+
+def test_archive_plan_preferred_over_calibration(tmp_path):
+    cal = CalibrationStore(tmp_path / "anchors.json")
+    cal.save(_baseline(trade_date="2026-07-13", stance="Hold", thesis_summary="校准旧逻辑"))
+    arch = _archives(tmp_path)
+    arch.save_active_plan(
+        ActivePlan.from_baseline(
+            _baseline(
+                trade_date="2026-07-13",
+                stance="Buy",
+                thesis_summary="档案新逻辑",
+            ),
+            invalidation="跌破止损",
+            plan_version=3,
+        )
+    )
+    decision = _resolve(
+        tmp_path,
+        ticker="002648",
+        trade_date="2026-07-14",
+        calibration_store=cal,
+        archive_store=arch,
+        current_price=101.0,
+        as_of=date(2026, 7, 14),
+        seed_from_history=False,
+    )
+    assert decision.mode == MODE_INCREMENTAL
+    assert decision.anchor is not None
+    assert decision.anchor.stance == "Buy"
+    assert "档案新逻辑" in decision.extra_past_context
+    assert "失效条件：跌破止损" in decision.extra_past_context
+    assert "校准旧逻辑" not in decision.extra_past_context
 
 
 def test_scan_source_skips_deep_analysis_on_narrow_path(tmp_path):
@@ -180,7 +235,8 @@ def test_scan_source_skips_deep_analysis_on_narrow_path(tmp_path):
 
     store = CalibrationStore(tmp_path / "anchors.json")
     store.save(_baseline(trade_date="2026-07-13"))
-    decision = resolve_analysis_mode(
+    decision = _resolve(
+        tmp_path,
         ticker="002648",
         trade_date="2026-07-14",
         source=SOURCE_SCAN,
@@ -198,8 +254,6 @@ def test_seed_from_history_when_no_anchor(tmp_path, monkeypatch):
     store = CalibrationStore(tmp_path / "anchors.json")
 
     def fake_seed(ticker, *, market="CN", store=None):
-        from tradingagents.watchlist.models import Baseline
-
         b = _baseline(trade_date="2026-07-13")
         (store or CalibrationStore(tmp_path / "anchors.json")).save(b)
         return b
@@ -208,7 +262,8 @@ def test_seed_from_history_when_no_anchor(tmp_path, monkeypatch):
         "tradingagents.analysis.persist.seed_calibration_from_history",
         fake_seed,
     )
-    decision = resolve_analysis_mode(
+    decision = _resolve(
+        tmp_path,
         ticker="002648",
         trade_date="2026-07-14",
         calibration_store=store,
@@ -231,7 +286,8 @@ def test_missing_price_defaults_to_full(tmp_path):
     """取价失败时保守全量，避免漏掉该翻盘。"""
     store = CalibrationStore(tmp_path / "anchors.json")
     store.save(_baseline(trade_date="2026-07-13"))
-    decision = resolve_analysis_mode(
+    decision = _resolve(
+        tmp_path,
         ticker="002648",
         trade_date="2026-07-14",
         calibration_store=store,
@@ -246,7 +302,8 @@ def test_missing_price_defaults_to_full(tmp_path):
 def test_resume_skips_routing_context(tmp_path):
     store = CalibrationStore(tmp_path / "anchors.json")
     store.save(_baseline())
-    decision = resolve_analysis_mode(
+    decision = _resolve(
+        tmp_path,
         ticker="002648",
         trade_date="2026-07-14",
         fresh=False,
@@ -264,7 +321,8 @@ def test_watchlist_baseline_used_when_calibration_missing(tmp_path):
     cal = CalibrationStore(tmp_path / "anchors.json")
     watch = WatchlistStore(tmp_path / "watch.json")
     watch.add(WatchItem(baseline=_baseline(trade_date="2026-07-13"), enabled=True))
-    decision = resolve_analysis_mode(
+    decision = _resolve(
+        tmp_path,
         ticker="002648",
         trade_date="2026-07-14",
         calibration_store=cal,
@@ -274,7 +332,7 @@ def test_watchlist_baseline_used_when_calibration_missing(tmp_path):
         seed_from_history=False,
     )
     assert decision.mode == MODE_INCREMENTAL
-    assert "校准锚点" in decision.extra_past_context
+    assert "[档案计划" in decision.extra_past_context
 
 
 def test_calibration_store_roundtrip(tmp_path):
@@ -287,6 +345,46 @@ def test_calibration_store_roundtrip(tmp_path):
     assert got.stop_loss == 90.0
     store.delete("002648", "CN")
     assert store.get("002648", "CN") is None
+
+
+def test_persist_full_reeval_writes_archive(tmp_path):
+    from tradingagents.analysis.persist import save_calibration_from_state
+
+    cal = CalibrationStore(tmp_path / "anchors.json")
+    arch = _archives(tmp_path)
+    state = {
+        "final_trade_decision": "Rating: Buy\n入场价：10.5\n止损：9.0\n逻辑仍成立",
+        "trader_investment_decision": "建议仓位: 15%\nEntry Price: 10.5\nStop Loss: 9.0",
+        "investment_plan": "继续看好",
+    }
+    baseline = save_calibration_from_state(
+        state,
+        ticker="002648",
+        trade_date="2026-07-14",
+        market="CN",
+        price=10.8,
+        log_path="/tmp/y.json",
+        store=cal,
+        archive_store=arch,
+    )
+    assert baseline is not None
+    plan = arch.get_active_plan("002648", "CN")
+    assert plan is not None
+    assert plan.plan_version == 1
+    again = save_calibration_from_state(
+        state,
+        ticker="002648",
+        trade_date="2026-07-15",
+        market="CN",
+        price=11.0,
+        log_path="/tmp/z.json",
+        store=cal,
+        archive_store=arch,
+    )
+    assert again is not None
+    plan2 = arch.get_active_plan("002648", "CN")
+    assert plan2 is not None
+    assert plan2.plan_version == 2
 
 
 def test_job_roundtrip_preserves_mode_fields():
