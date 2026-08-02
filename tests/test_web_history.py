@@ -72,6 +72,51 @@ def test_get_history_sorted_by_completion_mtime_desc(tmp_path, monkeypatch):
 
     assert [e["ticker"] for e in entries] == ["000001", "600000"]
     assert [e["date"] for e in entries] == ["2026-06-01", "2026-07-14"]
+    assert "analyzed_at" in entries[0]
+
+
+def test_list_ticker_analysis_timeline_chronological(tmp_path, monkeypatch):
+    logs = tmp_path / "logs"
+    monkeypatch.setattr(history, "_results_dir", lambda: logs)
+    base = logs / "002648" / "TradingAgentsStrategy_logs"
+    base.mkdir(parents=True)
+    p1 = base / "full_states_log_2026-07-01.json"
+    p2 = base / "full_states_log_2026-07-10.json"
+    p1.write_text(json.dumps({"final_trade_decision": "Rating: Hold"}), encoding="utf-8")
+    p2.write_text(json.dumps({"final_trade_decision": "Rating: Buy"}), encoding="utf-8")
+    os.utime(p1, (1_700_000_000, 1_700_000_000))
+    os.utime(p2, (1_800_000_000, 1_800_000_000))
+
+    timeline = history.list_ticker_analysis_timeline("002648")
+    assert [e["date"] for e in timeline] == ["2026-07-01", "2026-07-10"]
+    assert timeline[-1]["signal"] in {"Buy", "Hold"}  # lazy extract
+
+
+def test_analysis_timeline_html_marks_current():
+    from web.components.report_viewer import analysis_timeline_html
+
+    html = analysis_timeline_html(
+        [
+            {
+                "date": "2026-07-01",
+                "signal": "Hold",
+                "analyzed_at": "2026-07-01 15:00",
+                "path": "/a.json",
+            },
+            {
+                "date": "2026-07-10",
+                "signal": "Buy",
+                "analyzed_at": "2026-07-10 16:00",
+                "path": "/b.json",
+            },
+        ],
+        current_date="2026-07-10",
+        current_path="/b.json",
+    )
+    assert "分析时间线" in html
+    assert "当前" in html
+    assert "买入" in html
+    assert "持有" in html
 
 
 def test_history_stamp_tracks_count_and_mtime(tmp_path, monkeypatch):

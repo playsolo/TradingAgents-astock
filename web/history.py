@@ -149,9 +149,10 @@ def get_history() -> list[dict[str, Any]]:
     """Scan saved analysis logs and return a sorted list (newest first).
 
     Sorted by analysis completion time (log file mtime), not trade date.
-    Each entry: {"ticker": "300750", "date": "2026-05-12", "path": "/abs/path/...json",
-                  "signal": "Buy" | "Sell" | "Hold" | "N/A"}
+    Each entry: {"ticker", "date", "path", "signal", "analyzed_at", "mtime"}
     """
+    from datetime import datetime
+
     root = _results_dir()
     if not root.exists():
         return []
@@ -168,6 +169,7 @@ def get_history() -> list[dict[str, Any]]:
         date = match.group(1)
         ticker = log_file.parent.parent.name
         signal = _lazy_signal(str(log_file))
+        analyzed_at = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
         entries.append(
             (
                 mtime,
@@ -176,12 +178,33 @@ def get_history() -> list[dict[str, Any]]:
                     "date": date,
                     "path": str(log_file),
                     "signal": signal,
+                    "analyzed_at": analyzed_at,
+                    "mtime": mtime,
                 },
             )
         )
 
     entries.sort(key=lambda item: item[0], reverse=True)
     return [entry for _, entry in entries]
+
+
+def list_ticker_analysis_timeline(
+    ticker: str,
+    *,
+    limit: int = 12,
+) -> list[dict[str, Any]]:
+    """Same-ticker analyses oldest→newest for report timeline (cap ``limit``).
+
+    Each item: ticker, date, path, signal, analyzed_at, mtime.
+    """
+    rows = filter_history_by_ticker(get_history(), ticker)
+    if not rows:
+        return []
+    # get_history is newest-first; timeline reads left→right old→new
+    chronological = list(reversed(rows))
+    if limit > 0 and len(chronological) > limit:
+        chronological = chronological[-limit:]
+    return chronological
 
 
 def filter_history_by_ticker(

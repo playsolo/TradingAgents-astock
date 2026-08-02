@@ -154,3 +154,35 @@ class PlanDelta:
             recommend_mode=str(data.get("recommend_mode") or ""),
             computed_at=str(data.get("computed_at") or ""),
         )
+
+
+@dataclass
+class Lesson:
+    """Resolved same-ticker decision + outcome reflection (append-only)."""
+
+    ticker: str
+    trade_date: str
+    market: str
+    rating: str
+    raw_return: float
+    alpha_return: float
+    holding_days: int
+    reflection: str
+    resolved_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Lesson:
+        return cls(
+            ticker=str(data.get("ticker", "")).upper(),
+            trade_date=str(data.get("trade_date", "")),
+            market=str(data.get("market", "CN")).upper(),
+            rating=str(data.get("rating") or "Hold"),
+            raw_return=float(data.get("raw_return") or 0.0),
+            alpha_return=float(data.get("alpha_return") or 0.0),
+            holding_days=int(data.get("holding_days") or 0),
+            reflection=str(data.get("reflection") or "").strip(),
+            resolved_at=str(data.get("resolved_at") or ""),
+        )

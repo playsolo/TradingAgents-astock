@@ -161,6 +161,19 @@ class TradingMemoryLog:
         tmp_path = self._log_path.with_suffix(".tmp")
         tmp_path.write_text(new_text, encoding="utf-8")
         tmp_path.replace(self._log_path)
+        self._mirror_archive_lessons(
+            [
+                {
+                    "ticker": ticker,
+                    "trade_date": trade_date,
+                    "rating": rating,
+                    "raw_return": raw_return,
+                    "alpha_return": alpha_return,
+                    "holding_days": holding_days,
+                    "reflection": reflection,
+                }
+            ]
+        )
 
     def batch_update_with_outcomes(self, updates: List[dict]) -> None:
         """Apply multiple outcome updates in a single read + atomic write.
@@ -176,6 +189,7 @@ class TradingMemoryLog:
 
         # Build lookup keyed by (trade_date, ticker) for O(1) dispatch
         update_map = {(u["trade_date"], u["ticker"]): u for u in updates}
+        applied: List[dict] = []
 
         new_blocks = []
         for block in blocks:
@@ -203,6 +217,17 @@ class TradingMemoryLog:
                     new_blocks.append(
                         f"{new_tag}\n\n{rest.lstrip()}\n\nREFLECTION:\n{upd['reflection']}"
                     )
+                    applied.append(
+                        {
+                            "ticker": ticker,
+                            "trade_date": trade_date,
+                            "rating": rating,
+                            "raw_return": upd["raw_return"],
+                            "alpha_return": upd["alpha_return"],
+                            "holding_days": upd["holding_days"],
+                            "reflection": upd["reflection"],
+                        }
+                    )
                     del update_map[(trade_date, ticker)]
                     matched = True
                     break
@@ -215,8 +240,20 @@ class TradingMemoryLog:
         tmp_path = self._log_path.with_suffix(".tmp")
         tmp_path.write_text(new_text, encoding="utf-8")
         tmp_path.replace(self._log_path)
+        self._mirror_archive_lessons(applied)
 
     # --- Helpers ---
+
+    def _mirror_archive_lessons(self, applied: List[dict]) -> None:
+        """Best-effort mirror of resolved outcomes into per-ticker lessons.jsonl."""
+        if not applied:
+            return
+        try:
+            from tradingagents.archive.lessons import record_lessons
+
+            record_lessons(applied)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _apply_rotation(self, blocks: List[str]) -> List[str]:
         """Drop oldest resolved blocks when their count exceeds max_entries.

@@ -566,6 +566,151 @@ def _render_section_repair(
             st.code(detail, language="text")
 
 
+def _timeline_rating_meta(signal: str) -> tuple[str, str]:
+    """Return (color, Chinese label) for timeline chips."""
+    return _signal_style(signal or "Hold")
+
+
+def analysis_timeline_html(
+    items: list[dict[str, Any]],
+    *,
+    current_date: str,
+    current_path: str | None = None,
+) -> str:
+    """Horizontal timeline: analysis time + rating (oldest → newest)."""
+    if not items:
+        return ""
+    nodes: list[str] = []
+    for idx, item in enumerate(items):
+        date = str(item.get("date") or "")
+        signal = str(item.get("signal") or "N/A")
+        analyzed_at = str(item.get("analyzed_at") or date)
+        path = str(item.get("path") or "")
+        color, cn = _timeline_rating_meta(signal)
+        is_current = bool(
+            (current_path and path and path == current_path)
+            or (not current_path and date == str(current_date))
+        )
+        border = "2px solid #fff" if is_current else f"2px solid {color}88"
+        bg = "#1f2937" if is_current else "#111827"
+        glow = f"box-shadow:0 0 0 2px {color}55;" if is_current else ""
+        label = html.escape(("当前 · " if is_current else "") + cn)
+        node = (
+            '<div style="flex:0 0 auto;text-align:center;min-width:96px;max-width:120px;">'
+            f'<div style="width:14px;height:14px;border-radius:50%;background:{color};'
+            f'border:{border};margin:0 auto 8px;{glow}"></div>'
+            f'<div style="font-size:0.72rem;color:#9ca3af;line-height:1.2;">'
+            f'{html.escape(analyzed_at)}</div>'
+            f'<div style="margin-top:4px;font-size:0.78rem;font-weight:700;color:{color};'
+            f'background:{bg};padding:2px 8px;border-radius:999px;'
+            f'border:1px solid {color}66;display:inline-block;">{label}</div>'
+            f'<div style="font-size:0.65rem;color:#6b7280;margin-top:2px;">'
+            f'{html.escape(date)}</div></div>'
+        )
+        nodes.append(node)
+        if idx < len(items) - 1:
+            nodes.append(
+                '<div style="flex:1 1 24px;height:2px;background:#374151;'
+                'margin:6px 4px 0;min-width:16px;align-self:flex-start;"></div>'
+            )
+    body = "".join(nodes)
+    return (
+        '<div style="margin:0 0 1rem;padding:0.9rem 1rem;border-radius:12px;'
+        'background:linear-gradient(180deg,#0f172a 0%,#111827 100%);'
+        'border:1px solid #334155;">'
+        '<div style="font-size:0.75rem;color:#94a3b8;letter-spacing:1px;'
+        'margin-bottom:0.7rem;">分析时间线 · 时间与评级</div>'
+        '<div style="display:flex;align-items:flex-start;overflow-x:auto;'
+        f'padding-bottom:4px;">{body}</div></div>'
+    )
+
+def _render_analysis_timeline(
+    ticker: str,
+    trade_date: str,
+    *,
+    log_path: str | None = None,
+    final_state: dict[str, Any] | None = None,
+    signal: str | None = None,
+) -> None:
+    """Show same-ticker history timeline above the signal card."""
+    try:
+        from web.history import list_ticker_analysis_timeline
+        from web.navigation import navigate
+    except Exception:  # noqa: BLE001
+        return
+
+    items = list_ticker_analysis_timeline(ticker, limit=12)
+    # Ensure the report being viewed appears even if history scan missed it.
+    current_path = str(log_path or "")
+    if not any(
+        str(i.get("path") or "") == current_path
+        or (not current_path and str(i.get("date")) == str(trade_date))
+        for i in items
+    ):
+        clock = ""
+        if final_state:
+            raw_clock = str(final_state.get("analysis_clock") or "")
+            if raw_clock:
+                try:
+                    from datetime import datetime as _dt
+
+                    clock = _dt.fromisoformat(raw_clock).strftime("%Y-%m-%d %H:%M")
+                except (ValueError, TypeError):
+                    clock = raw_clock[:16]
+        items = list(items) + [
+            {
+                "ticker": ticker,
+                "date": trade_date,
+                "path": current_path,
+                "signal": signal or "Hold",
+                "analyzed_at": clock or str(trade_date),
+                "mtime": 0,
+            }
+        ]
+        items = items[-12:]
+
+    if not items:
+        return
+
+    st.markdown(
+        analysis_timeline_html(
+            items, current_date=str(trade_date), current_path=current_path or None
+        ),
+        unsafe_allow_html=True,
+    )
+
+    # Clickable chips to jump between historical reports for this ticker.
+    others = [
+        i
+        for i in items
+        if str(i.get("path") or "")
+        and str(i.get("path")) != current_path
+        and str(i.get("date")) != str(trade_date)
+    ]
+    if not others:
+        return
+    # Show newest-first shortcuts (cap to keep UI tight)
+    others = list(reversed(others))[:8]
+    cols = st.columns(len(others))
+    for col, item in zip(cols, others):
+        date = str(item.get("date") or "")
+        sig = str(item.get("signal") or "Hold")
+        _, cn = _timeline_rating_meta(sig)
+        label = f"{date} {cn}"
+        with col:
+            if st.button(
+                label,
+                key=f"timeline_nav_{ticker}_{date}_{item.get('path')}",
+                use_container_width=True,
+            ):
+                navigate(
+                    "history",
+                    ticker=str(item.get("ticker") or ticker),
+                    date=date,
+                    path=str(item.get("path") or None),
+                )
+
+
 def render_report(
     final_state: dict[str, Any],
     ticker: str,
@@ -579,6 +724,14 @@ def render_report(
     """Render the full analysis report."""
 
     ticker_label = stock_display_label(ticker, final_state)
+
+    _render_analysis_timeline(
+        ticker,
+        trade_date,
+        log_path=log_path,
+        final_state=final_state,
+        signal=signal,
+    )
 
     # Provenance is read from ``final_state`` (persisted at run-time) so
     # historical reports keep showing the model that *did* the work even

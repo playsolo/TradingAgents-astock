@@ -7,7 +7,7 @@ import os
 import threading
 from pathlib import Path
 
-from tradingagents.archive.models import ActivePlan, PlanDelta
+from tradingagents.archive.models import ActivePlan, Lesson, PlanDelta
 from tradingagents.watchlist.models import Baseline
 
 _LOCK = threading.RLock()
@@ -142,6 +142,80 @@ class StockArchiveStore:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(delta.to_dict(), f, ensure_ascii=False, indent=2)
             tmp.replace(path)
+
+    def append_lesson(self, lesson: Lesson, *, max_lessons: int = 20) -> Lesson:
+        """Append a resolved lesson; keep the newest ``max_lessons`` rows."""
+        d = self.dir_for(lesson.ticker, lesson.market)
+        path = d / "lessons.jsonl"
+        with _LOCK:
+            d.mkdir(parents=True, exist_ok=True)
+            existing: list[dict] = []
+            if path.exists():
+                try:
+                    for line in path.read_text(encoding="utf-8").splitlines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            row = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if isinstance(row, dict):
+                            existing.append(row)
+                except OSError:
+                    existing = []
+            # Idempotent: same trade_date + rating + holding replaces prior row
+            key = (lesson.trade_date, lesson.rating, lesson.holding_days)
+            existing = [
+                r
+                for r in existing
+                if (
+                    str(r.get("trade_date")),
+                    str(r.get("rating")),
+                    int(r.get("holding_days") or 0),
+                )
+                != key
+            ]
+            existing.append(lesson.to_dict())
+            if max_lessons > 0 and len(existing) > max_lessons:
+                existing = existing[-max_lessons:]
+            tmp = path.with_suffix(".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                for row in existing:
+                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            tmp.replace(path)
+        return lesson
+
+    def list_lessons(
+        self, ticker: str, market: str = "CN", *, limit: int = 5
+    ) -> list[Lesson]:
+        """Newest-first lessons for the ticker (same-ticker only)."""
+        path = self.dir_for(ticker, market) / "lessons.jsonl"
+        rows: list[Lesson] = []
+        with _LOCK:
+            if not path.exists():
+                return []
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                return []
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(data, dict):
+                continue
+            try:
+                rows.append(Lesson.from_dict(data))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if limit > 0 and len(rows) >= limit:
+                break
+        return rows
 
     def void_plan(self, ticker: str, market: str = "CN", reason: str = "") -> bool:
         plan = self.get_active_plan(ticker, market)

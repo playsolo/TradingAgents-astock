@@ -137,7 +137,12 @@ def _route_prior(
         except Exception:  # noqa: BLE001
             logger.exception("archive delta failed for %s", plan.ticker)
             delta = None
-        return build_archive_prior(plan, delta)
+        lessons = []
+        try:
+            lessons = archive_store.list_lessons(plan.ticker, plan.market, limit=5)
+        except Exception:  # noqa: BLE001
+            logger.exception("archive list_lessons failed for %s", plan.ticker)
+        return build_archive_prior(plan, delta, lessons=lessons or None)
     return build_prior_for_baseline(anchor)
 
 

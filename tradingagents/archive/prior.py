@@ -1,17 +1,37 @@
-"""Build PM-facing prior text from archive plan + delta (same-ticker only)."""
+"""Build PM-facing prior text from archive plan + delta + same-ticker lessons."""
 
 from __future__ import annotations
 
-from tradingagents.archive.models import ActivePlan, PlanDelta
+from tradingagents.archive.models import ActivePlan, Lesson, PlanDelta
 from tradingagents.watchlist.models import Baseline
 from tradingagents.watchlist.service import prior_context_from_baseline
+
+
+def _format_lessons(lessons: list[Lesson]) -> str:
+    lines = ["[同票已结算教训]"]
+    for lesson in lessons:
+        raw = f"{lesson.raw_return:+.1%}"
+        alpha = f"{lesson.alpha_return:+.1%}"
+        head = (
+            f"- {lesson.trade_date} | {lesson.rating} | "
+            f"raw {raw} / alpha {alpha} | {lesson.holding_days}d"
+        )
+        lines.append(head)
+        if lesson.reflection:
+            # Keep prompt compact — first 280 chars of reflection
+            ref = lesson.reflection.replace("\n", " ").strip()
+            if len(ref) > 280:
+                ref = ref[:280] + "…"
+            lines.append(f"  反思：{ref}")
+    return "\n".join(lines)
 
 
 def build_archive_prior(
     plan: ActivePlan,
     delta: PlanDelta | None = None,
+    lessons: list[Lesson] | None = None,
 ) -> str:
-    """Compact prior: [档案计划] + optional [自上次以来的变更]. No cross-ticker lessons."""
+    """Compact prior: plan + delta + same-ticker lessons. No cross-ticker."""
     parts: list[str] = []
     header = (
         f"[档案计划 | {plan.ticker} | 分析日 {plan.trade_date} | 立场 {plan.stance}"
@@ -50,6 +70,9 @@ def build_archive_prior(
         if delta.risk_flags:
             dlines.append("风险标记：" + "；".join(delta.risk_flags))
         parts.append("\n".join(dlines))
+
+    if lessons:
+        parts.append(_format_lessons(lessons))
 
     parts.append(
         "请在以上档案计划与变更上做增量再评估，说明结论是否仍成立及需修正之处。"
