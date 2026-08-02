@@ -689,8 +689,8 @@ def _render_analysis_timeline(
     ]
     if not others:
         return
-    # Show newest-first shortcuts (cap to keep UI tight)
-    others = list(reversed(others))[:8]
+    # Same chronological order as the timeline strip (oldest → newest).
+    others = others[-8:]
     cols = st.columns(len(others))
     for col, item in zip(cols, others):
         date = str(item.get("date") or "")
