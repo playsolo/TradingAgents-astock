@@ -99,3 +99,77 @@ def test_save_delta_roundtrip(tmp_path):
     assert loaded is not None
     assert loaded.vs_plan_version == 1
     assert loaded.current_price == 101.0
+
+
+def test_append_and_list_lessons_newest_first(tmp_path):
+    from tradingagents.archive.models import Lesson
+
+    store = StockArchiveStore(tmp_path / "archives")
+    for i, date in enumerate(("2026-07-01", "2026-07-08", "2026-07-15")):
+        store.append_lesson(
+            Lesson(
+                ticker="002648",
+                trade_date=date,
+                market="CN",
+                rating="Hold" if i == 0 else "Buy",
+                raw_return=0.01 * (i + 1),
+                alpha_return=0.005,
+                holding_days=5,
+                reflection=f"lesson-{date}",
+            )
+        )
+    rows = store.list_lessons("002648", "CN", limit=2)
+    assert [r.trade_date for r in rows] == ["2026-07-15", "2026-07-08"]
+    assert "lesson-2026-07-15" in rows[0].reflection
+
+
+def test_memory_update_mirrors_archive_lesson(tmp_path, monkeypatch):
+    from tradingagents.agents.utils.memory import TradingMemoryLog
+    from tradingagents.archive import lessons as lessons_mod
+    from tradingagents.archive.store import StockArchiveStore
+
+    mem_path = tmp_path / "trading_memory.md"
+    arch = StockArchiveStore(tmp_path / "archives")
+    log = TradingMemoryLog(
+        {"memory_log_path": str(mem_path), "memory_log_max_entries": None}
+    )
+    log.store_decision("002648", "2026-07-13", "Rating: Buy\n继续持有")
+
+    monkeypatch.setattr(lessons_mod, "default_archive_store", lambda: arch)
+
+    log.update_with_outcome(
+        "002648",
+        "2026-07-13",
+        raw_return=0.03,
+        alpha_return=0.01,
+        holding_days=5,
+        reflection="止盈过早",
+    )
+
+    rows = arch.list_lessons("002648", "CN", limit=5)
+    assert len(rows) == 1
+    assert rows[0].rating == "Buy"
+    assert "止盈过早" in rows[0].reflection
+
+
+def test_archive_prior_includes_same_ticker_lessons():
+    from tradingagents.archive.models import Lesson
+    from tradingagents.archive.prior import build_archive_prior
+
+    plan = ActivePlan.from_baseline(_baseline())
+    lessons = [
+        Lesson(
+            ticker="002648",
+            trade_date="2026-07-01",
+            market="CN",
+            rating="Buy",
+            raw_return=-0.05,
+            alpha_return=-0.02,
+            holding_days=5,
+            reflection="追高回落",
+        )
+    ]
+    text = build_archive_prior(plan, lessons=lessons)
+    assert "[同票已结算教训]" in text
+    assert "追高回落" in text
+    assert "跨票" in text
