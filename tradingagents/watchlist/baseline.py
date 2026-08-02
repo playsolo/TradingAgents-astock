@@ -76,7 +76,12 @@ def extract_baseline(
     )
     plan = _strip_think(str(state.get("investment_plan") or ""))
 
-    stance = parse_rating(pm or plan or trader, default="Hold")
+    # Prefer structured action_plan.rating (post continuity clamp) over prose.
+    ap = state.get("action_plan")
+    ap_rating = None
+    if isinstance(ap, dict) and ap.get("rating"):
+        ap_rating = str(ap.get("rating"))
+    stance = parse_rating(ap_rating or pm or plan or trader, default="Hold")
     position = parse_position_pct(trader) or parse_position_pct(plan) or parse_position_pct(pm)
 
     horizon_raw, valid_days = _horizon_from_state(state)
