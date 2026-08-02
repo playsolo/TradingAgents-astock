@@ -331,6 +331,31 @@ def _finalize_us_run(
     serialized = serialize_final_state(final_state)
     action_plan = _ensure_us_action_plan(serialized, config, tracker)
 
+    # A+B stance continuity (same gate as A-share finalize_graph_run).
+    try:
+        from tradingagents.archive.continuity import apply_stance_continuity_to_state
+
+        # Keep tracker + serialized views aligned for logging / UI.
+        target = tracker.final_state if isinstance(tracker.final_state, dict) else serialized
+        if isinstance(tracker.final_state, dict) and action_plan:
+            tracker.final_state["action_plan"] = action_plan
+        apply_stance_continuity_to_state(target, ticker=ticker, market="US")
+        if isinstance(tracker.final_state, dict):
+            for key in ("action_plan", "final_trade_decision", "stance_continuity"):
+                if key in tracker.final_state:
+                    serialized[key] = tracker.final_state[key]
+            if tracker.final_state.get("action_plan"):
+                action_plan = tracker.final_state["action_plan"]
+                from tradingagents.agents.utils.action_plan import (
+                    rating_to_sidebar_signal,
+                )
+
+                rating = action_plan.get("rating")
+                if rating:
+                    tracker.signal = rating_to_sidebar_signal(rating)
+    except Exception:
+        traceback.print_exc()
+
     safe_ticker = safe_ticker_component(ticker)
     results_dir = config.get("results_dir") or str(
         Path.home() / ".tradingagents" / "logs"
@@ -365,6 +390,9 @@ def _finalize_us_run(
     }
     if action_plan:
         log_entry["action_plan"] = action_plan
+    sc = serialized.get("stance_continuity")
+    if isinstance(sc, dict):
+        log_entry["stance_continuity"] = sc
 
     # Keep the live tracker in sync with disk for the signal-card line.
     if isinstance(tracker.final_state, dict):

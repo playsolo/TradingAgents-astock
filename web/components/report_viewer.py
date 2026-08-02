@@ -711,6 +711,63 @@ def _render_analysis_timeline(
                 )
 
 
+def stance_continuity_html(meta: dict[str, Any]) -> str:
+    """D: prior vs proposed/final stance + delta + clamp/flip note."""
+    if not meta:
+        return ""
+    prior = str(meta.get("prior_stance") or "—")
+    proposed = str(meta.get("proposed_stance") or "—")
+    final = str(meta.get("final_stance") or "—")
+    action = str(meta.get("action") or "")
+    note = str(meta.get("note") or "")
+    reasons = meta.get("material_reasons") or []
+    snap = meta.get("delta_snapshot") or {}
+    action_cn = {
+        "kept": "维持",
+        "adjusted": "邻近微调",
+        "flipped": "已改档",
+        "clamped": "已拦截越级翻转",
+        "no_prior": "无档案锚点",
+    }.get(action, action)
+    border = "#f97316" if action == "clamped" else "#334155"
+    accent = "#f97316" if action == "clamped" else "#94a3b8"
+    delta_bits = []
+    if snap.get("current_price") is not None:
+        delta_bits.append(f"现价 {snap['current_price']:g}")
+    if snap.get("price_move_pct") is not None:
+        delta_bits.append(f"相对基准 {float(snap['price_move_pct']):.2f}%")
+    if snap.get("vs_stop") and snap.get("vs_stop") != "unknown":
+        delta_bits.append(f"止损 {snap['vs_stop']}")
+    if reasons:
+        delta_bits.append("重大变化：" + "；".join(str(r) for r in reasons))
+    delta_line = " · ".join(delta_bits) if delta_bits else "无明显价格/止损变化"
+    return (
+        f'<div style="margin:0 0 1rem;padding:0.75rem 1rem;border-radius:10px;'
+        f'background:#0b1220;border:1px solid {border};">'
+        f'<div style="font-size:0.75rem;color:{accent};letter-spacing:1px;'
+        f'margin-bottom:0.35rem;">立场连续性 · {html.escape(action_cn)}</div>'
+        f'<div style="font-size:0.9rem;color:#e5e7eb;">'
+        f"档案 {html.escape(prior)} → 本轮提议 {html.escape(proposed)}"
+        f" → 最终 {html.escape(final)}</div>"
+        f'<div style="font-size:0.78rem;color:#9ca3af;margin-top:0.35rem;">'
+        f"{html.escape(delta_line)}</div>"
+        + (
+            f'<div style="font-size:0.78rem;color:#fdba74;margin-top:0.35rem;">'
+            f"{html.escape(note)}</div>"
+            if note
+            else ""
+        )
+        + "</div>"
+    )
+
+
+def _render_stance_continuity(final_state: dict[str, Any] | None) -> None:
+    meta = (final_state or {}).get("stance_continuity")
+    if not isinstance(meta, dict) or not meta:
+        return
+    st.markdown(stance_continuity_html(meta), unsafe_allow_html=True)
+
+
 def render_report(
     final_state: dict[str, Any],
     ticker: str,
@@ -732,6 +789,8 @@ def render_report(
         final_state=final_state,
         signal=signal,
     )
+
+    _render_stance_continuity(final_state)
 
     # Provenance is read from ``final_state`` (persisted at run-time) so
     # historical reports keep showing the model that *did* the work even

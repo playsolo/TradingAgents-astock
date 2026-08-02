@@ -440,6 +440,19 @@ class TradingAgentsGraph:
             logger.exception("Action plan extract raised; continuing without it")
             plan = None
 
+        # A+B: clamp unjustified stance flips vs archive plan before persist.
+        try:
+            from tradingagents.archive.continuity import apply_stance_continuity_to_state
+            from tradingagents.archive.lessons import infer_market
+
+            apply_stance_continuity_to_state(
+                final_state,
+                ticker=str(company_name),
+                market=infer_market(str(company_name)),
+            )
+        except Exception:
+            logger.exception("Stance continuity gate failed; keeping raw PM decision")
+
         # Log state to disk.
         self._log_state(trade_date, final_state)
 
@@ -557,6 +570,10 @@ class TradingAgentsGraph:
         if final_state.get("action_plan"):
             self.log_states_dict[str(trade_date)]["action_plan"] = final_state[
                 "action_plan"
+            ]
+        if final_state.get("stance_continuity"):
+            self.log_states_dict[str(trade_date)]["stance_continuity"] = final_state[
+                "stance_continuity"
             ]
 
         # Save to file. Reject ticker values that would escape the
