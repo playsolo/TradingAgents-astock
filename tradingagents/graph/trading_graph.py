@@ -449,6 +449,7 @@ class TradingAgentsGraph:
                 final_state,
                 ticker=str(company_name),
                 market=infer_market(str(company_name)),
+                trade_date=str(trade_date),
             )
         except Exception:
             logger.exception("Stance continuity gate failed; keeping raw PM decision")
