@@ -339,7 +339,9 @@ def _finalize_us_run(
         target = tracker.final_state if isinstance(tracker.final_state, dict) else serialized
         if isinstance(tracker.final_state, dict) and action_plan:
             tracker.final_state["action_plan"] = action_plan
-        apply_stance_continuity_to_state(target, ticker=ticker, market="US")
+        apply_stance_continuity_to_state(
+            target, ticker=ticker, market="US", trade_date=str(trade_date)
+        )
         if isinstance(tracker.final_state, dict):
             for key in ("action_plan", "final_trade_decision", "stance_continuity"):
                 if key in tracker.final_state:

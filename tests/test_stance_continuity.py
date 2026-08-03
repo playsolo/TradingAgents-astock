@@ -47,17 +47,33 @@ def test_adjacent_adjust_allowed_without_material():
 
 
 def test_be_style_flip_clamped_without_material():
-    """Same price / no stop breach: Overweight → Sell must be clamped."""
+    """Same session / tiny move: Overweight → Sell must be clamped."""
     r = resolve_stance_continuity(
         prior_stance="Overweight",
         proposed_stance="Sell",
         delta=_delta(price_move_pct=0.2, vs_stop="ok"),
+        plan_trade_date="2026-07-31",
+        analysis_trade_date="2026-07-31",
     )
     assert r.action == "clamped"
     assert r.final_stance == "Overweight"
     assert r.proposed_stance == "Sell"
     assert r.flip_allowed is False
     assert "拦截" in r.note
+
+
+def test_new_trading_day_allows_large_flip_even_if_price_flat():
+    """User rule: new bar/session unlocks reversal; lock only when data unchanged."""
+    r = resolve_stance_continuity(
+        prior_stance="Buy",
+        proposed_stance="Underweight",
+        delta=_delta(price_move_pct=0.3, vs_stop="ok"),
+        plan_trade_date="2026-08-01",
+        analysis_trade_date="2026-08-03",
+    )
+    assert r.action == "flipped"
+    assert r.final_stance == "Underweight"
+    assert any("新交易日" in x for x in r.material_reasons)
 
 
 def test_stop_breach_allows_large_flip():
@@ -121,6 +137,7 @@ def test_apply_mutates_state_and_persists_meta(tmp_path):
         market="US",
         archive_store=store,
         current_price=201.56,
+        trade_date="2026-07-31",
     )
     assert result.action == "clamped"
     assert state["action_plan"]["rating"] == "Overweight"

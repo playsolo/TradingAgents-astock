@@ -76,9 +76,21 @@ def material_change_reasons(
     *,
     route_reason: str | None = None,
     price_hard_threshold_pct: float = 5.0,
+    plan_trade_date: str | None = None,
+    analysis_trade_date: str | None = None,
 ) -> list[str]:
-    """Return human-readable reasons that unlock large stance flips."""
+    """Return human-readable reasons that unlock large stance flips.
+
+    Continuity lock applies only when data is effectively unchanged.
+    A newer analysis/trade date than the archive plan is treated as material
+    (new session / new bar), even if price fetch failed.
+    """
     reasons: list[str] = []
+    plan_d = str(plan_trade_date or "").strip()[:10]
+    analysis_d = str(analysis_trade_date or "").strip()[:10]
+    if plan_d and analysis_d and analysis_d > plan_d:
+        reasons.append(f"新交易日 {plan_d}→{analysis_d}")
+
     if delta is not None:
         if delta.vs_stop == "breached":
             reasons.append("止损已破")
@@ -118,6 +130,8 @@ def resolve_stance_continuity(
     route_reason: str | None = None,
     price_hard_threshold_pct: float = 5.0,
     max_step_without_material: int = MAX_STEP_WITHOUT_MATERIAL,
+    plan_trade_date: str | None = None,
+    analysis_trade_date: str | None = None,
 ) -> StanceContinuityResult:
     """Decide final stance vs archive prior (A+B)."""
     proposed = normalize_stance(proposed_stance)
@@ -139,6 +153,8 @@ def resolve_stance_continuity(
         delta,
         route_reason=route_reason,
         price_hard_threshold_pct=price_hard_threshold_pct,
+        plan_trade_date=plan_trade_date,
+        analysis_trade_date=analysis_trade_date,
     )
     flip_allowed = bool(reasons) or dist <= max(0, int(max_step_without_material))
 
@@ -222,11 +238,15 @@ def apply_stance_continuity_to_state(
     current_price: float | None = None,
     route_reason: str | None = None,
     price_hard_threshold_pct: float = 5.0,
+    trade_date: str | None = None,
 ) -> StanceContinuityResult:
     """Load archive plan, resolve continuity, mutate final_state in place."""
     t = (ticker or str(final_state.get("company_of_interest") or "")).strip().upper()
     mkt = (market or infer_market(t)).upper()
     store = archive_store or default_archive_store()
+    analysis_date = str(
+        trade_date or final_state.get("trade_date") or ""
+    ).strip()[:10]
 
     plan = store.get_active_plan(t, mkt)
     # Lazy migrate from calibration if archive empty
@@ -240,12 +260,23 @@ def apply_stance_continuity_to_state(
         except Exception:  # noqa: BLE001
             plan = None
 
+    price = current_price
+    if price is None or float(price) <= 0:
+        try:
+            from tradingagents.watchlist.snapshot import fetch_snapshot
+
+            snap = fetch_snapshot(t, market=mkt, max_headlines=0)
+            if snap.price and float(snap.price) > 0:
+                price = float(snap.price)
+        except Exception:  # noqa: BLE001
+            price = None
+
     delta = store.get_delta(t, mkt) if plan is not None else None
-    if plan is not None and (delta is None or current_price is not None):
+    if plan is not None:
         try:
             delta = compute_plan_delta(
                 plan,
-                current_price=current_price,
+                current_price=price,
                 price_hard_threshold_pct=price_hard_threshold_pct,
             )
             store.save_delta(delta)
@@ -264,6 +295,8 @@ def apply_stance_continuity_to_state(
         delta=delta,
         route_reason=route_reason,
         price_hard_threshold_pct=price_hard_threshold_pct,
+        plan_trade_date=plan.trade_date if plan else None,
+        analysis_trade_date=analysis_date or None,
     )
 
     if result.action == "clamped":
