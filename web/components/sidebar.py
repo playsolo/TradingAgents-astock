@@ -986,9 +986,9 @@ def render_sidebar() -> None:
                 all_entries = []
                 for sig_key in ("Buy", "Overweight", "Hold", "Underweight", "Sell", "N/A"):
                     all_entries.extend(groups.get(sig_key, []))
-                # get_history returns newest-first; groups preserve that order
-                # within each signal bucket, so interleaving by date is needed.
-                all_entries.sort(key=lambda e: e.get("date", ""), reverse=True)
+                # Sort by analysis time (newest-first), consistent with
+                # get_history() ordering and per-signal tabs.
+                all_entries.sort(key=lambda e: e.get("mtime", 0), reverse=True)
                 _render_history_page(all_entries, page_size, tab_key=name_key)
             else:
                 _render_history_page(groups.get(name_key.capitalize(), []), page_size, tab_key=name_key)

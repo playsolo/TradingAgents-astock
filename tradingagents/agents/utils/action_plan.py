@@ -143,20 +143,27 @@ def fallback_extract_action_plan(final_trade_decision: str) -> dict[str, Any] | 
     if not text.strip():
         return None
 
-    # 1. Rating: try English label first, then Chinese
+    # Isolate the final plan section first.  Without this, debate-prose labels
+    # like "最终评级：Overweight（从Buy降下来）" (bull-summary) shadow the
+    # PM's own "评级：Underweight（减持）" at the end of the document because
+    # re.search() finds the *first* match.
+    section = isolate_action_section(text)
+
+    # 1. Rating: try English label first, then Chinese (within the isolated section)
     rating = None
-    m = _RATING_RE.search(text)
+    m = _RATING_RE.search(section)
     if m:
         rating = m.group(1).strip().capitalize()
     if not rating or rating.lower() not in {"buy", "overweight", "hold", "underweight", "sell"}:
-        m = _CN_RATING_RE.search(text)
+        m = _CN_RATING_RE.search(section)
         if m:
             cn_label = m.group(1).strip()
             # First check if the label itself is an English rating word
             cn_lower = cn_label.lower()
             direct_map = {"buy": "Buy", "overweight": "Overweight", "hold": "Hold",
                           "underweight": "Underweight", "sell": "Sell"}
-            for en, en_label in direct_map.items():
+            # Longest-first to prevent "buy" matching inside "从Buy降下来"
+            for en, en_label in sorted(direct_map.items(), key=lambda kv: len(kv[0]), reverse=True):
                 if en in cn_lower:
                     rating = en_label
                     break

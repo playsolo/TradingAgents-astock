@@ -574,13 +574,17 @@ def extract_signal(state: dict[str, Any]) -> str:
         # Structured rating line — supports both English "Rating" and
         # Chinese "评级", with either ASCII or full-width colon:
         #   **评级：Hold**  /  **评级**：**Hold**  /  Rating: Hold
-        m = re.search(
+        # Use findall + last-match because the PM may include a debate-
+        # summary block listing each analyst's rating (e.g.
+        # "最终评级：Overweight（从Buy降下来）") *before* the PM's own
+        # "评级：Underweight（减持）" at the end of the document.
+        rating_matches = re.findall(
             r"(?:\*\*)?(?:Rating|评级)(?:\*\*)?\s*[：:]\s*\*?\*?([A-Za-z]+)",
             cleaned,
             flags=re.IGNORECASE,
         )
-        if m:
-            mapped = rating_map.get(m.group(1).upper())
+        if rating_matches:
+            mapped = rating_map.get(rating_matches[-1].upper())
             if mapped:
                 return mapped
 
@@ -589,9 +593,14 @@ def extract_signal(state: dict[str, Any]) -> str:
         # Leading ** is optional (LLMs often bold these labels):
         #   **最终评级**：**减持（Underweight）**
         #   **最终裁决：维持 Hold 评级**
-        m = re.search(r"(?:\*\*)?(?:最终评级|最终裁决)[\s\*]*[：:][\s\*]*([^\n*]+)", cleaned)
-        if m:
-            rating = parse_rating(m.group(1).strip(), default=_UNKNOWN)
+        # Same rationale as above: last match wins because the PM
+        # decision appears after any debate-summary labels.
+        final_match = re.findall(
+            r"(?:\*\*)?(?:最终评级|最终裁决)[\s\*]*[：:][\s\*]*([^\n*]+)",
+            cleaned,
+        )
+        if final_match:
+            rating = parse_rating(final_match[-1].strip(), default=_UNKNOWN)
             if rating:
                 return rating_to_sidebar_signal(rating)
 
