@@ -13,7 +13,7 @@ Two pieces verified:
 import os
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.prompt_values import ChatPromptValue
 
 from tradingagents.llm_clients.openai_client import (
@@ -112,6 +112,52 @@ class TestDeepSeekReasoningContent:
         payload = client._get_request_payload(prompt_value)
         assistant_dicts = [m for m in payload["messages"] if m.get("role") == "assistant"]
         assert assistant_dicts[0]["reasoning_content"] == "weighed bull case"
+
+    def test_cross_provider_tool_call_messages_get_empty_reasoning_content(self):
+        """Regression: DeepSeek V4 thinking mode 400 on resume after a
+        provider switch.
+
+        MiniMax M3 authors assistant messages with inline ``<think>`` blocks
+        and no ``reasoning_content`` field. When the run falls back to
+        deepseek-v4-flash (thinking mode by default), DeepSeek requires the
+        field on every assistant message that made tool calls — a missing
+        field returns HTTP 400
+        ("The `reasoning_content` in the thinking mode must be passed back").
+        """
+        client = self._client()  # deepseek-v4-flash
+        prior = AIMessage(
+            content="<think>Let me get the data.</think> 我先获取K线数据。",
+            tool_calls=[{"name": "get_stock_data", "args": {"ticker": "603629"}, "id": "call_1"}],
+            additional_kwargs={"refusal": None},
+        )
+        tool_msg = ToolMessage(content="stock data...", tool_call_id="call_1")
+        payload = client._get_request_payload(
+            [HumanMessage(content="603629"), prior, tool_msg]
+        )
+        assistant_dicts = [m for m in payload["messages"] if m.get("role") == "assistant"]
+        assert assistant_dicts, "assistant message missing from outgoing payload"
+        assert "reasoning_content" in assistant_dicts[0]
+        assert assistant_dicts[0]["reasoning_content"] == ""
+
+    def test_legacy_reasoner_not_filled(self):
+        """Legacy deepseek-reasoner uses the opposite rule — reasoning must
+        NOT be replayed — so cross-provider messages stay untouched."""
+        client = DeepSeekChatOpenAI(
+            model="deepseek-reasoner",
+            api_key="placeholder",
+            base_url="https://api.deepseek.com",
+        )
+        prior = AIMessage(
+            content="<think>Let me get the data.</think> 我先获取K线数据。",
+            tool_calls=[{"name": "get_stock_data", "args": {"ticker": "603629"}, "id": "call_1"}],
+            additional_kwargs={"refusal": None},
+        )
+        tool_msg = ToolMessage(content="stock data...", tool_call_id="call_1")
+        payload = client._get_request_payload(
+            [HumanMessage(content="603629"), prior, tool_msg]
+        )
+        assistant_dicts = [m for m in payload["messages"] if m.get("role") == "assistant"]
+        assert "reasoning_content" not in assistant_dicts[0]
 
 
 # ---------------------------------------------------------------------------

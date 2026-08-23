@@ -32,6 +32,14 @@ from tradingagents.agents.utils.signal_data_tools import (
     get_lockup_expiry,
     get_industry_comparison,
 )
+from tradingagents.agents.utils.hithink_tools import (
+    get_market_sentiment,
+    get_auction_signal,
+    get_financial_quality,
+    get_short_term_structure,
+    get_valuation_snapshot,
+    get_market_regime,
+)
 
 
 def get_language_instruction() -> str:

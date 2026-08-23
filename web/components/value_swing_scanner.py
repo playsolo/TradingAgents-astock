@@ -714,6 +714,13 @@ def _render_finished_result(record: dict, *, strategy: str = "value_swing"):
         rules=result.get("rules"),
         strategy=strategy,
     )
+    market_regime = result.get("market_regime")
+    if market_regime:
+        st.caption(f"市场环境：{market_regime}")
+    st.divider()
+    from web.components.scan_eval_panel import render_scan_eval_panel
+
+    render_scan_eval_panel(strategy=strategy)
 
 
 def _launch_keys(strategy: str) -> tuple[str, str]:

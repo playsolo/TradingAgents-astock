@@ -548,6 +548,19 @@ def extract_signal(state: dict[str, Any]) -> str:
     _short_snippet_max = 120
 
     _UNKNOWN = ""
+    # Always try parse_rating on final_trade_decision first — the PM's decision
+    # is authoritative and parse_rating already handles the full Chinese rating
+    # vocabulary.  Without this, the field loop below can match the Trader's
+    # execution proposal (e.g. "Action: Sell" in trader_investment_decision)
+    # before it ever reaches the PM's text, producing a signal that contradicts
+    # the PM's own rating (issue #300759 — PM=Underweight, Trader=Sell).
+    pm_text = state.get("final_trade_decision", "")
+    if pm_text:
+        pm_cleaned = re.sub(r"<think>.*?</think>", "", pm_text, flags=re.DOTALL)
+        pm_rating = parse_rating(pm_cleaned, default=_UNKNOWN)
+        if pm_rating:
+            return rating_to_sidebar_signal(pm_rating)
+
     for field in (
         "final_trade_decision",
         "trader_investment_decision",

@@ -26,6 +26,22 @@ _AUTH_RATING_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Bold rating-word heading: some PM runs produce a heading like
+#   # **Underweight（减持 / 低配）**
+#   **减持**
+# without a "Rating:" or "评级：" label prefix.  This pattern recognises the
+# five-tier vocabulary wrapped in bold at the beginning of a line and ranks it
+# as authoritative — below explicit Rating/最终评级 headers but above
+# loose bare-word anchors.
+_BOLD_RATING_RE = re.compile(
+    r"(?:^|\n)(?:#{0,3}\s*)?\*{1,2}\s*("
+    + "|".join(sorted(["Buy", "Overweight", "Hold", "Underweight", "Sell",
+                       "买入", "增持", "持有", "减持", "卖出",
+                       "买进", "中性", "观望", "维持", "清仓",
+                       "强烈买入", "强烈卖出"], key=len, reverse=True))
+    + r")"
+)
+
 # Loose fallback: any bare 评级 / Rating label. Matched per-line (no DOTALL)
 # so finditer yields every label and we can take the last.
 _RATING_ANCHOR_RE = re.compile(
@@ -101,6 +117,15 @@ def isolate_action_section(text: str) -> str:
     if auth:
         return cleaned[auth[-1].start() :].strip()
 
+    # Bold-rating heading: recognize patterns like
+    #   # **Underweight（减持 / 低配）** / **减持** / **Sell**
+    # that signal the PM's final decision without a "Rating:" label prefix.
+    # Prefer the LAST occurrence — the PM's own heading appears after any
+    # debate-summary labels.
+    bold = list(_BOLD_RATING_RE.finditer(cleaned))
+    if bold:
+        return cleaned[bold[-1].start() :].strip()
+
     loose = list(_RATING_ANCHOR_RE.finditer(cleaned))
     if loose:
         return cleaned[loose[-1].start() :].strip()
@@ -124,9 +149,12 @@ _SUMMARY_RE = re.compile(
     r"(?:\*\*)?Executive\s+Summary(?:\*\*)?\s*[：:]\s*(.+?)(?=\n\n|\n\*\*|\Z)",
     re.IGNORECASE | re.DOTALL,
 )
-# Chinese label fallback: the model may output 评级 in Chinese
+# Chinese label fallback: the model may output 评级 in Chinese.
+# NOTE: every \s in the original pattern was replaced with [ \t] so that
+# newlines are NEVER consumed — otherwise a bare "上调评级：\n  1. xxx买入席位"
+# can leak the following line's content into the capture group.
 _CN_RATING_RE = re.compile(
-    r"(?:评级|投资评级|最终评级|最终裁决)\s*\**\s*[：:]\s*\*?\*?\s*([^\n]+)",
+    r"(?:评级|投资评级|最终评级|最终裁决)[ \t]*\**[ \t]*[：:][ \t]*\*?\*?[ \t]*([^\n]+)",
 )
 
 
@@ -175,6 +203,32 @@ def fallback_extract_action_plan(final_trade_decision: str) -> dict[str, Any] | 
                 }
                 for cn, en in cn_map.items():
                     if cn in cn_label:
+                        rating = en
+                        break
+    if not rating:
+        # Final fallback: extract from a bold rating-word heading like
+        #   # **Underweight（减持 / 低配）**  /  **减持**  /  **Sell**
+        # These appear when the PM uses a heading format rather than
+        # a labeled "Rating: X" or "评级：X" line.
+        m = _BOLD_RATING_RE.search(section)
+        if m:
+            raw = m.group(1).strip()
+            raw_lower = raw.lower()
+            # English first
+            for en in ("buy", "overweight", "hold", "underweight", "sell"):
+                if en in raw_lower:
+                    rating = en.capitalize()
+                    break
+            if not rating:
+                cn_map = {
+                    "买入": "Buy", "买进": "Buy", "强烈买入": "Buy",
+                    "增持": "Overweight",
+                    "持有": "Hold", "中性": "Hold", "观望": "Hold", "维持": "Hold",
+                    "减持": "Underweight",
+                    "卖出": "Sell", "清仓": "Sell", "强烈卖出": "Sell",
+                }
+                for cn, en in cn_map.items():
+                    if cn in raw:
                         rating = en
                         break
     if not rating:

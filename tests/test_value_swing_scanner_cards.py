@@ -13,7 +13,7 @@ def _cand(**overrides):
         "code": "000651",
         "name": "格力电器",
         "signal_score": 5,
-        "score_max": 7,
+        "score_max": 9,
         "pe_ttm": 10.7,
         "pb": 2.13,
         "price": 39.83,
@@ -32,7 +32,7 @@ def test_card_html_shows_why_and_score_max():
     html = _candidate_card_html(_cand(name="Foo<script>x</script>"))
     assert "000651" in html
     assert "Foo&lt;script&gt;x&lt;/script&gt;" in html
-    assert "信号 5/7" in html
+    assert "信号 5/9" in html
     assert "入选原因" in html
     assert "站上MA20" in html
     assert "尚未深度分析" in html

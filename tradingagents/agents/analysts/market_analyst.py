@@ -1,8 +1,10 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
+    get_auction_signal,
     get_indicators,
     get_language_instruction,
+    get_market_regime,
     get_stock_data,
 )
 from tradingagents.dataflows.config import get_config
@@ -19,6 +21,8 @@ def create_market_analyst(llm):
         tools = [
             get_stock_data,
             get_indicators,
+            get_auction_signal,
+            get_market_regime,
         ]
 
         system_message = (
@@ -67,7 +71,9 @@ MACD 类：
 2. 近 {lookback} 日累计涨跌幅
 3. 近 5 日平均成交量 vs 近 20 日平均成交量（判断放量/缩量）
 4. 至少 3 个技术指标的当前数值和多空信号
-5. 关键支撑位和阻力位"""
+5. 关键支撑位和阻力位
+6. 集合竞价强弱（调用 get_auction_signal；未启用 HiThink 可省略，勿标缺失）
+7. 市场环境温度计（调用 get_market_regime：涨停/跌停/炸板数量；未启用可省略）"""
             + get_language_instruction()
         )
 

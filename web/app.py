@@ -26,6 +26,12 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv(_PROJECT_ROOT / ".env", override=True)
 # Re-assert after dotenv in case .env overwrote the pool.
 configure_arrow_memory_pool()
+try:
+    from tradingagents.auth.data_enhancement_config import apply_data_enhancement_to_process
+
+    apply_data_enhancement_to_process()
+except Exception:
+    pass
 warm_arrow_for_worker_threads()
 
 import streamlit as st  # noqa: E402

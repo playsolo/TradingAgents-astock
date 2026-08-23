@@ -69,6 +69,7 @@ def _build_config() -> dict:
             "fundamental_data": "a_stock",       # Options: a_stock, alpha_vantage, yfinance
             "news_data": "a_stock",              # Options: a_stock, alpha_vantage, yfinance
             "signal_data": "a_stock",            # A-stock only: topic attribution, capital flow, consensus
+            "hithink_enhanced": "hithink",       # HiThink optional structured metrics
         },
         # Tool-level configuration (takes precedence over category-level)
         "tool_vendors": {

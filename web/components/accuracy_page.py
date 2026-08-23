@@ -44,6 +44,7 @@ def render_accuracy_page() -> None:
         "结算窗口：1 / 5 / 20 个交易日。"
         "生产环境每日 **21:00（北京时间）** 由 systemd timer 自动结算；"
         "也可在此手动「立即结算」，或 CLI：`tradingagents accuracy`。"
+        "扫描候选的事后收益与因子归因见首页 **策略扫描 → 历史命中率**。"
     )
 
     cfg = _overlay_admin_config(dict(DEFAULT_CONFIG))

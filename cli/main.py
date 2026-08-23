@@ -1330,5 +1330,64 @@ def accuracy_cmd(
     )
 
 
+@app.command("scan-eval")
+def scan_eval_cmd(
+    strategy: str = typer.Option(
+        "value_swing",
+        "--strategy",
+        "-s",
+        help="Scan strategy: value_swing | growth_accel | turnaround",
+    ),
+    limit: int = typer.Option(40, "--limit", help="Max archived scans to load"),
+    compare: bool = typer.Option(
+        False,
+        "--compare",
+        help="Compare median 20d excess before/after cutoff date",
+    ),
+    cutoff: str = typer.Option(
+        "2026-08-23",
+        "--cutoff",
+        help="Rollout cutoff date (YYYY-MM-DD) when --compare",
+    ),
+):
+    """Evaluate archived scan candidates: forward returns and factor attribution."""
+    from tradingagents.evaluation.scan_backtest import (
+        compare_scan_periods,
+        evaluate_scan_history,
+    )
+
+    console.print(f"[bold]Scan evaluation[/bold] strategy={strategy}")
+    if compare:
+        report = compare_scan_periods(
+            strategy,
+            before_until=cutoff,
+            after_since=cutoff,
+            archive_limit=limit,
+        )
+        b = (report.get("before") or {}).get("aggregate", {}).get("20", {})
+        a = (report.get("after") or {}).get("aggregate", {}).get("20", {})
+        console.print(f"Before (≤{cutoff}): median excess 20d = {b.get('median_excess')}")
+        console.print(f"After (≥{cutoff}): median excess 20d = {a.get('median_excess')}")
+        console.print(f"Delta: {report.get('median_excess_20d_delta')}")
+        report = report.get("after") or report
+    else:
+        report = evaluate_scan_history(strategy, archive_limit=limit)
+
+    agg = report.get("aggregate") or {}
+    for h in sorted(agg.keys(), key=int):
+        cell = agg[h]
+        console.print(
+            f"  {h}d: median excess {cell.get('median_excess')} · "
+            f"hit rate {cell.get('hit_rate')} · n={cell.get('n')}"
+        )
+    ic = report.get("score_excess_ic_20d")
+    if ic is not None:
+        console.print(f"  score vs 20d excess IC: {ic:+.3f}")
+    console.print(
+        f"Scans: {report.get('evaluable_scans', 0)} · "
+        f"candidate rows: {report.get('total_candidate_rows', 0)}"
+    )
+
+
 if __name__ == "__main__":
     app()

@@ -203,6 +203,16 @@ def result_dict_from_scan(result: Any, *, strategy: str = STRATEGY_VALUE_SWING) 
     )
 
     score_max = l2_score_max()
+    market_regime = ""
+    try:
+        from tradingagents.strategies.hithink_scan import (
+            build_hithink_scan_cache,
+            market_regime_summary,
+        )
+
+        market_regime = market_regime_summary(build_hithink_scan_cache())
+    except Exception:
+        pass
     return {
         "ok": True,
         "strategy": STRATEGY_VALUE_SWING,
@@ -214,6 +224,7 @@ def result_dict_from_scan(result: Any, *, strategy: str = STRATEGY_VALUE_SWING) 
         "l2_passed": result.l2_passed,
         "rules": selection_rules_snapshot(),
         "score_max": score_max,
+        "market_regime": market_regime,
         "candidates": [
             {
                 "code": c.code,
@@ -228,6 +239,10 @@ def result_dict_from_scan(result: Any, *, strategy: str = STRATEGY_VALUE_SWING) 
                     round(c.revenue_growth * 100, 1) if c.revenue_growth else None
                 ),
                 "northbound_net_3d": c.northbound_net_3d,
+                "fund_flow_main_3d": c.fund_flow_main_3d,
+                "dragon_tiger_inst_net": c.dragon_tiger_inst_net,
+                "hithink_hot_rank": getattr(c, "hithink_hot_rank", None),
+                "market_regime_penalty": getattr(c, "market_regime_penalty", 0),
                 "above_ma20": c.above_ma20,
                 "near_ma250": c.near_ma250,
                 "news_found": c.news_found,

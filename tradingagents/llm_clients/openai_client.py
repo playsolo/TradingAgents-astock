@@ -75,7 +75,25 @@ class DeepSeekChatOpenAI(NormalizedChatOpenAI):
             reasoning = message.additional_kwargs.get("reasoning_content")
             if reasoning is not None:
                 message_dict["reasoning_content"] = reasoning
+            elif self._thinks_roundtrip() and message_dict.get("tool_calls"):
+                # DeepSeek V4 thinking mode requires `reasoning_content` on every
+                # assistant message that made tool calls, even when that message
+                # was authored by another provider (e.g. MiniMax M3) which never
+                # emitted the field. Otherwise the API returns 400 once the run
+                # falls back to DeepSeek mid-conversation. Empty string is the
+                # accepted placeholder per DeepSeek's thinking-mode docs.
+                message_dict["reasoning_content"] = ""
         return payload
+
+    def _thinks_roundtrip(self) -> bool:
+        """Whether the configured model enforces the thinking-mode round-trip.
+
+        V4 models (deepseek-v4-*) have thinking enabled by default and demand
+        the field back. Legacy models (deepseek-reasoner, deepseek-chat) use
+        the opposite rule — reasoning must *not* be replayed — so only V4
+        receives the empty-string fill for cross-provider messages.
+        """
+        return (self.model_name or "").startswith("deepseek-v4")
 
     def _create_chat_result(self, response, generation_info=None):
         chat_result = super()._create_chat_result(response, generation_info)

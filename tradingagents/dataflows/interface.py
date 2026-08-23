@@ -43,6 +43,14 @@ from .a_stock import (
     get_lockup_expiry as get_astock_lockup_expiry,
     get_industry_comparison as get_astock_industry_comparison,
 )
+from .hithink_data import (
+    get_hithink_market_sentiment,
+    get_hithink_auction_signal,
+    get_hithink_financial_quality,
+    get_hithink_short_term_structure,
+    get_hithink_valuation_snapshot,
+    get_hithink_market_regime,
+)
 
 # Configuration and routing logic
 from .config import get_config
@@ -90,11 +98,23 @@ TOOLS_CATEGORIES = {
             "get_lockup_expiry",
             "get_industry_comparison",
         ]
-    }
+    },
+    "hithink_enhanced": {
+        "description": "HiThink structured sentiment, auction, valuation, market regime (optional)",
+        "tools": [
+            "get_market_sentiment",
+            "get_auction_signal",
+            "get_financial_quality",
+            "get_short_term_structure",
+            "get_valuation_snapshot",
+            "get_market_regime",
+        ],
+    },
 }
 
 VENDOR_LIST = [
     "a_stock",
+    "hithink",
     "yfinance",
     "alpha_vantage",
 ]
@@ -174,6 +194,25 @@ VENDOR_METHODS = {
     },
     "get_industry_comparison": {
         "a_stock": get_astock_industry_comparison,
+    },
+    # hithink_enhanced (HiThink API — A-share only)
+    "get_market_sentiment": {
+        "hithink": get_hithink_market_sentiment,
+    },
+    "get_auction_signal": {
+        "hithink": get_hithink_auction_signal,
+    },
+    "get_financial_quality": {
+        "hithink": get_hithink_financial_quality,
+    },
+    "get_short_term_structure": {
+        "hithink": get_hithink_short_term_structure,
+    },
+    "get_valuation_snapshot": {
+        "hithink": get_hithink_valuation_snapshot,
+    },
+    "get_market_regime": {
+        "hithink": get_hithink_market_regime,
     },
 }
 

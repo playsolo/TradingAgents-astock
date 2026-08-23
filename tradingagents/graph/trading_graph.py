@@ -51,6 +51,12 @@ from tradingagents.agents.utils.agent_utils import (
     get_dragon_tiger_board,
     get_lockup_expiry,
     get_industry_comparison,
+    get_market_sentiment,
+    get_auction_signal,
+    get_financial_quality,
+    get_short_term_structure,
+    get_valuation_snapshot,
+    get_market_regime,
 )
 
 from .checkpointer import checkpoint_step, clear_checkpoint, get_checkpointer, thread_id
@@ -188,12 +194,16 @@ class TradingAgentsGraph:
                     get_stock_data,
                     # Technical indicators
                     get_indicators,
+                    get_auction_signal,
+                    get_market_regime,
                 ]
             ),
             "social": ToolNode(
                 [
                     # News tools for social media analysis
                     get_news,
+                    get_market_sentiment,
+                    get_market_regime,
                 ]
             ),
             "news": ToolNode(
@@ -212,12 +222,15 @@ class TradingAgentsGraph:
                     get_income_statement,
                     get_profit_forecast,
                     get_industry_comparison,
+                    get_valuation_snapshot,
+                    get_financial_quality,
                 ]
             ),
             "policy": ToolNode(
                 [
                     get_news,
                     get_global_news,
+                    get_market_regime,
                 ]
             ),
             "hot_money": ToolNode(
@@ -231,6 +244,9 @@ class TradingAgentsGraph:
                     get_fund_flow,
                     get_dragon_tiger_board,
                     get_industry_comparison,
+                    get_auction_signal,
+                    get_short_term_structure,
+                    get_market_regime,
                 ]
             ),
             "lockup": ToolNode(

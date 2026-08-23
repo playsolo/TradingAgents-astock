@@ -10,8 +10,8 @@ from tradingagents.strategies.value_swing import (
 
 
 def test_l2_score_max_counts_only_active_factors():
-    """休眠因子（主力/龙虎）不计入展示满分。"""
-    assert l2_score_max() == 7
+    """全部 L2 因子已启用时满分 9。"""
+    assert l2_score_max() == 9
     assert l2_score_max(only_active=False) == 9
 
 
@@ -20,10 +20,11 @@ def test_selection_rules_snapshot_exposes_thresholds_and_active_l2():
     assert "成交额" in snap["l0"][0] or any("3000" in x for x in snap["l0"])
     assert any("PE" in x for x in snap["l1a"])
     assert any("负债" in x for x in snap["l1b"])
-    assert snap["l2"]["score_max"] == 7
+    assert snap["l2"]["score_max"] == 9
     assert "站上MA20" in snap["l2"]["active"]
     assert "远期估值更便宜" in snap["l2"]["active"]
-    assert any("主力" in x or "龙虎" in x for x in snap["l2"]["dormant"])
+    assert "竞价抢筹" in " ".join(snap["l2"]["active"])
+    assert snap["l2"]["dormant"] == []
 
 
 def test_l2_factor_hits_marks_hit_and_dormant():
@@ -42,7 +43,7 @@ def test_l2_factor_hits_marks_hit_and_dormant():
     assert by_key["above_ma20"]["hit"] is True
     assert by_key["near_ma250"]["hit"] is False
     assert by_key["news_found"]["hit"] is True
-    assert by_key["fund_flow"]["active"] is False
+    assert by_key["fund_flow"]["active"] is True
     assert by_key["fund_flow"]["hit"] is False
 
 
@@ -75,13 +76,13 @@ def test_why_selected_line_lists_active_hits_only():
             "hot_topic_match": False,
             "concept_active": False,
             "northbound_net_3d": 2.0,
-            "fund_flow_main_3d": 1.0,  # dormant even if set
+            "fund_flow_main_3d": 1.0,
         }
     )
     assert "站上MA20" in line
     assert "接近年线" in line
     assert "个股新闻" in line or "新闻" in line
-    assert "主力" not in line
+    assert "竞价" in line
 
 
 def test_why_selected_line_includes_exp_penalty():

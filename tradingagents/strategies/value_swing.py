@@ -80,8 +80,8 @@ LANE_WATCH = "watch"                    # 回撤观察（超涨，默认不自�
 # （UI / 快照用公开结构；改名时同步 tests/test_value_swing_explain.py）
 L2_FACTOR_SPECS: tuple[tuple[str, str, bool], ...] = (
     ("northbound", "北向3日净流入>0", True),
-    ("fund_flow", "主力资金3日>0", False),
-    ("dragon_tiger", "龙虎榜机构净买≥100万", False),
+    ("fund_flow", "竞价抢筹(量比≥1.2且竞价涨)", True),
+    ("dragon_tiger", "龙虎榜机构净买≥100万", True),
     ("above_ma20", "站上MA20", True),
     ("near_ma250", "接近年线", True),
     ("news_found", "近3日新闻且涨幅/预期未透支", True),
@@ -117,6 +117,7 @@ def selection_rules_snapshot() -> dict[str, Any]:
             f"资产负债率 ≤ {_MAX_DEBT_RATIO * 100:g}%（科创板 ≤ {_MAX_DEBT_RATIO_STAR * 100:g}%）",
             f"20 日振幅 ≥ {_MIN_AMPLITUDE_20D * 100:g}%",
             f"深度校验上限 {_L1B_BATCH_SIZE} 只",
+            "HiThink 可用时 PS(TTM) ≤ 20 软过滤",
         ],
         "l2": {
             "score_max": l2_score_max(),
@@ -271,6 +272,12 @@ def why_selected_line(candidate: StockInfo | dict[str, Any]) -> str:
         ox = 0
     if ox < 0:
         hits.append(f"近5日超涨({ox})")
+    try:
+        mp = int(_cand_get(candidate, "market_regime_penalty", 0) or 0)
+    except (TypeError, ValueError):
+        mp = 0
+    if mp < 0:
+        hits.append("市场脆弱(炸板偏高)")
     lane = str(_cand_get(candidate, "lane", "") or "").strip().lower()
     if lane == LANE_WATCH:
         hits.append("回撤观察道")
@@ -370,6 +377,8 @@ class StockInfo:
     northbound_net_3d: float | None = None
     fund_flow_main_3d: float | None = None
     dragon_tiger_inst_net: float | None = None
+    hithink_hot_rank: int | None = None
+    market_regime_penalty: int = 0
     above_ma20: bool = False
     near_ma250: bool = False
     # L2 消息催化剂（新增）
@@ -612,6 +621,20 @@ def run_l1b_filter(
     passed: list[StockInfo] = []
     sample = stocks[:_L1B_BATCH_SIZE]
     total = len(sample)
+
+    ht_cache = None
+    try:
+        from tradingagents.strategies.hithink_scan import (
+            build_hithink_scan_cache,
+            value_swing_ps_ttm_too_high,
+        )
+
+        ht_cache = build_hithink_scan_cache(
+            [s.code for s in sample], fetch_valuations=True
+        )
+    except Exception:
+        logger.debug("HiThink L1b PS 批量加载跳过", exc_info=True)
+
     for idx, info in enumerate(sample, 1):
         if on_item is not None:
             on_item(info.code, info.name, idx, total)
@@ -644,6 +667,11 @@ def run_l1b_filter(
                 info.amplitude_20d = None
         if info.amplitude_20d is not None and info.amplitude_20d < _MIN_AMPLITUDE_20D:
             info.exclude_reason = f"振幅{info.amplitude_20d * 100:.1f}%"
+            continue
+
+        if ht_cache is not None and value_swing_ps_ttm_too_high(ht_cache, info.code):
+            ps = (ht_cache.valuations.get(info.code) or {}).get("ps_ttm")
+            info.exclude_reason = f"PS(TTM)={ps} 偏高"
             continue
 
         passed.append(info)
@@ -773,6 +801,12 @@ def _load_hot_stocks() -> dict[str, list[str]]:
                 tag = tag.strip()
                 if tag:
                     result.setdefault(tag, []).append(code)
+        try:
+            from tradingagents.strategies.hithink_scan import merge_hithink_hot_topics
+
+            result = merge_hithink_hot_topics(result)
+        except Exception:
+            logger.debug("HiThink 热榜合并失败", exc_info=True)
         _CACHED_HOT_STOCKS = (today, result)
         logger.info("消息催化剂: 加载 %d 个热股题材", len(result))
         return result
@@ -911,6 +945,7 @@ def run_l2_filter_impl(stocks: list[StockInfo], max_candidates: int = _MAX_CANDI
         # 超涨扣分
         info.overextend_delta = overextend_score_delta(info.ret_5d)
         s += int(info.overextend_delta)
+        s += int(getattr(info, "market_regime_penalty", 0) or 0)
         info.lane = assign_scan_lane(info)
         info.signal_score = max(0, s)
         scored.append(info)
@@ -970,6 +1005,21 @@ def run_l2_filter(
     hot_stocks = _load_hot_stocks()
     global_news = _load_global_news()
 
+    ht_cache = None
+    try:
+        from tradingagents.strategies.hithink_scan import (
+            auction_fund_flow_proxy,
+            build_hithink_scan_cache,
+            dragon_tiger_inst_net_wan,
+        )
+
+        ht_cache = build_hithink_scan_cache(
+            [s.code for s in to_process],
+            fetch_valuations=False,
+        )
+    except Exception:
+        logger.debug("HiThink L2 cache unavailable", exc_info=True)
+
     # 个股级别检测
     total = len(to_process)
     for idx, info in enumerate(to_process, 1):
@@ -978,6 +1028,15 @@ def run_l2_filter(
         logger.debug("L2 HTTP: %s %s", info.code, info.name)
 
         info.northbound_net_3d = northbound_val
+        if ht_cache is not None:
+            info.market_regime_penalty = ht_cache.market_penalty
+            info.hithink_hot_rank = ht_cache.hot_rank(info.code)
+            info.dragon_tiger_inst_net = dragon_tiger_inst_net_wan(ht_cache, info.code)
+            info.fund_flow_main_3d = auction_fund_flow_proxy(ht_cache, info.code)
+            if ht_cache.is_skyrocket(info.code):
+                info.hot_topic_match = True
+            elif info.hithink_hot_rank is not None and info.hithink_hot_rank <= 30:
+                info.hot_topic_match = True
         info.above_ma20, info.near_ma250 = _safe_call(_check_ma_support, info.code, default=(False, False))
 
         # 近5日涨幅：超涨门控与新闻计分共用（始终拉取）
@@ -995,9 +1054,12 @@ def run_l2_filter(
         if snap is not None:
             apply_gate_fields(info, score_value_expectation(pe_ttm=info.pe_ttm, snap=snap))
 
-        # 以下暂不启用（东财 SSL 代理问题）
-        # info.fund_flow_main_3d = _safe_call(_check_fund_flow_3d, info.code)
-        # info.dragon_tiger_inst_net = _safe_call(_check_dragon_tiger_institution, info.code)
+        # 东财资金流/龙虎榜爬虫路径已由 HiThink 批量缓存替代（见 hithink_scan）
+        if ht_cache is None:
+            info.fund_flow_main_3d = _safe_call(_check_fund_flow_3d, info.code)
+            info.dragon_tiger_inst_net = _safe_call(
+                _check_dragon_tiger_institution, info.code
+            )
 
     return run_l2_filter_impl(stocks, max_candidates=max_candidates)
 
@@ -1019,6 +1081,13 @@ def run_value_swing_scan(
     scan_date = datetime.now().strftime("%Y-%m-%d")
     result = ScanResult(scan_date=scan_date)
     logger.info("═══ 价值波段扫描 %s ═══", scan_date)
+
+    try:
+        from tradingagents.strategies.hithink_scan import clear_hithink_scan_cache
+
+        clear_hithink_scan_cache()
+    except Exception:
+        pass
 
     result.total_stocks = len(_get_all_cn_codes())
     prog = _ScanProgress(progress_cb, result.total_stocks)

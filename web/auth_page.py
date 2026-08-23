@@ -624,6 +624,49 @@ def render_admin_panel() -> None:
     with st.expander("⚙️ 模型配置（全局）", expanded=False):
         _render_admin_model_config()
 
+    with st.expander("📡 数据增强（HiThink API）", expanded=False):
+        _render_admin_data_enhancement()
+
+
+def _render_admin_data_enhancement() -> None:
+    from tradingagents.auth.data_enhancement_config import (
+        load_data_enhancement_config,
+        save_data_enhancement_config,
+    )
+    from tradingagents.dataflows.hithink_client import is_hithink_enabled
+
+    cfg = load_data_enhancement_config()
+    has_key = bool(str(cfg.get("hithink_api_key") or "").strip())
+    st.caption(
+        "配置同花顺 Financial-API Key，用于情绪/竞价/龙虎榜等结构化增量。"
+        "也可通过环境变量 ``HITHINK_FINANCE_API_KEY`` / ``HITHINK_ENABLED`` 设置。"
+    )
+    if is_hithink_enabled():
+        st.success("当前进程：HiThink 已启用")
+    elif has_key:
+        st.warning("已保存 Key，但未勾选启用")
+    else:
+        st.info("未配置 Key")
+
+    with st.form("admin_data_enhancement_form", clear_on_submit=False):
+        enabled = st.checkbox(
+            "启用数据增强模式",
+            value=bool(cfg.get("hithink_enabled")),
+        )
+        key_input = st.text_input(
+            "API Key",
+            value="",
+            type="password",
+            placeholder="留空表示不修改已保存的 Key",
+        )
+        if st.form_submit_button("保存", type="primary"):
+            save_data_enhancement_config(
+                hithink_enabled=enabled,
+                hithink_api_key=key_input if key_input.strip() else None,
+            )
+            st.success("已保存并在当前 Web 进程生效")
+            st.rerun()
+
 
 def _force_change_password(mgr: UserManager, username: str, new_password: str) -> None:
     """Admin force-set a user's password (no old-password check)."""

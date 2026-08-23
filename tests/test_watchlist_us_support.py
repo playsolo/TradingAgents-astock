@@ -97,7 +97,13 @@ def test_observe_item_runs_for_us(monkeypatch, tmp_path):
         },
     )
 
-    alerts = observe_item(item, store=store, llm=None, force=True)
+    alerts = observe_item(
+        item,
+        store=store,
+        llm=None,
+        force=True,
+        now=datetime(2026, 7, 14, 10, 0),
+    )
     assert alerts == []
     refreshed = store.get("MSFT")
     assert refreshed is not None

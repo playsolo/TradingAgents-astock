@@ -3,12 +3,13 @@ from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
     get_balance_sheet,
     get_cashflow,
+    get_financial_quality,
     get_fundamentals,
     get_income_statement,
     get_industry_comparison,
-    get_insider_transactions,
     get_language_instruction,
     get_profit_forecast,
+    get_valuation_snapshot,
 )
 from tradingagents.dataflows.config import get_config
 
@@ -25,6 +26,8 @@ def create_fundamentals_analyst(llm):
             get_income_statement,
             get_profit_forecast,
             get_industry_comparison,
+            get_valuation_snapshot,
+            get_financial_quality,
         ]
 
         system_message = (
@@ -42,6 +45,8 @@ def create_fundamentals_analyst(llm):
             "\n- `get_cashflow`：现金流量表详细数据"
             "\n- `get_income_statement`：利润表详细数据"
             "\n- `get_industry_comparison(ticker, curr_date)`：获取全行业横向对比（90个行业涨跌幅/成交额/净流入排名，用于估值对标和行业定位）"
+            "\n- `get_valuation_snapshot(ticker)`：HiThink 估值快照（PE TTM/MRQ、PB、PS、PCF）"
+            "\n- `get_financial_quality(ticker)`：HiThink 财报质量（现金转化率、FCF率、应计利润率等）"
             "\n\n撰写详尽的基本面研究报告，给出具体数据支撑的分析结论（仅供研究参考，不构成投资建议）。报告末尾附 Markdown 表格汇总关键财务指标和估值水平。"
             "\n\n📋 必采清单 — 以下数据点必须出现在报告中；工具返回 "
             "「No analyst coverage / 无公开一致预期覆盖」是有效结论，"
@@ -55,7 +60,9 @@ def create_fundamentals_analyst(llm):
             "\n4. ROE"
             "\n5. 资产负债率"
             "\n6. 经营性现金流与净利润比值"
-            "\n7. 机构一致预期 EPS（调用 get_profit_forecast；无覆盖写 EmptyOK 表述）"
+            "\n7. PS（市销率）、PCF（市现率，调用 get_valuation_snapshot；未启用 HiThink 时用 get_fundamentals 已有 PE/PB）"
+            "\n8. 现金转化率或 FCF 率（调用 get_financial_quality；未启用时可用三表自行估算）"
+            "\n9. 机构一致预期 EPS（调用 get_profit_forecast；无覆盖写 EmptyOK 表述）"
             + get_language_instruction()
         )
 

@@ -3,6 +3,7 @@ from tradingagents.agents.utils.agent_utils import (
     analysis_date_instruction,
     build_instrument_context,
     clock_from_state,
+    get_auction_signal,
     get_concept_blocks,
     get_dragon_tiger_board,
     get_fund_flow,
@@ -10,8 +11,10 @@ from tradingagents.agents.utils.agent_utils import (
     get_industry_comparison,
     get_insider_transactions,
     get_language_instruction,
+    get_market_regime,
     get_news,
     get_northbound_flow,
+    get_short_term_structure,
     get_stock_data,
 )
 from tradingagents.dataflows.config import get_config
@@ -34,6 +37,9 @@ def create_hot_money_tracker(llm):
             get_fund_flow,
             get_dragon_tiger_board,
             get_industry_comparison,
+            get_auction_signal,
+            get_short_term_structure,
+            get_market_regime,
         ]
 
         system_message = (
@@ -61,6 +67,9 @@ def create_hot_money_tracker(llm):
             "\n- `get_fund_flow(ticker, curr_date)`：获取个股主力/散户资金流向（分钟级实时+20日历史，超大单/大单/中单/小单净流入）"
             "\n- `get_dragon_tiger_board(ticker, curr_date)`：获取龙虎榜上榜记录、买卖席位明细（营业部）、机构参与情况"
             "\n- `get_industry_comparison(ticker, curr_date)`：获取全行业横向对比（90个行业涨跌幅/成交额/净流入排名，判断板块轮动）"
+            "\n- `get_auction_signal(ticker)`：集合竞价涨跌幅/量比/换手（HiThink）"
+            "\n- `get_short_term_structure(ticker, curr_date)`：涨停池/炸板/连板/龙虎榜机构游资拆分（HiThink）"
+            "\n- `get_market_regime(curr_date)`：全市场涨停/跌停/炸板数与热榜（HiThink）"
             "\n\n撰写详细的资金面分析报告，给出资金面总体判断（主力流入/主力流出/资金博弈/无明显信号）和短期资金面信号研判（仅供研究参考，不构成投资建议）。报告末尾附 Markdown 表格汇总量价信号、资金动向和结论。"
             "\n\n📋 必采清单 — 以下数据点必须出现在报告中；"
             "行业全市场排名失败但有个股板块兜底、或资金流仅有分时/异源日度，"
@@ -71,7 +80,9 @@ def create_hot_money_tracker(llm):
             "\n3. 个股主力资金净流入（超大单 + 大单；可用分时或日度）"
             "\n4. 所属概念板块及当日板块涨幅（全市场行业榜不可用时用个股板块）"
             "\n5. 当日是否上榜热门股及题材归因（未上榜写「未上榜」，勿标缺失）"
-            "\n6. 资金面总体判断"
+            "\n6. 集合竞价量比/涨跌幅（get_auction_signal；未启用 HiThink 可省略）"
+            "\n7. 短线结构：是否在涨停池/龙虎榜机构净额（get_short_term_structure）"
+            "\n8. 资金面总体判断"
             + analysis_date_instruction(current_date, now=clock_from_state(state))
             + get_language_instruction()
         )

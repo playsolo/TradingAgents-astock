@@ -54,6 +54,17 @@ _CN_LABEL_RE = re.compile(
 # Bare Chinese rating term anywhere (last-resort fallback).
 _CN_TERM_RE = re.compile(_CN_ALT)
 
+# Negation guard for step-4 bare-keyword fallback: a negated buy/sell term
+# (e.g. "不宜买入", "不建议买入", "并非买入信号", "不是卖出时机") must NOT
+# be counted as a rating signal.  Check the ~8 characters immediately preceding
+# the matched rating term for any negation word (longest-first so "不宜" beats "不").
+_NEGATION_WORDS = re.compile(
+    "|".join(sorted([
+        "不宜", "不可", "不应", "不建议", "无需", "不是", "并非", "未有", "无法",
+        "切勿", "切忌", "杜绝", "严禁", "禁止", "避免", "不", "无", "勿", "忌",
+    ], key=len, reverse=True))
+)
+
 
 def parse_rating(text: str, default: str = "Hold") -> str:
     """Heuristically extract a 5-tier rating from English or Chinese prose.
@@ -77,16 +88,23 @@ def parse_rating(text: str, default: str = "Hold") -> str:
     if m:
         return _CN_RATING_MAP[m.group(1)]
 
-    # 3. Bare English rating word
+    # 3. Bare English rating word — extract the first alphabetic run from
+    #    each token so "**Underweight（减持" and "Underweight，不加仓" are
+    #    both recognised as "underweight".
     for line in text.splitlines():
         for word in line.lower().split():
-            clean = word.strip("*:.,")
-            if clean in _RATING_SET:
-                return clean.capitalize()
+            m = re.match(r"^[^a-z]*([a-z]+)", word)
+            if m and m.group(1) in _RATING_SET:
+                return m.group(1).capitalize()
 
-    # 4. Bare Chinese rating term (last resort; leftmost, longest at that spot)
-    m = _CN_TERM_RE.search(text)
-    if m:
+    # 4. Bare Chinese rating term (last resort; leftmost, longest at that spot,
+    #    but skip negated matches like "不宜买入" or "不是卖出信号").
+    #    Check the ~8 chars immediately before the match for negation words.
+    for m in _CN_TERM_RE.finditer(text):
+        window_start = max(0, m.start() - 8)
+        window = text[window_start : m.start()]
+        if _NEGATION_WORDS.search(window):
+            continue
         return _CN_RATING_MAP[m.group(0)]
 
     return default

@@ -1,5 +1,5 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from tradingagents.agents.utils.agent_utils import build_instrument_context, get_language_instruction, get_news
+from tradingagents.agents.utils.agent_utils import build_instrument_context, get_language_instruction, get_market_regime, get_market_sentiment, get_news
 from tradingagents.dataflows.config import get_config
 
 
@@ -10,6 +10,8 @@ def create_social_media_analyst(llm):
 
         tools = [
             get_news,
+            get_market_sentiment,
+            get_market_regime,
         ]
 
         system_message = (
@@ -20,14 +22,17 @@ def create_social_media_analyst(llm):
             "\n- **情绪指标**：关注以下情绪信号 - 连续涨停后的追涨情绪、业绩暴雷后的恐慌抛售、机构调研后的预期变化、热门概念炒作的跟风程度。"
             "\n- **反向指标**：当市场情绪一致性过高（极度乐观或极度悲观）时，往往是反转信号。散户一致看多可能是阶段顶部。"
             "\n- **时间维度**：区分短期情绪波动（1-3 天，由单一事件驱动）和中期情绪趋势（1-4 周，由基本面变化驱动）。"
-            "\n\n请使用 `get_news(ticker, start_date, end_date)` 工具获取公司相关新闻和市场讨论，ticker 必须使用目标股票的 6 位代码。从新闻内容中推断市场情绪方向、强度和可能的转折点。"
+            "\n\n请优先调用 `get_market_sentiment(ticker, curr_date)` 获取 HiThink 结构化情绪指标"
+            "（热榜 rank/heat、飙升榜、异动标签）；再调用 `get_news` 补充新闻文本。"
+            "可调用 `get_market_regime` 获取全市场涨停/热榜温度计。ticker 必须使用 6 位代码。"
             "\n\n撰写详细的市场情绪分析报告，包含情绪评分（极度悲观/悲观/中性/乐观/极度乐观）和趋势判断。报告末尾附 Markdown 表格汇总情绪信号和结论。"
             "\n\n📋 必采清单 — 以下数据点必须出现在报告中，无法获取时标注 [数据缺失: xxx]："
             "\n1. 新闻检索条数和时间范围"
-            "\n2. 正面/负面/中性新闻比例"
-            "\n3. 排名前 3 的舆情主题"
-            "\n4. 情绪评分（极度悲观/悲观/中性/乐观/极度乐观）"
-            "\n5. 情绪趋势变化方向（升温/降温/平稳）"
+            "\n2. 热榜排名/热度/排名变化（get_market_sentiment；未启用 HiThink 时用新闻比例代替）"
+            "\n3. 正面/负面/中性新闻比例"
+            "\n4. 排名前 3 的舆情主题（含异动 keyword）"
+            "\n5. 情绪评分（极度悲观/悲观/中性/乐观/极度乐观）"
+            "\n6. 情绪趋势变化方向（升温/降温/平稳）"
             + get_language_instruction()
         )
 
