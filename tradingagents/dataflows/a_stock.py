@@ -1077,7 +1077,9 @@ def get_stock_data(
         logger.warning("mootdx K-line failed for %s: %s, trying sina HTTP fallback", code, e)
         # Fallback: Sina direct HTTP API
         try:
-            df = _sina_kline_fallback(code, start_date, end_date)
+            # Fetch the full available history (not just the requested window) so
+            # the first bar of the window still carries a real PrevClose/ChangePct.
+            df = _sina_kline_fallback(code)
             if df.empty:
                 return "K线数据获取失败：mootdx和新浪备用源均不可用，请检查网络连接"
             data_source = "sina HTTP (fallback)"
@@ -1087,6 +1089,14 @@ def get_stock_data(
     df, supplemented = _supplement_stale_ohlcv_with_sina(code, df, end_date, start_date)
     if supplemented:
         data_source = f"{data_source} + sina HTTP supplement"
+
+    # Sort chronologically and derive PrevClose + official daily change BEFORE the
+    # window filter, so every row in the window shows the true close-to-close
+    # (vs previous trading day) change even when that previous day lies outside
+    # the requested range.
+    df = df.sort_values("Date").reset_index(drop=True)
+    df["PrevClose"] = df["Close"].shift(1)
+    df["ChangePct"] = ((df["Close"] - df["PrevClose"]) / df["PrevClose"] * 100).round(2)
 
     # Filter by date range
     start_dt = pd.to_datetime(start_date)
@@ -1099,18 +1109,23 @@ def get_stock_data(
             f"between {start_date} and {end_date}"
         )
 
-    for col in ["Open", "High", "Low", "Close"]:
+    for col in ["Open", "High", "Low", "Close", "PrevClose"]:
         if col in df.columns:
             df[col] = df[col].round(2)
 
     df["Date"] = df["Date"].dt.strftime("%Y-%m-%d")
-    csv_out = df[["Date", "Open", "High", "Low", "Close", "Volume"]].to_csv(
+    csv_out = df[["Date", "Open", "High", "Low", "Close", "ChangePct", "Volume", "PrevClose"]].to_csv(
         index=False
     )
 
     header = f"# Stock data for {code} (A-stock) from {start_date} to {end_date}\n"
     header += f"# Total records: {len(df)}\n"
     header += f"# Data source: {data_source}\n"
+    header += "# Columns: Date,Open,High,Low,Close,ChangePct,Volume,PrevClose\n"
+    header += (
+        "# ChangePct = official daily change vs previous trading day close (%) — "
+        "当日涨跌幅请直接引用该列，勿用 (Close-Open)/Open 代替。\n"
+    )
     header += (
         f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
     )
